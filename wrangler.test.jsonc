@@ -1,0 +1,23 @@
+{
+  "$schema": "./node_modules/wrangler/config-schema.json",
+  "name": "mempersist-test",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-08-14",
+  "compatibility_flags": ["nodejs_compat", "global_fetch_strictly_public"],
+  "vars": {
+    "ENVIRONMENT": "development",
+    "ACTIVE_INDEX_GENERATION": "bge-m3-chat-turn-v1",
+    "RECENT_UNINDEXED_MAX_REVISIONS": 8,
+    "RECENT_UNINDEXED_MAX_AGE_SECONDS": 86400,
+    "RECENT_UNINDEXED_MAX_MESSAGES": 200,
+  },
+  "d1_databases": [{ "binding": "MEMORY_DB" }],
+  "r2_buckets": [{ "binding": "MEMORY_BUCKET" }],
+  "kv_namespaces": [{ "binding": "OAUTH_KV" }],
+  "queues": {
+    "producers": [
+      { "binding": "IMPORT_QUEUE", "queue": "mempersist-test-import" },
+      { "binding": "INDEX_QUEUE", "queue": "mempersist-test-index" },
+    ],
+  },
+}

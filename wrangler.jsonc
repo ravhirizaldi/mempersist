@@ -1,0 +1,84 @@
+{
+  "$schema": "./node_modules/wrangler/config-schema.json",
+  "name": "mempersist",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-08-14",
+  "compatibility_flags": ["nodejs_compat", "global_fetch_strictly_public"],
+  "vars": {
+    "ENVIRONMENT": "production",
+    "ACTIVE_INDEX_GENERATION": "bge-m3-chat-turn-v1",
+    "RECENT_UNINDEXED_MAX_REVISIONS": 8,
+    "RECENT_UNINDEXED_MAX_AGE_SECONDS": 86400,
+    "RECENT_UNINDEXED_MAX_MESSAGES": 200,
+  },
+  "d1_databases": [
+    {
+      "binding": "MEMORY_DB",
+      "database_name": "mempersist-catalog",
+      "database_id": "bd4cd679-7fb4-4c57-812b-3b018383bd5c",
+      "migrations_dir": "migrations",
+    },
+  ],
+  "r2_buckets": [
+    {
+      "binding": "MEMORY_BUCKET",
+      "bucket_name": "mempersist-memory",
+    },
+  ],
+  "ai": {
+    "binding": "AI",
+    "remote": true,
+  },
+  "vectorize": [
+    {
+      "binding": "MEMORY_VECTOR",
+      "index_name": "mempersist-bge-m3-v1",
+      "remote": true,
+    },
+  ],
+  "queues": {
+    "producers": [
+      {
+        "binding": "IMPORT_QUEUE",
+        "queue": "mempersist-import",
+      },
+      {
+        "binding": "INDEX_QUEUE",
+        "queue": "mempersist-index",
+      },
+    ],
+    "consumers": [
+      {
+        "queue": "mempersist-import",
+        "max_batch_size": 5,
+        "max_batch_timeout": 5,
+        "max_retries": 8,
+        "dead_letter_queue": "mempersist-dead-letter",
+      },
+      {
+        "queue": "mempersist-index",
+        "max_batch_size": 5,
+        "max_batch_timeout": 5,
+        "max_retries": 8,
+        "dead_letter_queue": "mempersist-dead-letter",
+      },
+    ],
+  },
+  "observability": {
+    "enabled": true,
+    "logs": {
+      "enabled": true,
+      "head_sampling_rate": 1,
+    },
+    "traces": {
+      "enabled": true,
+      "head_sampling_rate": 0.05,
+    },
+  },
+  "kv_namespaces": [
+    {
+      "binding": "OAUTH_KV",
+      "id": "0a93380a7afc43129dba0a7040591a2a",
+    },
+  ],
+}

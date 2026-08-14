@@ -1,0 +1,34 @@
+# MCP
+
+Mempersist uses the official MCP TypeScript SDK v2 and Cloudflare Agents `createMcpHandler` with stateless Streamable HTTP. A fresh server is created per request; no Durable Object or SSE compatibility lane exists.
+
+Endpoint: `https://mempersist.nextostaging.net/mcp`. Browser CORS is disabled. The server caps serialized tool output at 64 KiB and asks callers to narrow pages rather than returning broken/truncated JSON.
+
+## Authentication
+
+- ChatGPT and other interactive MCP clients use OAuth 2.1 authorization code with PKCE S256.
+- OAuth discovery, token exchange, refresh, revocation, Client ID Metadata Documents, and dynamic client registration are provided by Cloudflare's official Workers OAuth package.
+- The consent page asks the single owner for `MEMORY_API_TOKEN`; that key is validated once and is not returned to the client.
+- Developer MCP clients may continue sending `Authorization: Bearer <MEMORY_API_TOKEN>` directly.
+- The single V1 scope is `memory`, covering search, retrieval, and intentional writes.
+
+To connect ChatGPT:
+
+1. Enable Developer mode in ChatGPT settings.
+2. Add a custom MCP app/plugin with endpoint `https://mempersist.nextostaging.net/mcp`.
+3. Complete the OAuth prompt and enter the owner access key on the MemPersist page.
+4. Review the discovered tools, then enable the app for a conversation.
+
+Do not paste the owner key into ChatGPT's app configuration. OAuth discovery is exposed at `/.well-known/oauth-protected-resource/mcp` and `/.well-known/oauth-authorization-server`.
+
+| Tool                        | Important inputs                               | Result                                                |
+| --------------------------- | ---------------------------------------------- | ----------------------------------------------------- |
+| `memory_search`             | query, limit 1–20, optional namespace          | compact ranked chunk references and degradation state |
+| `memory_get_context`        | chunk ID, before/after 0–10                    | canonical matched ranges and surrounding messages     |
+| `memory_get_conversation`   | conversation ID, branch, offset, limit         | paginated active timeline or all graph nodes          |
+| `memory_list_conversations` | cursor, limit, namespace                       | metadata only                                         |
+| `memory_store`              | title, namespace, 1–1000 messages              | durable revision plus queued index job                |
+| `memory_append`             | conversation ID, base revision, 1–100 messages | optimistic durable revision plus queued index job     |
+| `memory_import_status`      | import UUID                                    | progress, duplicate, or failure metadata              |
+
+The intended client pattern is search → select → get context. Administrative retry/reindex/integrity operations remain HTTP/CLI only so ordinary LLM tool calls cannot trigger expensive maintenance accidentally.

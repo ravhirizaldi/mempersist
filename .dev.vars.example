@@ -1,0 +1,3 @@
+# Copy to .dev.vars for local development. .dev.vars is ignored.
+MEMORY_API_TOKEN=replace-with-a-long-random-token
+

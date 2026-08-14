@@ -1,0 +1,52 @@
+{
+  "name": "mempersist",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Cloudflare-native persistent conversation memory with rebuildable hybrid retrieval.",
+  "license": "UNLICENSED",
+  "scripts": {
+    "dev": "wrangler dev",
+    "types:bindings": "wrangler types",
+    "types:bindings:check": "wrangler types --check",
+    "typecheck": "tsc --noEmit",
+    "lint": "eslint .",
+    "format": "prettier --write .",
+    "format:check": "prettier --check .",
+    "test": "vitest run",
+    "test:integration": "vitest run --config vitest.integration.config.ts",
+    "test:watch": "vitest",
+    "verify": "yarn format:check && yarn types:bindings:check && yarn lint && yarn typecheck && yarn test && yarn test:integration && yarn deploy:dry-run",
+    "db:migrate:local": "wrangler d1 migrations apply mempersist-catalog --local",
+    "db:migrate:remote": "wrangler d1 migrations apply mempersist-catalog --remote",
+    "deploy:dry-run": "wrangler deploy --dry-run",
+    "deploy": "wrangler deploy",
+    "admin": "tsx cli/mempersist.ts",
+    "import:chatgpt": "tsx cli/mempersist.ts import",
+    "import:status": "tsx cli/mempersist.ts status",
+    "retry": "tsx cli/mempersist.ts retry",
+    "reindex": "tsx cli/mempersist.ts reindex",
+    "verify:integrity": "tsx cli/mempersist.ts verify",
+    "retrieval:evaluate": "vitest run tests/retrieval.test.ts"
+  },
+  "devDependencies": {
+    "@cloudflare/vitest-pool-workers": "^0.21.3",
+    "@eslint/js": "^10.0.1",
+    "@types/node": "^26.2.0",
+    "eslint": "^10.8.1",
+    "prettier": "^3.9.6",
+    "tsx": "^4.23.12",
+    "typescript": "^6.0.0",
+    "typescript-eslint": "^8.67.0",
+    "vitest": "^4.1.10",
+    "wrangler": "^4.123.0"
+  },
+  "dependencies": {
+    "@cloudflare/workers-oauth-provider": "^0.10.3",
+    "@modelcontextprotocol/client": "^2.0.0",
+    "@modelcontextprotocol/server": "^2.0.0",
+    "agents": "^0.20.1",
+    "hono": "^4.13.2",
+    "zod": "^4.4.3"
+  }
+}
