@@ -10,6 +10,36 @@ export const RECENT_UNINDEXED_DEFAULTS = {
   maxMessages: 200,
 } as const;
 
+const RANKING_STRATEGY = "normalized-weighted-v1";
+
+const SEMANTIC_MIN_SCORE = 0.35;
+const RRF_K = 60;
+const QUERY_STOP_WORDS = new Set([
+  "a",
+  "an",
+  "and",
+  "are",
+  "at",
+  "be",
+  "for",
+  "from",
+  "how",
+  "in",
+  "is",
+  "of",
+  "on",
+  "or",
+  "the",
+  "to",
+  "what",
+  "when",
+  "where",
+  "which",
+  "who",
+  "why",
+  "with",
+]);
+
 export type SearchEnv = Pick<AppEnv, "MEMORY_DB" | "MEMORY_BUCKET" | "ACTIVE_INDEX_GENERATION"> &
   EmbeddingEnv & {
     MEMORY_VECTOR: Pick<VectorizeIndex, "query">;
@@ -25,9 +55,28 @@ type IndexingStatus = "queued" | "processing" | "failed";
 interface RankedCandidate {
   chunkId: string;
   lexicalRank?: number;
-  semanticRank?: number;
   semanticScore?: number;
-  recentRank?: number;
+  recentScore?: number;
+}
+
+interface RankingDebug {
+  strategy: typeof RANKING_STRATEGY;
+  lexicalScore: number;
+  semanticScore: number;
+  recentCanonicalScore: number;
+  sourceConfidence: number;
+  sourceAgreementBoost: number;
+  exactMatchBoost: number;
+  tokenOverlapBoost: number;
+  recencyBoost: number;
+  finalScore: number;
+}
+
+interface RankedResult {
+  chunkId: string;
+  score: number;
+  sources: SearchSource[];
+  debug: RankingDebug;
 }
 
 interface ChunkRow {
@@ -98,14 +147,21 @@ function normalizeText(value: string): string {
   return value.trim().replaceAll(/\s+/gu, " ").toLocaleLowerCase();
 }
 
+function tokenize(value: string): string[] {
+  return (value.match(/[\p{L}\p{N}][\p{L}\p{N}._:@/-]*/gu) ?? [])
+    .map((term) => term.replace(/[._:@/-]+$/u, "").toLocaleLowerCase())
+    .filter(Boolean);
+}
+
 function extractLexicalTokens(value: string, limit?: number): string[] {
-  const terms = value.match(/[\p{L}\p{N}][\p{L}\p{N}._:@/-]*/gu) ?? [];
-  const tokens = [
-    ...new Set(
-      terms.map((term) => term.replace(/[._:@/-]+$/u, "").toLocaleLowerCase()).filter(Boolean),
-    ),
-  ];
+  const tokens = [...new Set(tokenize(value))];
   return limit === undefined ? tokens : tokens.slice(0, limit);
+}
+
+function meaningfulTokens(value: string): string[] {
+  const tokens = lexicalTokens(value);
+  const meaningful = tokens.filter((token) => !QUERY_STOP_WORDS.has(token));
+  return meaningful.length ? meaningful : tokens;
 }
 
 export function lexicalTokens(value: string): string[] {
@@ -119,53 +175,128 @@ export function queryTerms(query: string): string {
 }
 
 export function recentLexicalScore(query: string, text: string): number | null {
-  const queryTokens = lexicalTokens(query);
+  const queryTokens = meaningfulTokens(query);
   if (!queryTokens.length) return null;
   const normalizedQuery = normalizeText(query);
   const normalizedText = normalizeText(text);
   const exact = normalizedText.includes(normalizedQuery);
-  const textTokens = new Set(extractLexicalTokens(normalizedText));
+  const textTokens = new Set(tokenize(normalizedText));
   const overlap = queryTokens.filter((term) => textTokens.has(term)).length;
   if (!exact && overlap < Math.min(2, queryTokens.length)) return null;
-  return (exact ? 2 : 0) + overlap / queryTokens.length;
+  return exact ? 1 : overlap / queryTokens.length;
 }
 
-export function reciprocalRankFusion(
+function longestExactPhrase(query: string, text: string): number {
+  const queryTokens = tokenize(query).slice(0, 12);
+  const normalizedText = tokenize(text).join(" ");
+  for (let length = Math.min(4, queryTokens.length); length >= 2; length -= 1) {
+    for (let start = 0; start <= queryTokens.length - length; start += 1) {
+      const phrase = queryTokens.slice(start, start + length);
+      if (
+        phrase.every((token) => !QUERY_STOP_WORDS.has(token)) &&
+        normalizedText.includes(phrase.join(" "))
+      ) {
+        return length;
+      }
+    }
+  }
+  return 0;
+}
+
+function hasExactNamedPhrase(query: string, text: string): boolean {
+  const phrases = query.match(/\p{Lu}[\p{L}\p{N}._:@/-]*(?:\s+\p{Lu}[\p{L}\p{N}._:@/-]*)+/gu) ?? [];
+  const normalizedText = tokenize(text).join(" ");
+  return phrases.some((phrase) => normalizedText.includes(tokenize(phrase).join(" ")));
+}
+
+function normalizedSemanticScore(score: number | undefined): number {
+  if (score === undefined || score < SEMANTIC_MIN_SCORE) return 0;
+  return 0.5 + 0.5 * Math.min(1, Math.max(0, (score - SEMANTIC_MIN_SCORE) / 0.65));
+}
+
+export function rankCandidates(
   candidates: RankedCandidate[],
   query: string,
   rows: Map<string, ChunkRow>,
   now = Date.now(),
-): Array<{ chunkId: string; score: number; sources: SearchSource[] }> {
+): RankedResult[] {
   const normalizedQuery = normalizeText(query);
-  const identifier = /[._:@/\\-]|\d/u.test(query);
+  const queryTokens = meaningfulTokens(query);
   return candidates
     .map((candidate) => {
       const row = rows.get(candidate.chunkId);
       if (!row) return null;
-      let score = 0;
       const sources: SearchSource[] = [];
+      const lexicalScore =
+        candidate.lexicalRank === undefined ? 0 : (RRF_K + 1) / (RRF_K + candidate.lexicalRank);
+      const semanticScore = normalizedSemanticScore(candidate.semanticScore);
+      const recentCanonicalScore = Math.min(1, Math.max(0, candidate.recentScore ?? 0));
       if (candidate.lexicalRank !== undefined) {
-        score += 1 / (60 + candidate.lexicalRank);
         sources.push("lexical");
       }
-      if (candidate.semanticRank !== undefined && (candidate.semanticScore ?? 0) >= 0.35) {
-        score += 1 / (60 + candidate.semanticRank);
+      if (semanticScore > 0) {
         sources.push("semantic");
       }
-      if (candidate.recentRank !== undefined) {
-        score += 1 / (60 + candidate.recentRank);
+      if (candidate.recentScore !== undefined) {
         sources.push("recent_canonical");
       }
-      score /= 2 / 61;
-      const lowerBody = row.body.toLocaleLowerCase();
-      const lowerTitle = row.title.toLocaleLowerCase();
-      if (identifier && lowerBody.includes(normalizedQuery)) score += 0.08;
-      if (lowerTitle === normalizedQuery || lowerTitle.includes(normalizedQuery)) score += 0.05;
+      if (!sources.length) return null;
+      const text = `${row.title}\n${row.body}`;
+      const normalizedText = normalizeText(text);
+      const textTokens = new Set(tokenize(text));
+      const tokenOverlap = queryTokens.length
+        ? queryTokens.filter((token) => textTokens.has(token)).length / queryTokens.length
+        : 0;
+      const phraseLength = longestExactPhrase(query, text);
+      const exactIdentifier = queryTokens.some(
+        (token) => /[._:@/\\-]|\d/u.test(token) && textTokens.has(token),
+      );
+      const exactMatchBoost = normalizedText.includes(normalizedQuery)
+        ? 1
+        : hasExactNamedPhrase(query, text)
+          ? 1
+          : phraseLength >= 3
+            ? 0.8
+            : phraseLength === 2
+              ? 0.65
+              : exactIdentifier
+                ? 0.4
+                : 0;
+      const tokenOverlapBoost = tokenOverlap * 0.6;
+      const sourceConfidence = Math.max(lexicalScore, semanticScore, recentCanonicalScore);
+      const sourceAgreementBoost = Math.min(0.1, Math.max(0, sources.length - 1) * 0.05);
+      let recencyBoost = 0;
       if (row.conversation_timestamp) {
-        const ageDays = Math.max(0, (now - Date.parse(row.conversation_timestamp)) / 86_400_000);
-        score *= 1 + 0.03 * Math.exp(-ageDays / 365);
+        const timestamp = Date.parse(row.conversation_timestamp);
+        if (Number.isFinite(timestamp)) {
+          const ageDays = Math.max(0, (now - timestamp) / 86_400_000);
+          recencyBoost = 0.1 * Math.exp(-ageDays / 365);
+        }
       }
-      return { chunkId: candidate.chunkId, score, sources };
+      const finalScore =
+        sourceConfidence +
+        sourceAgreementBoost +
+        exactMatchBoost +
+        tokenOverlapBoost +
+        recencyBoost;
+      const debug: RankingDebug = {
+        strategy: RANKING_STRATEGY,
+        lexicalScore,
+        semanticScore,
+        recentCanonicalScore,
+        sourceConfidence,
+        sourceAgreementBoost,
+        exactMatchBoost,
+        tokenOverlapBoost,
+        recencyBoost,
+        finalScore,
+      };
+      return {
+        chunkId: candidate.chunkId,
+        score: finalScore,
+        sources,
+        debug,
+      };
     })
     .filter((value): value is NonNullable<typeof value> => value !== null)
     .sort((a, b) => b.score - a.score || a.chunkId.localeCompare(b.chunkId));
@@ -404,15 +535,14 @@ export async function searchMemory(
 
   const merged = new Map<string, RankedCandidate>();
   lexical.forEach((row, index) => merged.set(row.id, { chunkId: row.id, lexicalRank: index + 1 }));
-  semantic.forEach((match, index) => {
+  semantic.forEach((match) => {
     const candidate = merged.get(match.chunkId) ?? { chunkId: match.chunkId };
-    candidate.semanticRank = index + 1;
     candidate.semanticScore = match.score;
     merged.set(match.chunkId, candidate);
   });
-  recent.matches.forEach((match, index) => {
+  recent.matches.forEach((match) => {
     const candidate = merged.get(match.row.id) ?? { chunkId: match.row.id };
-    candidate.recentRank = index + 1;
+    candidate.recentScore = match.score;
     merged.set(match.row.id, candidate);
   });
 
@@ -420,7 +550,7 @@ export async function searchMemory(
   for (const row of lexical) rows.set(row.id, row);
   for (const match of recent.matches)
     if (!rows.has(match.row.id)) rows.set(match.row.id, match.row);
-  const ranked = reciprocalRankFusion([...merged.values()], input.query, rows);
+  const ranked = rankCandidates([...merged.values()], input.query, rows);
   const perConversation = new Map<string, number>();
   const results: SearchResult[] = [];
   for (const item of ranked) {

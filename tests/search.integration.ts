@@ -15,6 +15,7 @@ function searchEnv(
     maxAgeSeconds?: number;
     maxMessages?: number;
     semanticFailure?: boolean;
+    semanticMatches?: Array<{ chunkId: string; score: number }>;
   } = {},
 ): SearchEnv {
   return {
@@ -30,7 +31,16 @@ function searchEnv(
           ? Promise.reject(new Error("Workers AI unavailable"))
           : Promise.resolve({ data: [embedding] }),
     },
-    MEMORY_VECTOR: { query: () => Promise.resolve({ matches: [], count: 0 }) },
+    MEMORY_VECTOR: {
+      query: () => {
+        const matches = (config.semanticMatches ?? []).map((match) => ({
+          id: match.chunkId,
+          score: match.score,
+          metadata: { chunk_id: match.chunkId },
+        }));
+        return Promise.resolve({ matches, count: matches.length });
+      },
+    },
   };
 }
 
@@ -93,6 +103,49 @@ describe("recent unindexed canonical search", () => {
       .run();
     const processing = await searchMemory(searchEnv(), { query: "Marmot gateway", limit: 8 });
     expect(processing.results[0]?.revisionId).toBe(stored.revisionId);
+  });
+
+  it("ranks an exact recent canonical entity above an unrelated indexed result", async () => {
+    const glass = await storeMemory({
+      title: "Project Glass Comet",
+      namespace: "work",
+      messages: [
+        {
+          role: "user",
+          content: "Project Glass Comet has a maintenance window and a responsible technician.",
+        },
+      ],
+    });
+    await indexRevision(indexingEnv(), glass.stored.revisionId, env.ACTIVE_INDEX_GENERATION);
+    const glassChunk = await env.MEMORY_DB.prepare(
+      "SELECT id FROM chunks WHERE revision_id = ? LIMIT 1",
+    )
+      .bind(glass.stored.revisionId)
+      .first<{ id: string }>();
+    const tarsier = await storeMemory({
+      title: "Maintenance record",
+      namespace: "work",
+      messages: [
+        {
+          role: "user",
+          content:
+            "Tarsier Delta has maintenance every Tuesday at 02:15 WIB. The responsible technician is Livia Maheswari.",
+        },
+      ],
+    });
+
+    expect(glassChunk).not.toBeNull();
+    const result = await searchMemory(
+      searchEnv({ semanticMatches: [{ chunkId: glassChunk?.id ?? "", score: 0.99 }] }),
+      {
+        query: "who is responsible for Tarsier Delta and when is the maintenance window?",
+        limit: 8,
+        namespace: "work",
+      },
+    );
+
+    expect(result.results[0]?.revisionId).toBe(tarsier.stored.revisionId);
+    expect(result.results[0]?.sources).toContain("recent_canonical");
   });
 
   it("returns the same logical chunk once after indexing completes", async () => {
@@ -213,14 +266,21 @@ describe("recent unindexed canonical search", () => {
       indexRevision(indexingEnv(true), stored.revisionId, env.ACTIVE_INDEX_GENERATION),
     ).rejects.toThrow("indexing failed");
 
-    const failed = await searchMemory(searchEnv(), { query: "Juniper bridge", limit: 8 });
+    const chunk = await env.MEMORY_DB.prepare("SELECT id FROM chunks WHERE revision_id = ? LIMIT 1")
+      .bind(stored.revisionId)
+      .first<{ id: string }>();
+    expect(chunk).not.toBeNull();
+    const failed = await searchMemory(
+      searchEnv({ semanticMatches: [{ chunkId: chunk?.id ?? "", score: 0.9 }] }),
+      { query: "Juniper bridge", limit: 8 },
+    );
     const state = await env.MEMORY_DB.prepare(
       "SELECT status, failed_at, error_message FROM chunk_index_state WHERE revision_id = ?",
     )
       .bind(stored.revisionId)
       .first<{ status: string; failed_at: string | null; error_message: string | null }>();
     expect(failed.results).toHaveLength(1);
-    expect(failed.results[0]?.sources).toEqual(["lexical", "recent_canonical"]);
+    expect(failed.results[0]?.sources).toEqual(["lexical", "semantic", "recent_canonical"]);
     expect(state?.status).toBe("failed");
     expect(state?.failed_at).toBeTruthy();
     expect(state?.error_message).not.toContain("Juniper");
@@ -271,6 +331,26 @@ describe("recent unindexed canonical search", () => {
     expect(result.unavailable).toContain("semantic");
   });
 
+  it("keeps semantic-only indexed retrieval working", async () => {
+    const { stored } = await storeMemory({
+      title: "Orchid protocol",
+      namespace: "work",
+      messages: [{ role: "user", content: "Orchid rotates access credentials after an incident." }],
+    });
+    await indexRevision(indexingEnv(), stored.revisionId, env.ACTIVE_INDEX_GENERATION);
+    const chunk = await env.MEMORY_DB.prepare("SELECT id FROM chunks WHERE revision_id = ? LIMIT 1")
+      .bind(stored.revisionId)
+      .first<{ id: string }>();
+
+    expect(chunk).not.toBeNull();
+    const result = await searchMemory(
+      searchEnv({ semanticMatches: [{ chunkId: chunk?.id ?? "", score: 0.9 }] }),
+      { query: "abstract paraphrase", limit: 8, namespace: "work" },
+    );
+    expect(result.results[0]?.revisionId).toBe(stored.revisionId);
+    expect(result.results[0]?.sources).toEqual(["semantic"]);
+  });
+
   it("keeps indexed results when the canonical fallback object is unavailable", async () => {
     const { stored } = await storeMemory({
       title: "Canonical outage",
@@ -286,7 +366,10 @@ describe("recent unindexed canonical search", () => {
       .run();
     await env.MEMORY_BUCKET.delete(stored.manifestKey);
 
-    const result = await searchMemory(searchEnv(), { query: "Cypress survivor", limit: 8 });
+    const result = await searchMemory(searchEnv({ maxRevisions: 50 }), {
+      query: "Cypress survivor",
+      limit: 8,
+    });
     expect(result.results[0]?.sources).toContain("lexical");
     expect(result.degraded).toBe(true);
     expect(result.unavailable).toContain("recent_canonical");

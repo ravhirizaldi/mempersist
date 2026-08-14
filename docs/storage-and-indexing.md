@@ -31,12 +31,12 @@ Enqueue records revision state as `queued`; a worker attempt marks `processing`;
 1. Build safe quoted FTS terms.
 2. Start D1 FTS, the semantic branch, and the recent-canonical fallback concurrently.
 3. Over-fetch `min(50, max(20, limit * 4))` candidates.
-4. Drop semantic candidates below `0.35`.
-5. For recent current revisions not yet indexed, use D1 state to select at most 8 revisions from the last 24 hours, load their canonical R2 objects, and score at most 200 active messages with exact phrase and normalized term overlap.
-6. Fuse matching channels with RRF `1/(60+rank)`, retaining the existing two-channel normalization so one fallback channel cannot outrank healthy lexical-plus-semantic agreement by itself.
-7. Add at most `0.08` for an exact identifier and `0.05` for a title match.
-8. Apply at most 3% exponentially decaying recency adjustment.
-9. Require `0.25` unless an exact body match exists.
+4. Drop semantic candidates below `0.35`, then normalize accepted similarity scores to `0.5..1.0`.
+5. For recent current revisions not yet indexed, use D1 state to select at most 8 revisions from the last 24 hours, load their canonical R2 objects, and score at most 200 active messages with exact phrase and normalized meaningful-token overlap.
+6. Normalize lexical rank with `61/(60+rank)` and recent-canonical overlap to `0..1`. Use the strongest channel as source confidence, plus at most `0.10` for agreement across channels, so channel count cannot automatically outrank stronger content evidence.
+7. Add explainable content boosts: `1.0` for a full query or exact named phrase, up to `0.80` for another exact multi-token phrase, `0.40` for an exact identifier, and up to `0.60` for meaningful-token overlap.
+8. Add at most `0.10` as an exponentially decaying recency boost.
+9. Require `0.25` unless an exact body match exists. Ranking strategy `normalized-weighted-v1` keeps component scores available internally for deterministic tests, but public responses expose only the final score.
 10. Return at most two chunks per conversation and 20 results.
 
 Fallback candidate lookup always joins `conversations.current_revision_id`, filters namespace and deletion state, applies an indexed age predicate, and uses a SQL limit before any R2 read. Only active-branch chunks intersecting the newest message budget are scored. Deterministic chunk IDs deduplicate fallback and indexed matches during races.

@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { queryTerms, recentLexicalScore, reciprocalRankFusion } from "../src/search";
+import { queryTerms, rankCandidates, recentLexicalScore } from "../src/search";
 
 describe("hybrid retrieval ranking", () => {
   const oldDecision = {
@@ -26,10 +26,10 @@ describe("hybrid retrieval ranking", () => {
       [oldDecision.id, oldDecision],
       [recentWeak.id, recentWeak],
     ]);
-    const ranked = reciprocalRankFusion(
+    const ranked = rankCandidates(
       [
-        { chunkId: "old", lexicalRank: 1, semanticRank: 1, semanticScore: 0.9 },
-        { chunkId: "recent", lexicalRank: 8, semanticRank: 8, semanticScore: 0.4 },
+        { chunkId: "old", lexicalRank: 1, semanticScore: 0.9 },
+        { chunkId: "recent", lexicalRank: 8, semanticScore: 0.4 },
       ],
       "database architecture",
       rows,
@@ -40,7 +40,7 @@ describe("hybrid retrieval ranking", () => {
 
   it("boosts exact hostnames and emits safe FTS terms", () => {
     const rows = new Map([[oldDecision.id, oldDecision]]);
-    const [ranked] = reciprocalRankFusion(
+    const [ranked] = rankCandidates(
       [{ chunkId: "old", lexicalRank: 1 }],
       "api.internal.example",
       rows,
@@ -56,24 +56,97 @@ describe("hybrid retrieval ranking", () => {
         "The WAN outage test gateway is called Marmot.",
       ),
     ).not.toBeNull();
-    expect(recentLexicalScore("Marmot", "The gateway is called Marmot.")).toBeGreaterThan(2);
+    expect(recentLexicalScore("Marmot", "The gateway is called Marmot.")).toBe(1);
     expect(recentLexicalScore("late-token", `${"filler ".repeat(20)}late-token`)).not.toBeNull();
     expect(recentLexicalScore("unrelated query", "The gateway is called Marmot.")).toBeNull();
   });
 
   it("adds recent canonical provenance without changing the indexed rank scale", () => {
     const rows = new Map([[oldDecision.id, oldDecision]]);
-    const [indexed] = reciprocalRankFusion(
+    const [indexed] = rankCandidates(
       [{ chunkId: "old", lexicalRank: 1 }],
       "database architecture",
       rows,
     );
-    const [recent] = reciprocalRankFusion(
-      [{ chunkId: "old", recentRank: 1 }],
+    const [recent] = rankCandidates(
+      [{ chunkId: "old", recentScore: 1 }],
       "database architecture",
       rows,
     );
     expect(recent?.score).toBe(indexed?.score);
     expect(recent?.sources).toEqual(["recent_canonical"]);
+  });
+
+  it("ranks an exact entity phrase above an unrelated semantic result", () => {
+    const rows = new Map([
+      [
+        "tarsier",
+        {
+          ...oldDecision,
+          id: "tarsier",
+          revision_id: "r3",
+          title: "Tarsier Delta",
+          body: "Tarsier Delta maintenance is handled by Livia Maheswari.",
+        },
+      ],
+      [
+        "glass",
+        {
+          ...recentWeak,
+          id: "glass",
+          revision_id: "r4",
+          title: "Project Glass Comet",
+          body: "A separate project discussion.",
+        },
+      ],
+    ]);
+    const ranked = rankCandidates(
+      [
+        { chunkId: "tarsier", recentScore: 0.8 },
+        { chunkId: "glass", semanticScore: 0.99 },
+      ],
+      "who is responsible for Tarsier Delta?",
+      rows,
+    );
+
+    expect(ranked[0]?.chunkId).toBe("tarsier");
+    expect(ranked[0]?.debug.exactMatchBoost).toBe(1);
+    expect(ranked[0]?.debug.recentCanonicalScore).toBe(0.8);
+  });
+
+  it("ranks a strong lexical entity match above weak semantic similarity", () => {
+    const rows = new Map([
+      [
+        "entity",
+        {
+          ...oldDecision,
+          id: "entity",
+          revision_id: "r5",
+          title: "Tarsier Delta operations",
+          body: "Maintenance ownership notes for Tarsier Delta.",
+        },
+      ],
+      [
+        "semantic",
+        {
+          ...recentWeak,
+          id: "semantic",
+          revision_id: "r6",
+          title: "Weak semantic result",
+          body: "Unrelated scheduling notes.",
+        },
+      ],
+    ]);
+    const ranked = rankCandidates(
+      [
+        { chunkId: "entity", lexicalRank: 3 },
+        { chunkId: "semantic", semanticScore: 0.4 },
+      ],
+      "Tarsier Delta",
+      rows,
+    );
+
+    expect(ranked[0]?.chunkId).toBe("entity");
+    expect(ranked[0]?.debug.lexicalScore).toBeGreaterThan(ranked[1]?.debug.semanticScore ?? 1);
   });
 });

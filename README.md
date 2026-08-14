@@ -19,7 +19,7 @@ ChatGPT conversations.json / MCP writes
           /             \
    D1 FTS5          Workers AI BGE-M3 -> Vectorize
           \             /
-             RRF search
+       normalized hybrid search
                   |
        HTTP + OAuth-protected MCP
 ```
