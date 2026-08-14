@@ -55,6 +55,8 @@ function indexingEnv(failEmbedding = false): IndexingEnv {
           : Promise.resolve({ data: [embedding] }),
     },
     MEMORY_VECTOR: {
+      deleteByIds: (ids) =>
+        Promise.resolve({ mutationId: "test-delete-mutation", ids, count: ids.length }),
       upsert: () => Promise.resolve({ mutationId: "test-mutation", ids: [], count: 0 }),
     },
   };
@@ -73,6 +75,48 @@ async function storeMemory(input: {
 }
 
 describe("recent unindexed canonical search", () => {
+  it("ranks a paraphrased recent memory first without embedding its canonical text", async () => {
+    const unrelated = await storeMemory({
+      title: "Project Glass Comet",
+      namespace: "work",
+      messages: [{ role: "user", content: "A separate archival retention discussion." }],
+    });
+    await indexRevision(indexingEnv(), unrelated.stored.revisionId, env.ACTIVE_INDEX_GENERATION);
+    const unrelatedChunk = await env.MEMORY_DB.prepare(
+      "SELECT id FROM chunks WHERE revision_id = ? LIMIT 1",
+    )
+      .bind(unrelated.stored.revisionId)
+      .first<{ id: string }>();
+    const pangolin = await storeMemory({
+      title: "Pangolin Echo",
+      namespace: "work",
+      messages: [
+        {
+          role: "user",
+          content:
+            "Pangolin Echo is used specifically for packet-loss simulation on the backup satellite link. Testing happens every Thursday at 03:40 WIB. PIC is Satria Mahendra.",
+        },
+      ],
+    });
+    const query =
+      "which gateway is used to test packet loss on the backup satellite connection, who is responsible for it, and when is the test?";
+    const semanticInputs: string[][] = [];
+    const candidateEnv = searchEnv({
+      semanticMatches: [{ chunkId: unrelatedChunk?.id ?? "", score: 0.99 }],
+    });
+    candidateEnv.AI.run = (_model, input) => {
+      semanticInputs.push(input.text);
+      return Promise.resolve({ data: [embedding] });
+    };
+
+    const result = await searchMemory(candidateEnv, { query, limit: 8, namespace: "work" });
+
+    expect(result.results[0]?.revisionId).toBe(pangolin.stored.revisionId);
+    expect(result.results[0]?.sources).toContain("recent_canonical");
+    expect(semanticInputs).toEqual([[query]]);
+    expect(semanticInputs.flat()).not.toContain(pangolin.conversation.nodes[0]?.text);
+  });
+
   it("finds a durable store immediately while its revision is queued", async () => {
     const { stored } = await storeMemory({
       title: "WAN outage test",

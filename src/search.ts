@@ -10,7 +10,7 @@ export const RECENT_UNINDEXED_DEFAULTS = {
   maxMessages: 200,
 } as const;
 
-const RANKING_STRATEGY = "normalized-weighted-v1";
+const RANKING_STRATEGY = "normalized-weighted-v2";
 
 const SEMANTIC_MIN_SCORE = 0.35;
 const RRF_K = 60;
@@ -40,6 +40,35 @@ const QUERY_STOP_WORDS = new Set([
   "with",
 ]);
 
+const OPERATIONAL_CONCEPTS = [
+  {
+    name: "responsibility",
+    phrases: ["pic", "person in charge", "responsible", "responsibility", "owner", "operator"],
+  },
+  {
+    name: "packet-loss",
+    phrases: ["packet loss", "lost packet", "dropped packet", "packet drop"],
+  },
+  {
+    name: "network-outage",
+    phrases: [
+      "wan outage",
+      "internet failure",
+      "internet outage",
+      "connection outage",
+      "network failure",
+      "network outage",
+    ],
+  },
+  { name: "redundancy", phrases: ["backup", "secondary", "fallback", "standby"] },
+  {
+    name: "maintenance-window",
+    phrases: ["maintenance window", "maintenance schedule", "service window", "service schedule"],
+  },
+  { name: "network-edge", phrases: ["gateway", "edge gateway", "router", "device", "appliance"] },
+  { name: "connection", phrases: ["link", "connection", "connectivity"] },
+] as const;
+
 export type SearchEnv = Pick<AppEnv, "MEMORY_DB" | "MEMORY_BUCKET" | "ACTIVE_INDEX_GENERATION"> &
   EmbeddingEnv & {
     MEMORY_VECTOR: Pick<VectorizeIndex, "query">;
@@ -67,9 +96,20 @@ interface RankingDebug {
   sourceConfidence: number;
   sourceAgreementBoost: number;
   exactMatchBoost: number;
+  entityMatchBoost: number;
   tokenOverlapBoost: number;
+  aliasOverlapBoost: number;
+  fieldMatchBoost: number;
   recencyBoost: number;
   finalScore: number;
+}
+
+interface TextSignals {
+  normalized: string;
+  tokens: string[];
+  tokenSet: Set<string>;
+  concepts: Set<string>;
+  aliases: Map<string, Set<string>>;
 }
 
 interface RankedResult {
@@ -144,13 +184,118 @@ function recentConfig(env: SearchEnv) {
 }
 
 function normalizeText(value: string): string {
-  return value.trim().replaceAll(/\s+/gu, " ").toLocaleLowerCase();
+  return value
+    .normalize("NFKC")
+    .toLowerCase()
+    .replaceAll(/[‐‑‒–—−-]+/gu, " ")
+    .replaceAll(/[^\p{L}\p{N}._:@/\\]+/gu, " ")
+    .trim()
+    .replaceAll(/\s+/gu, " ");
 }
 
 function tokenize(value: string): string[] {
-  return (value.match(/[\p{L}\p{N}][\p{L}\p{N}._:@/-]*/gu) ?? [])
-    .map((term) => term.replace(/[._:@/-]+$/u, "").toLocaleLowerCase())
+  return (normalizeText(value).match(/[\p{L}\p{N}][\p{L}\p{N}._:@/\\]*/gu) ?? [])
+    .map((term) => term.replace(/[._:@/\\]+$/u, ""))
     .filter(Boolean);
+}
+
+function stemToken(token: string): string {
+  if (token === "people") return "person";
+  if (token === "lost") return "loss";
+  if (token.length > 5 && token.endsWith("ies")) return `${token.slice(0, -3)}y`;
+  if (token.length > 5 && token.endsWith("ing")) {
+    const base = token.slice(0, -3);
+    return /(.)\1$/u.test(base) ? base.slice(0, -1) : base;
+  }
+  if (token.length > 5 && token.endsWith("ed")) return token.slice(0, -2);
+  if (token.length > 4 && token.endsWith("s") && !/(?:ss|us|is)$/u.test(token)) {
+    return token.slice(0, -1);
+  }
+  return token;
+}
+
+function containsPhrase(normalized: string, phrase: string): boolean {
+  return ` ${normalized} `.includes(` ${phrase} `);
+}
+
+function textSignals(value: string): TextSignals {
+  const normalized = normalizeText(value);
+  const tokens = [...new Set(tokenize(normalized).map(stemToken))];
+  const meaningful = tokens.filter((token) => !QUERY_STOP_WORDS.has(token));
+  const selected = meaningful.length ? meaningful : tokens;
+  const stemmedText = tokenize(normalized).map(stemToken).join(" ");
+  const concepts = new Set<string>();
+  const aliases = new Map<string, Set<string>>();
+  for (const concept of OPERATIONAL_CONCEPTS) {
+    const matches = concept.phrases
+      .map((phrase) => tokenize(phrase).map(stemToken).join(" "))
+      .filter((phrase) => containsPhrase(stemmedText, phrase));
+    if (matches.length) {
+      concepts.add(concept.name);
+      aliases.set(concept.name, new Set(matches));
+    }
+  }
+  return { normalized, tokens: selected, tokenSet: new Set(selected), concepts, aliases };
+}
+
+function overlapRatio(values: Iterable<string>, candidates: Set<string>): number {
+  const terms = [...values];
+  return terms.length ? terms.filter((term) => candidates.has(term)).length / terms.length : 0;
+}
+
+function normalizedPhraseCoverage(query: TextSignals, text: TextSignals): number {
+  for (let length = Math.min(4, query.tokens.length); length >= 2; length -= 1) {
+    for (let start = 0; start <= query.tokens.length - length; start += 1) {
+      if (
+        containsPhrase(text.tokens.join(" "), query.tokens.slice(start, start + length).join(" "))
+      ) {
+        return Math.min(1, length / 3);
+      }
+    }
+  }
+  return 0;
+}
+
+function aliasOverlap(query: TextSignals, text: TextSignals): { count: number; ratio: number } {
+  let count = 0;
+  for (const concept of query.concepts) {
+    const queryAliases = query.aliases.get(concept);
+    const textAliases = text.aliases.get(concept);
+    if (
+      queryAliases &&
+      textAliases &&
+      [...queryAliases].every((alias) => !textAliases.has(alias))
+    ) {
+      count += 1;
+    }
+  }
+  return { count, ratio: query.concepts.size ? count / query.concepts.size : 0 };
+}
+
+function hasFieldConceptMatch(queryConcepts: Set<string>, text: string): boolean {
+  for (const match of text.matchAll(/([\p{L}][\p{L} -]{0,30})\s*:/gu)) {
+    const label = match[1];
+    if (label && [...queryConcepts].some((concept) => textSignals(label).concepts.has(concept))) {
+      return true;
+    }
+  }
+  return false;
+}
+
+function rankingSignals(query: string, text: string) {
+  const querySignals = textSignals(query);
+  const textValue = textSignals(text);
+  const tokenOverlap = overlapRatio(querySignals.tokens, textValue.tokenSet);
+  const aliases = aliasOverlap(querySignals, textValue);
+  const phraseCoverage = normalizedPhraseCoverage(querySignals, textValue);
+  return {
+    query: querySignals,
+    text: textValue,
+    tokenOverlap,
+    aliasOverlap: aliases.ratio,
+    aliasMatches: aliases.count,
+    phraseCoverage,
+  };
 }
 
 function extractLexicalTokens(value: string, limit?: number): string[] {
@@ -159,9 +304,7 @@ function extractLexicalTokens(value: string, limit?: number): string[] {
 }
 
 function meaningfulTokens(value: string): string[] {
-  const tokens = lexicalTokens(value);
-  const meaningful = tokens.filter((token) => !QUERY_STOP_WORDS.has(token));
-  return meaningful.length ? meaningful : tokens;
+  return textSignals(value).tokens.slice(0, 12);
 }
 
 export function lexicalTokens(value: string): string[] {
@@ -175,15 +318,24 @@ export function queryTerms(query: string): string {
 }
 
 export function recentLexicalScore(query: string, text: string): number | null {
-  const queryTokens = meaningfulTokens(query);
-  if (!queryTokens.length) return null;
-  const normalizedQuery = normalizeText(query);
-  const normalizedText = normalizeText(text);
-  const exact = normalizedText.includes(normalizedQuery);
-  const textTokens = new Set(tokenize(normalizedText));
-  const overlap = queryTokens.filter((term) => textTokens.has(term)).length;
-  if (!exact && overlap < Math.min(2, queryTokens.length)) return null;
-  return exact ? 1 : overlap / queryTokens.length;
+  const signals = rankingSignals(query, text);
+  if (!signals.query.tokens.length) return null;
+  const exact = signals.text.normalized.includes(signals.query.normalized);
+  const tokenMatches = signals.query.tokens.filter((term) =>
+    signals.text.tokenSet.has(term),
+  ).length;
+  if (
+    !exact &&
+    tokenMatches < Math.min(2, signals.query.tokens.length) &&
+    signals.aliasMatches === 0
+  ) {
+    return null;
+  }
+  if (exact) return 1;
+  return Math.min(
+    1,
+    signals.tokenOverlap * 0.55 + signals.aliasOverlap * 0.3 + signals.phraseCoverage * 0.15,
+  );
 }
 
 function longestExactPhrase(query: string, text: string): number {
@@ -242,11 +394,9 @@ export function rankCandidates(
       }
       if (!sources.length) return null;
       const text = `${row.title}\n${row.body}`;
+      const signals = rankingSignals(query, text);
       const normalizedText = normalizeText(text);
       const textTokens = new Set(tokenize(text));
-      const tokenOverlap = queryTokens.length
-        ? queryTokens.filter((token) => textTokens.has(token)).length / queryTokens.length
-        : 0;
       const phraseLength = longestExactPhrase(query, text);
       const exactIdentifier = queryTokens.some(
         (token) => /[._:@/\\-]|\d/u.test(token) && textTokens.has(token),
@@ -262,7 +412,14 @@ export function rankCandidates(
               : exactIdentifier
                 ? 0.4
                 : 0;
-      const tokenOverlapBoost = tokenOverlap * 0.6;
+      const entityMatchBoost = hasExactNamedPhrase(query, text) ? 0.35 : 0;
+      const tokenOverlapBoost = signals.tokenOverlap * 0.45;
+      const aliasOverlapBoost = signals.aliasOverlap * 0.15;
+      const queryConcepts = signals.query.concepts;
+      const fieldMatchBoost =
+        hasExactNamedPhrase(query, row.title) || hasFieldConceptMatch(queryConcepts, text)
+          ? 0.15
+          : 0;
       const sourceConfidence = Math.max(lexicalScore, semanticScore, recentCanonicalScore);
       const sourceAgreementBoost = Math.min(0.1, Math.max(0, sources.length - 1) * 0.05);
       let recencyBoost = 0;
@@ -277,7 +434,10 @@ export function rankCandidates(
         sourceConfidence +
         sourceAgreementBoost +
         exactMatchBoost +
+        entityMatchBoost +
         tokenOverlapBoost +
+        aliasOverlapBoost +
+        fieldMatchBoost +
         recencyBoost;
       const debug: RankingDebug = {
         strategy: RANKING_STRATEGY,
@@ -287,7 +447,10 @@ export function rankCandidates(
         sourceConfidence,
         sourceAgreementBoost,
         exactMatchBoost,
+        entityMatchBoost,
         tokenOverlapBoost,
+        aliasOverlapBoost,
+        fieldMatchBoost,
         recencyBoost,
         finalScore,
       };

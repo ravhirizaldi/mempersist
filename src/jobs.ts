@@ -357,7 +357,13 @@ async function claimJob(env: AppEnv, jobId: string): Promise<JobRow | null> {
 
 export async function processJobMessage(env: AppEnv, message: JobMessage): Promise<void> {
   const job = await claimJob(env, message.job_id);
-  if (!job) throw new Error("Job is leased; retry later");
+  if (!job) {
+    const existing = await env.MEMORY_DB.prepare("SELECT status FROM jobs WHERE id = ?")
+      .bind(message.job_id)
+      .first<{ status: string }>();
+    if (!existing || existing.status === "complete") return;
+    throw new Error("Job is leased; retry later");
+  }
   try {
     let complete = true;
     if (job.kind === "import") {

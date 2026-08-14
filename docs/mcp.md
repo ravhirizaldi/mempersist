@@ -21,14 +21,23 @@ To connect ChatGPT:
 
 Do not paste the owner key into ChatGPT's app configuration. OAuth discovery is exposed at `/.well-known/oauth-protected-resource/mcp` and `/.well-known/oauth-authorization-server`.
 
-| Tool                        | Important inputs                               | Result                                                |
-| --------------------------- | ---------------------------------------------- | ----------------------------------------------------- |
-| `memory_search`             | query, limit 1–20, optional namespace          | compact ranked chunk references and degradation state |
-| `memory_get_context`        | chunk ID, before/after 0–10                    | canonical matched ranges and surrounding messages     |
-| `memory_get_conversation`   | conversation ID, branch, offset, limit         | paginated active timeline or all graph nodes          |
-| `memory_list_conversations` | cursor, limit, namespace                       | metadata only                                         |
-| `memory_store`              | title, namespace, 1–1000 messages              | durable revision plus queued index job                |
-| `memory_append`             | conversation ID, base revision, 1–100 messages | optimistic durable revision plus queued index job     |
-| `memory_import_status`      | import UUID                                    | progress, duplicate, or failure metadata              |
+| Tool                          | Important inputs                               | Result                                                |
+| ----------------------------- | ---------------------------------------------- | ----------------------------------------------------- |
+| `memory_search`               | query, limit 1–20, optional namespace          | compact ranked chunk references and degradation state |
+| `memory_get_context`          | chunk ID, before/after 0–10                    | canonical matched ranges and surrounding messages     |
+| `memory_get_conversation`     | conversation ID, branch, offset, limit         | paginated active timeline or all graph nodes          |
+| `memory_list_conversations`   | cursor, limit, namespace                       | metadata only                                         |
+| `memory_store`                | title, namespace, 1–1000 messages              | durable revision plus queued index job                |
+| `memory_append`               | conversation ID, base revision, 1–100 messages | optimistic durable revision plus queued index job     |
+| `memory_delete_conversations` | 1–100 unique conversation IDs                  | deleted, missing, and per-ID failures                 |
+| `memory_delete_namespace`     | namespace plus an exact `confirm_namespace`    | bounded count, failures, remaining, and completion    |
+| `memory_delete_all`           | exact confirmation `DELETE_ALL_MEMORIES`       | bounded count, failures, remaining, and completion    |
+| `memory_import_status`        | import UUID                                    | progress, duplicate, or failure metadata              |
+
+Namespace and all-memory deletion process at most 500 conversations per call. If `complete` is
+false, repeat the same idempotent tool call; `remaining` reports the current catalog count. Raw
+ChatGPT import archives are intentionally retained. A deletion is reported as complete for a
+conversation only after its canonical R2 keys have been deleted and its D1 catalog cleanup has
+committed.
 
 The intended client pattern is search → select → get context. Administrative retry/reindex/integrity operations remain HTTP/CLI only so ordinary LLM tool calls cannot trigger expensive maintenance accidentally.

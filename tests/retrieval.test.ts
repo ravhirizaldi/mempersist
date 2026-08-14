@@ -61,6 +61,22 @@ describe("hybrid retrieval ranking", () => {
     expect(recentLexicalScore("unrelated query", "The gateway is called Marmot.")).toBeNull();
   });
 
+  it("normalizes operational paraphrases without embeddings", () => {
+    expect(
+      recentLexicalScore("WAN outage", "The internet failure drill is Thursday."),
+    ).not.toBeNull();
+    expect(recentLexicalScore("responsible person", "PIC: Satria Mahendra")).not.toBeNull();
+    expect(
+      recentLexicalScore("maintenance schedule", "Maintenance window: Tuesday 02:15 WIB"),
+    ).not.toBeNull();
+    expect(
+      recentLexicalScore(
+        "test packet loss on the secondary satellite connection",
+        "Packet-loss simulation runs on the backup satellite link.",
+      ),
+    ).not.toBeNull();
+  });
+
   it("adds recent canonical provenance without changing the indexed rank scale", () => {
     const rows = new Map([[oldDecision.id, oldDecision]]);
     const [indexed] = rankCandidates(
@@ -73,7 +89,7 @@ describe("hybrid retrieval ranking", () => {
       "database architecture",
       rows,
     );
-    expect(recent?.score).toBe(indexed?.score);
+    expect(recent?.score).toBeCloseTo(indexed?.score ?? 0, 12);
     expect(recent?.sources).toEqual(["recent_canonical"]);
   });
 

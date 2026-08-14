@@ -30,6 +30,9 @@ describe("MCP server", () => {
     const result = await client.listTools();
     expect(result.tools.map((tool) => tool.name).sort()).toEqual([
       "memory_append",
+      "memory_delete_all",
+      "memory_delete_conversations",
+      "memory_delete_namespace",
       "memory_get_context",
       "memory_get_conversation",
       "memory_import_status",
@@ -46,5 +49,46 @@ describe("MCP server", () => {
       arguments: { query: "", limit: 999 },
     });
     expect(result.isError).toBe(true);
+  });
+
+  it("requires exact destructive confirmations", async () => {
+    const client = await connectedClient();
+    const namespace = await client.callTool({
+      name: "memory_delete_namespace",
+      arguments: { namespace: "astara_alt", confirm_namespace: "astara-alt" },
+    });
+    const emptyNamespace = await client.callTool({
+      name: "memory_delete_namespace",
+      arguments: { namespace: "   ", confirm_namespace: "   " },
+    });
+    const all = await client.callTool({
+      name: "memory_delete_all",
+      arguments: { confirm: "delete all" },
+    });
+
+    expect(namespace.isError).toBe(true);
+    expect(emptyNamespace.isError).toBe(true);
+    expect(all.isError).toBe(true);
+  });
+
+  it("validates deletion IDs and the maximum batch size", async () => {
+    const client = await connectedClient();
+    const tooMany = await client.callTool({
+      name: "memory_delete_conversations",
+      arguments: { conversation_ids: Array.from({ length: 101 }, () => crypto.randomUUID()) },
+    });
+    const duplicate = crypto.randomUUID();
+    const duplicates = await client.callTool({
+      name: "memory_delete_conversations",
+      arguments: { conversation_ids: [duplicate, duplicate] },
+    });
+    const malformed = await client.callTool({
+      name: "memory_delete_conversations",
+      arguments: { conversation_ids: ["not-a-memory-id"] },
+    });
+
+    expect(tooMany.isError).toBe(true);
+    expect(duplicates.isError).toBe(true);
+    expect(malformed.isError).toBe(true);
   });
 });

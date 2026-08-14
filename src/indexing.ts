@@ -15,7 +15,7 @@ export interface EmbeddingEnv {
 
 export type IndexingEnv = Pick<AppEnv, "MEMORY_DB" | "MEMORY_BUCKET"> &
   EmbeddingEnv & {
-    MEMORY_VECTOR: Pick<VectorizeIndex, "upsert">;
+    MEMORY_VECTOR: Pick<VectorizeIndex, "deleteByIds" | "upsert">;
   };
 
 function groups<T>(values: T[], size: number): T[][] {
@@ -142,28 +142,94 @@ async function replaceFtsChunks(
   }
 }
 
+async function isRevisionIndexable(env: IndexingEnv, revisionId: string): Promise<boolean> {
+  const row = await env.MEMORY_DB.prepare(
+    `SELECT revision.id
+     FROM conversation_revisions revision
+     JOIN conversations conversation ON conversation.id = revision.conversation_id
+       AND conversation.current_revision_id = revision.id
+       AND conversation.deleted_at IS NULL
+     WHERE revision.id = ?`,
+  )
+    .bind(revisionId)
+    .first<{ id: string }>();
+  return row !== null;
+}
+
+async function removeDerivedRevision(
+  env: IndexingEnv,
+  revisionId: string,
+  generationId: string,
+  chunks: SearchChunk[],
+): Promise<void> {
+  const stored = await env.MEMORY_DB.prepare(
+    "SELECT id, vector_id FROM chunks WHERE revision_id = ? AND generation_id = ?",
+  )
+    .bind(revisionId, generationId)
+    .all<{ id: string; vector_id: string }>();
+  const vectorIds = [
+    ...new Set([
+      ...stored.results.map((row) => row.vector_id),
+      ...chunks.map((chunk) => chunk.vectorId),
+    ]),
+  ];
+  for (const batch of groups(vectorIds, 100)) await env.MEMORY_VECTOR.deleteByIds(batch);
+  for (const batch of groups(stored.results, 50)) {
+    await env.MEMORY_DB.batch(
+      batch.flatMap(({ id }) => [
+        env.MEMORY_DB.prepare("DELETE FROM chunk_fts WHERE chunk_id = ?").bind(id),
+        env.MEMORY_DB.prepare("DELETE FROM chunks WHERE id = ?").bind(id),
+      ]),
+    );
+  }
+}
+
 export async function indexRevision(
   env: IndexingEnv,
   revisionId: string,
   generationId: string,
 ): Promise<number> {
   await ensureGeneration(env, generationId);
+  if (!(await isRevisionIndexable(env, revisionId))) {
+    await removeDerivedRevision(env, revisionId, generationId, []);
+    return 0;
+  }
   const now = new Date().toISOString();
-  await env.MEMORY_DB.prepare(
+  const started = await env.MEMORY_DB.prepare(
     `INSERT INTO chunk_index_state
      (revision_id, generation_id, status, attempts, queued_at, started_at, updated_at)
-     VALUES (?, ?, 'processing', 1, ?, ?, ?)
+     SELECT ?, ?, 'processing', 1, ?, ?, ?
+     WHERE EXISTS (
+       SELECT 1 FROM conversation_revisions revision
+       JOIN conversations conversation ON conversation.id = revision.conversation_id
+         AND conversation.current_revision_id = revision.id
+         AND conversation.deleted_at IS NULL
+       WHERE revision.id = ?
+     )
      ON CONFLICT(revision_id, generation_id) DO UPDATE SET
        status = 'processing', attempts = attempts + 1, started_at = excluded.started_at,
        failed_at = NULL, error_code = NULL, error_message = NULL, updated_at = excluded.updated_at`,
   )
-    .bind(revisionId, generationId, now, now, now)
+    .bind(revisionId, generationId, now, now, now, revisionId)
     .run();
+  if (started.meta.changes !== 1) {
+    await removeDerivedRevision(env, revisionId, generationId, []);
+    return 0;
+  }
 
+  let chunks: SearchChunk[] = [];
   try {
     const loaded = await loadCanonicalRevision(env, revisionId);
-    const chunks = await chunkConversation(loaded.conversation, revisionId, generationId);
+    if (!(await isRevisionIndexable(env, revisionId))) {
+      await removeDerivedRevision(env, revisionId, generationId, []);
+      return 0;
+    }
+    chunks = await chunkConversation(loaded.conversation, revisionId, generationId);
     await replaceFtsChunks(env, chunks, revisionId, generationId);
+    if (!(await isRevisionIndexable(env, revisionId))) {
+      await removeDerivedRevision(env, revisionId, generationId, chunks);
+      return 0;
+    }
     const ftsIndexedAt = new Date().toISOString();
     await env.MEMORY_DB.prepare(
       `UPDATE chunk_index_state SET chunk_count = ?, fts_indexed_at = ?, updated_at = ?
@@ -178,6 +244,10 @@ export async function indexRevision(
         env,
         batch.map((chunk) => chunk.body),
       );
+      if (!(await isRevisionIndexable(env, revisionId))) {
+        await removeDerivedRevision(env, revisionId, generationId, chunks);
+        return 0;
+      }
       const mutation = await env.MEMORY_VECTOR.upsert(
         batch.map((chunk, index) => ({
           id: chunk.vectorId,
@@ -197,6 +267,14 @@ export async function indexRevision(
         "mutationId" in mutation && typeof mutation.mutationId === "string"
           ? mutation.mutationId
           : null;
+      if (!(await isRevisionIndexable(env, revisionId))) {
+        await removeDerivedRevision(env, revisionId, generationId, chunks);
+        return 0;
+      }
+    }
+    if (!(await isRevisionIndexable(env, revisionId))) {
+      await removeDerivedRevision(env, revisionId, generationId, chunks);
+      return 0;
     }
     const indexedAt = new Date().toISOString();
     await env.MEMORY_DB.prepare(
@@ -208,6 +286,10 @@ export async function indexRevision(
       .run();
     return chunks.length;
   } catch (error) {
+    if (!(await isRevisionIndexable(env, revisionId))) {
+      await removeDerivedRevision(env, revisionId, generationId, chunks);
+      return 0;
+    }
     const details = errorDetails(error);
     const failedAt = new Date().toISOString();
     await env.MEMORY_DB.prepare(

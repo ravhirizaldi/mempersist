@@ -1,6 +1,12 @@
 import { McpServer } from "@modelcontextprotocol/server";
 import { z } from "zod";
 import { createMcpConversation } from "./chatgpt";
+import {
+  deleteAllMemories,
+  deleteConversations,
+  deleteNamespace,
+  MAX_CONVERSATION_DELETE_BATCH,
+} from "./deletion";
 import type { AppEnv } from "./domain";
 import { enqueueIndex } from "./jobs";
 import { getChunkContext, getConversationPage } from "./retrieval";
@@ -12,6 +18,23 @@ const messageSchema = z.object({
   content: z.string().max(1_000_000),
   timestamp: z.iso.datetime().optional(),
 });
+
+const conversationIdSchema = z.union([
+  z.string().uuid(),
+  z.string().regex(/^[a-f0-9]{64}$/u, "Expected a memory conversation ID"),
+]);
+
+const conversationIdsSchema = z
+  .array(conversationIdSchema)
+  .min(1)
+  .max(MAX_CONVERSATION_DELETE_BATCH)
+  .refine((ids) => new Set(ids).size === ids.length, "Conversation IDs must be unique");
+
+const nonEmptyNamespaceSchema = z
+  .string()
+  .min(1)
+  .max(100)
+  .refine((value) => /\S/u.test(value), "Namespace must not be empty");
 
 function toolResult(value: unknown) {
   const text = JSON.stringify(value);
@@ -147,6 +170,43 @@ export function createMemoryMcpServer(env: AppEnv): McpServer {
         indexing: { status: "queued", job_id: jobId },
       });
     },
+  );
+
+  server.registerTool(
+    "memory_delete_conversations",
+    {
+      description:
+        "Delete up to 100 conversations and their canonical and derived data; reports partial failures.",
+      inputSchema: z.object({ conversation_ids: conversationIdsSchema }),
+    },
+    async ({ conversation_ids }) => toolResult(await deleteConversations(env, conversation_ids)),
+  );
+
+  server.registerTool(
+    "memory_delete_namespace",
+    {
+      description: "Delete a namespace in bounded batches after an exact namespace confirmation.",
+      inputSchema: z
+        .object({
+          namespace: nonEmptyNamespaceSchema,
+          confirm_namespace: nonEmptyNamespaceSchema,
+        })
+        .refine((input) => input.namespace === input.confirm_namespace, {
+          message: "confirm_namespace must exactly match namespace",
+          path: ["confirm_namespace"],
+        }),
+    },
+    async ({ namespace }) => toolResult(await deleteNamespace(env, namespace)),
+  );
+
+  server.registerTool(
+    "memory_delete_all",
+    {
+      description:
+        "Delete all canonical memories and derived data in bounded batches; raw imports are retained.",
+      inputSchema: z.object({ confirm: z.literal("DELETE_ALL_MEMORIES") }),
+    },
+    async () => toolResult(await deleteAllMemories(env)),
   );
 
   server.registerTool(

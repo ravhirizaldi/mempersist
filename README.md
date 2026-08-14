@@ -98,6 +98,9 @@ Available tools:
 - `memory_list_conversations`
 - `memory_store`
 - `memory_append`
+- `memory_delete_conversations`
+- `memory_delete_namespace`
+- `memory_delete_all`
 - `memory_import_status`
 
 Search returns compact references; call `memory_get_context` only for selected results. See [docs/mcp.md](docs/mcp.md).
