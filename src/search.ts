@@ -2,6 +2,7 @@ import { z } from "zod";
 import { chunkConversation } from "./chunking";
 import { embedTexts, type EmbeddingEnv } from "./indexing";
 import { normalizeTags, type AppEnv, type SearchResponse, type SearchResult } from "./domain";
+import { SEMANTIC_CONCEPTS, semanticQueryVariants } from "./semantic-query";
 import { loadCanonicalRevision, loadConversationTags } from "./storage";
 
 export const RECENT_UNINDEXED_DEFAULTS = {
@@ -10,7 +11,7 @@ export const RECENT_UNINDEXED_DEFAULTS = {
   maxMessages: 200,
 } as const;
 
-const RANKING_STRATEGY = "normalized-weighted-v5";
+const RANKING_STRATEGY = "normalized-weighted-v6";
 
 // Structured labels that are usable as precision signals when the query names
 // them explicitly (EVENT 16, PHASE 3, CHAPTER 8). Generic markers such as
@@ -41,7 +42,14 @@ const SPECIFICITY_RATE = 0.5;
 const COOCCURRENCE_PER_CONCEPT = 0.05;
 const COOCCURRENCE_MAX = 0.25;
 
-const SEMANTIC_MIN_SCORE = 0.35;
+const SEMANTIC_MIN_SCORE = 0.3;
+// Per-conversation page slots. Per-event chunking (`chat-turn-v2`) makes a
+// container conversation surface several genuinely matching event chunks for
+// one query; five slots keep the top events visible without flooding the page.
+const PER_CONVERSATION_MAX_RESULTS = 5;
+// A semantic candidate at or above this raw Vectorize score is strong enough
+// to be guaranteed one page slot even when lexical matches push it down.
+const SEMANTIC_HEADROOM_MIN_SCORE = 0.5;
 const RRF_K = 60;
 const QUERY_STOP_WORDS = new Set([
   "a",
@@ -67,36 +75,93 @@ const QUERY_STOP_WORDS = new Set([
   "who",
   "why",
   "with",
+  // Pronoun, determiner, preposition, and auxiliary tokens carry no
+  // discriminative intent; they only inflate generic lexical overlap.
+  "about",
+  "above",
+  "after",
+  "am",
+  "as",
+  "before",
+  "behind",
+  "below",
+  "between",
+  "by",
+  "can",
+  "could",
+  "did",
+  "do",
+  "does",
+  "doing",
+  "done",
+  "during",
+  "had",
+  "has",
+  "have",
+  "having",
+  "he",
+  "her",
+  "hers",
+  "him",
+  "his",
+  "me",
+  "might",
+  "mine",
+  "must",
+  "my",
+  "our",
+  "ours",
+  "shall",
+  "she",
+  "should",
+  "that",
+  "their",
+  "theirs",
+  "them",
+  "these",
+  "they",
+  "this",
+  "those",
+  "us",
+  "was",
+  "we",
+  "were",
+  "will",
+  "would",
+  "you",
+  "your",
+  "yours",
+  // Indonesian function words.
+  "adalah",
+  "akan",
+  "atau",
+  "dan",
+  "dari",
+  "dengan",
+  "di",
+  "dia",
+  "ia",
+  "ini",
+  "itu",
+  "juga",
+  "kalian",
+  "kami",
+  "kamu",
+  "karena",
+  "ke",
+  "ketika",
+  "kita",
+  "mereka",
+  "pada",
+  "saat",
+  "saya",
+  "sebagai",
+  "sejak",
+  "setelah",
+  "sudah",
+  "untuk",
+  "yang",
 ]);
-
-const OPERATIONAL_CONCEPTS = [
-  {
-    name: "responsibility",
-    phrases: ["pic", "person in charge", "responsible", "responsibility", "owner", "operator"],
-  },
-  {
-    name: "packet-loss",
-    phrases: ["packet loss", "lost packet", "dropped packet", "packet drop"],
-  },
-  {
-    name: "network-outage",
-    phrases: [
-      "wan outage",
-      "internet failure",
-      "internet outage",
-      "connection outage",
-      "network failure",
-      "network outage",
-    ],
-  },
-  { name: "redundancy", phrases: ["backup", "secondary", "fallback", "standby"] },
-  {
-    name: "maintenance-window",
-    phrases: ["maintenance window", "maintenance schedule", "service window", "service schedule"],
-  },
-  { name: "network-edge", phrases: ["gateway", "edge gateway", "router", "device", "appliance"] },
-  { name: "connection", phrases: ["link", "connection", "connectivity"] },
-] as const;
 
 export type SearchEnv = Pick<AppEnv, "MEMORY_DB" | "MEMORY_BUCKET" | "ACTIVE_INDEX_GENERATION"> &
   EmbeddingEnv & {
@@ -135,6 +200,8 @@ interface RankingDebug {
   structuredLabelBoost: number;
   specificityBoost: number;
   coOccurrenceBoost: number;
+  lexicalEvidence: number;
+  semanticLift: number;
   finalScore: number;
 }
 
@@ -260,7 +327,7 @@ function textSignals(value: string): TextSignals {
   const stemmedText = tokenize(normalized).map(stemToken).join(" ");
   const concepts = new Set<string>();
   const aliases = new Map<string, Set<string>>();
-  for (const concept of OPERATIONAL_CONCEPTS) {
+  for (const concept of SEMANTIC_CONCEPTS) {
     const matches = concept.phrases
       .map((phrase) => tokenize(phrase).map(stemToken).join(" "))
       .filter((phrase) => containsPhrase(stemmedText, phrase));
@@ -270,6 +337,34 @@ function textSignals(value: string): TextSignals {
     }
   }
   return { normalized, tokens: selected, tokenSet: new Set(selected), concepts, aliases };
+}
+
+function queryEntityTokens(query: string): Set<string> {
+  const letters = query.match(/\p{L}/gu) ?? [];
+  const uppers = query.match(/\p{Lu}/gu) ?? [];
+  // ALL-CAPS queries carry no case signal (structured labels, exact headings),
+  // and fully lowercase queries name no proper nouns.
+  if (!letters.length || uppers.length === letters.length) return new Set();
+  const entities = new Set<string>();
+  for (const name of query.match(/\p{Lu}[\p{L}\p{N}._:@/-]*/gu) ?? []) {
+    for (const token of tokenize(name)) {
+      const stemmed = stemToken(token);
+      if (stemmed.length >= 2 && !QUERY_STOP_WORDS.has(stemmed)) entities.add(stemmed);
+    }
+  }
+  return entities;
+}
+
+// Fraction of the query's detected semantic concepts that the candidate text
+// covers with any alias, so semantic credit requires shared intent, not just
+// a high Vectorize score over an unrelated surface.
+function conceptCoverage(query: TextSignals, text: TextSignals): number {
+  if (!query.concepts.size) return 1;
+  let covered = 0;
+  for (const concept of query.concepts) {
+    if (text.concepts.has(concept)) covered += 1;
+  }
+  return covered / query.concepts.size;
 }
 
 function overlapRatio(values: Iterable<string>, candidates: Set<string>): number {
@@ -597,20 +692,49 @@ export function rankCandidates(
         COOCCURRENCE_MAX,
         Math.max(0, matchedRareConcepts - 1) * COOCCURRENCE_PER_CONCEPT,
       );
+      // Evidence-sensitive weighting: strong lexical evidence (exact phrase,
+      // heading, structured label, or rare non-entity content tokens) keeps
+      // the lexical-dominant scale. Generic or entity-only overlap yields low
+      // evidence, so the semantic channel contributes much more strongly.
+      const entityTokens = queryEntityTokens(query);
+      let matchedContentWeight = 0;
+      let matchedEntityCount = 0;
+      for (const token of rarityTokens) {
+        const weight = tokenWeights.get(token) ?? 0;
+        if (weight > 0 && fullTextTokens.has(token)) {
+          if (entityTokens.has(token)) matchedEntityCount += 1;
+          else matchedContentWeight += weight;
+        }
+      }
+      const contentTotalWeight = [...tokenWeights]
+        .filter(([token]) => !entityTokens.has(token))
+        .reduce((sum, [, weight]) => sum + weight, 0);
+      const contentSpecificity =
+        contentTotalWeight > 0 ? matchedContentWeight / contentTotalWeight : 0;
+      const entityEvidence = Math.min(0.25, matchedEntityCount * 0.05);
+      const strongLexicalSignal = Math.min(
+        1,
+        exactMatchBoost + headingMatchBoost + structuredLabelBoost,
+      );
+      const lexicalEvidence = Math.min(
+        1,
+        strongLexicalSignal + contentSpecificity + entityEvidence,
+      );
+      const semanticLift =
+        semanticScore * (1 - lexicalEvidence) * conceptCoverage(signals.query, signals.text);
       const finalScore =
         sourceConfidence +
         sourceAgreementBoost +
         exactMatchBoost +
-        entityMatchBoost +
-        tokenOverlapBoost +
-        aliasOverlapBoost +
-        fieldMatchBoost +
-        recencyBoost +
-        tagMatchBoost +
         headingMatchBoost +
         structuredLabelBoost +
-        specificityBoost +
-        coOccurrenceBoost;
+        (entityMatchBoost + tokenOverlapBoost + specificityBoost) * lexicalEvidence +
+        aliasOverlapBoost +
+        fieldMatchBoost +
+        coOccurrenceBoost +
+        recencyBoost +
+        tagMatchBoost +
+        semanticLift;
       const debug: RankingDebug = {
         strategy: RANKING_STRATEGY,
         lexicalScore,
@@ -629,6 +753,8 @@ export function rankCandidates(
         structuredLabelBoost,
         specificityBoost,
         coOccurrenceBoost,
+        lexicalEvidence,
+        semanticLift,
         finalScore,
       };
       return {
@@ -670,27 +796,78 @@ async function lexicalSearch(
   return result.results;
 }
 
+interface SemanticMatches {
+  candidates: Array<{ chunkId: string; score: number }>;
+  variants: string[];
+}
+
+// Union of per-representation semantic candidates. The same chunk returned by
+// several query representations keeps its single best raw score, so repeated
+// representation matches never inflate a candidate's semantic evidence.
+export function mergeSemanticCandidates(
+  groups: Array<Array<{ chunkId: string; score: number }>>,
+): Array<{ chunkId: string; score: number }> {
+  const merged = new Map<string, number>();
+  for (const group of groups) {
+    for (const match of group) {
+      const previous = merged.get(match.chunkId) ?? 0;
+      if (match.score > previous) merged.set(match.chunkId, match.score);
+    }
+  }
+  return [...merged].map(([chunkId, score]) => ({ chunkId, score }));
+}
+
 async function semanticSearch(
   env: SearchEnv,
   query: string,
   generationId: string,
   candidateCount: number,
   namespace?: string,
-): Promise<Array<{ chunkId: string; score: number }>> {
-  const [embedding] = await embedTexts(env, [query]);
-  if (!embedding) return [];
+): Promise<SemanticMatches> {
+  const variants = semanticQueryVariants(query);
+  if (!variants.length) return { candidates: [], variants };
+  const embeddings = await embedTexts(env, variants);
   const filter: VectorizeVectorMetadataFilter = namespace
     ? { generation: { $eq: generationId }, namespace: { $eq: namespace } }
     : { generation: { $eq: generationId } };
-  const matches = await env.MEMORY_VECTOR.query(embedding, {
-    topK: candidateCount,
-    returnMetadata: "all",
-    filter,
-  });
-  return matches.matches.flatMap((match) => {
-    const chunkId = match.metadata?.chunk_id;
-    return typeof chunkId === "string" ? [{ chunkId, score: match.score }] : [];
-  });
+  const groups: Array<Array<{ chunkId: string; score: number }>> = [];
+  for (let index = 0; index < variants.length; index += 1) {
+    const embedding = embeddings[index];
+    if (!embedding) continue;
+    const matches = await env.MEMORY_VECTOR.query(embedding, {
+      // Cloudflare Vectorize rejects topK above its hard cap of 50, so the
+      // semantic channel clamps while FTS and recent-canonical channels keep
+      // their larger candidate pools. Variant count is bounded (at most two),
+      // so the whole semantic channel stays within a few bounded queries.
+      topK: Math.min(50, candidateCount),
+      returnMetadata: "all",
+      filter,
+    });
+    groups.push(
+      matches.matches.flatMap((match) => {
+        const chunkId = match.metadata?.chunk_id;
+        return typeof chunkId === "string" ? [{ chunkId, score: match.score }] : [];
+      }),
+    );
+  }
+  return { candidates: mergeSemanticCandidates(groups), variants };
+}
+
+// The semantic channel is the only remote-dependent retrieval path; a single
+// retry absorbs transient Workers AI / Vectorize failures so paraphrase
+// queries do not silently degrade to lexical-only results.
+async function semanticSearchWithRetry(
+  env: SearchEnv,
+  query: string,
+  generationId: string,
+  candidateCount: number,
+  namespace?: string,
+): Promise<SemanticMatches> {
+  try {
+    return await semanticSearch(env, query, generationId, candidateCount, namespace);
+  } catch {
+    return semanticSearch(env, query, generationId, candidateCount, namespace);
+  }
 }
 
 async function fetchChunkRows(env: SearchEnv, ids: string[]): Promise<Map<string, ChunkRow>> {
@@ -844,23 +1021,32 @@ async function recentCanonicalSearch(
 
 export async function searchMemory(
   env: SearchEnv,
-  input: { query: string; limit: number; namespace?: string; tags?: string[] },
+  input: {
+    query: string;
+    limit: number;
+    namespace?: string;
+    tags?: string[];
+    tagMode?: "any" | "all";
+    debug?: boolean;
+  },
 ): Promise<SearchResponse> {
   if (!lexicalTokens(input.query).length) return { results: [], degraded: false, unavailable: [] };
   const limit = Math.min(20, Math.max(1, input.limit));
   const requestedTags = normalizeTags(input.tags ?? []);
+  const tagMode = input.tagMode === "any" ? "any" : "all";
   // Tag-filtered searches expand the pool so the AND predicate does not starve
   // results on narrow tags; the cap keeps Vectorize topK and FTS reads bounded.
   const candidateCount = Math.min(200, Math.max(20, limit * (requestedTags.length ? 8 : 4)));
   const generation = env.ACTIVE_INDEX_GENERATION;
   const [lexicalResult, semanticResult, recentResult] = await Promise.allSettled([
     lexicalSearch(env, input.query, generation, candidateCount, input.namespace),
-    semanticSearch(env, input.query, generation, candidateCount, input.namespace),
+    semanticSearchWithRetry(env, input.query, generation, candidateCount, input.namespace),
     recentCanonicalSearch(env, input.query, generation, candidateCount, input.namespace),
   ]);
   const unavailable: UnavailableSource[] = [];
   const lexical = lexicalResult.status === "fulfilled" ? lexicalResult.value : [];
-  const semantic = semanticResult.status === "fulfilled" ? semanticResult.value : [];
+  const semantic: SemanticMatches =
+    semanticResult.status === "fulfilled" ? semanticResult.value : { candidates: [], variants: [] };
   const recent =
     recentResult.status === "fulfilled"
       ? recentResult.value
@@ -878,7 +1064,7 @@ export async function searchMemory(
 
   const merged = new Map<string, RankedCandidate>();
   lexical.forEach((row, index) => merged.set(row.id, { chunkId: row.id, lexicalRank: index + 1 }));
-  semantic.forEach((match) => {
+  semantic.candidates.forEach((match) => {
     const candidate = merged.get(match.chunkId) ?? { chunkId: match.chunkId };
     candidate.semanticScore = match.score;
     merged.set(match.chunkId, candidate);
@@ -905,38 +1091,87 @@ export async function searchMemory(
       const row = rows.get(item.chunkId);
       if (!row) return false;
       const tags = conversationTags.get(row.conversation_id) ?? [];
-      return requestedTags.every((tag) => tags.includes(tag));
+      return tagMode === "any"
+        ? requestedTags.some((tag) => tags.includes(tag))
+        : requestedTags.every((tag) => tags.includes(tag));
     });
   }
   const perConversation = new Map<string, number>();
   const results: SearchResult[] = [];
+  const buildResult = (item: RankedResult, row: ChunkRow): SearchResult => ({
+    conversationId: row.conversation_id,
+    revisionId: row.revision_id,
+    chunkId: row.id,
+    title: row.title,
+    snippet: row.body.length > 500 ? `${row.body.slice(0, 497)}...` : row.body,
+    timestamp: row.conversation_timestamp,
+    namespace: row.namespace,
+    tags: conversationTags.get(row.conversation_id) ?? [],
+    score: Number(item.score.toFixed(6)),
+    sources: item.sources,
+    ...(input.debug
+      ? {
+          debug: {
+            finalScore: item.score,
+            lexicalScore: item.debug.lexicalScore,
+            semanticScore: item.debug.semanticScore,
+            recentCanonicalScore: item.debug.recentCanonicalScore,
+            sourceConfidence: item.debug.sourceConfidence,
+            exactMatchBoost: item.debug.exactMatchBoost,
+            entityMatchBoost: item.debug.entityMatchBoost,
+            tokenOverlapBoost: item.debug.tokenOverlapBoost,
+            aliasOverlapBoost: item.debug.aliasOverlapBoost,
+            fieldMatchBoost: item.debug.fieldMatchBoost,
+            recencyBoost: item.debug.recencyBoost,
+            tagMatchBoost: item.debug.tagMatchBoost,
+            headingMatchBoost: item.debug.headingMatchBoost,
+            structuredLabelBoost: item.debug.structuredLabelBoost,
+            specificityBoost: item.debug.specificityBoost,
+            coOccurrenceBoost: item.debug.coOccurrenceBoost,
+            lexicalEvidence: item.debug.lexicalEvidence,
+            semanticLift: item.debug.semanticLift,
+            semanticVariants: semantic.variants,
+            sources: item.sources,
+          },
+        }
+      : {}),
+  });
   for (const item of ranked) {
     const row = rows.get(item.chunkId);
     if (!row) continue;
     const exact = row.body.toLocaleLowerCase().includes(normalizeText(input.query));
     if (item.score < 0.25 && !exact) continue;
     const count = perConversation.get(row.conversation_id) ?? 0;
-    if (count >= 2) continue;
+    if (count >= PER_CONVERSATION_MAX_RESULTS) continue;
     perConversation.set(row.conversation_id, count + 1);
-    results.push({
-      conversationId: row.conversation_id,
-      revisionId: row.revision_id,
-      chunkId: row.id,
-      title: row.title,
-      snippet: row.body.length > 500 ? `${row.body.slice(0, 497)}...` : row.body,
-      timestamp: row.conversation_timestamp,
-      namespace: row.namespace,
-      tags: conversationTags.get(row.conversation_id) ?? [],
-      score: Number(item.score.toFixed(6)),
-      sources: item.sources,
-    });
+    results.push(buildResult(item, row));
     if (results.length >= limit) break;
+  }
+  // Semantic recall guarantee: the strongest semantic candidate is the only
+  // channel that understands paraphrases, so reserve it one page slot even
+  // when per-conversation slots or lexical matches pushed it below the cutoff.
+  const topSemantic = semantic.candidates.reduce<{ chunkId: string; score: number } | undefined>(
+    (best, match) => (best === undefined || match.score > best.score ? match : best),
+    undefined,
+  );
+  if (topSemantic && topSemantic.score >= SEMANTIC_HEADROOM_MIN_SCORE) {
+    const headroom = ranked.find((item) => item.chunkId === topSemantic.chunkId);
+    const row = headroom ? rows.get(headroom.chunkId) : undefined;
+    if (headroom && row && !results.some((item) => item.chunkId === headroom.chunkId)) {
+      results.push(buildResult(headroom, row));
+      results.sort((a, b) => b.score - a.score || a.chunkId.localeCompare(b.chunkId));
+      if (results.length > limit) {
+        const last = results.at(-1);
+        if (last?.chunkId === headroom.chunkId) results.splice(results.length - 2, 1);
+        else results.pop();
+      }
+    }
   }
 
   if (recent.candidateCount > 0 || unavailable.length > 0) {
     const indexedIds = new Set([
       ...lexical.map((row) => row.id),
-      ...semantic.map((match) => match.chunkId),
+      ...semantic.candidates.map((match) => match.chunkId),
     ]);
     console.info(
       JSON.stringify({

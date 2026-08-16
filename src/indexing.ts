@@ -184,6 +184,36 @@ async function removeDerivedRevision(
   }
 }
 
+// After a revision is indexed into its generation, supersede vectors from
+// older generations for the same revision so a generation rebuild does not
+// leave duplicate stale vectors behind. Best-effort: a cleanup failure logs
+// and never marks a successfully indexed revision failed, and the deletion
+// path later clears every generation's vectors for the revision anyway.
+async function supersedeStaleVectors(
+  env: IndexingEnv,
+  revisionId: string,
+  generationId: string,
+): Promise<void> {
+  try {
+    const rows = await env.MEMORY_DB.prepare(
+      "SELECT vector_id FROM chunks WHERE revision_id = ? AND generation_id <> ?",
+    )
+      .bind(revisionId, generationId)
+      .all<{ vector_id: string }>();
+    const ids = rows.results.map((row) => row.vector_id);
+    for (const batch of groups(ids, 100)) await env.MEMORY_VECTOR.deleteByIds(batch);
+  } catch (error) {
+    console.error(
+      JSON.stringify({
+        message: "vector_supersede_failed",
+        revision_id: revisionId,
+        generation_id: generationId,
+        error: errorDetails(error).message,
+      }),
+    );
+  }
+}
+
 export async function indexRevision(
   env: IndexingEnv,
   revisionId: string,
@@ -284,6 +314,7 @@ export async function indexRevision(
     )
       .bind(lastMutationId, indexedAt, indexedAt, revisionId, generationId)
       .run();
+    await supersedeStaleVectors(env, revisionId, generationId);
     return chunks.length;
   } catch (error) {
     if (!(await isRevisionIndexable(env, revisionId))) {

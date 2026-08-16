@@ -1,6 +1,6 @@
 import type { AppEnv, CanonicalNode } from "./domain";
 import { AppError } from "./errors";
-import { loadCanonicalRevision } from "./storage";
+import { loadCanonicalRevision, loadConversationTags } from "./storage";
 
 interface ChunkSourceRow {
   revision_id: string;
@@ -81,6 +81,7 @@ export async function getConversationPage(
     .first<{ current_revision_id: string | null }>();
   if (!row?.current_revision_id) throw new AppError("NOT_FOUND", "Conversation not found", 404);
   const loaded = await loadCanonicalRevision(env, row.current_revision_id);
+  const tags = (await loadConversationTags(env, [conversationId])).get(conversationId) ?? [];
   const byId = new Map(loaded.conversation.nodes.map((node) => [node.sourceNodeId, node]));
   const nodes =
     branch === "active"
@@ -97,6 +98,7 @@ export async function getConversationPage(
       sourceType: loaded.conversation.sourceType,
       sourceId: loaded.conversation.sourceId,
       namespace: loaded.conversation.namespace,
+      tags,
       revisionId: row.current_revision_id,
       currentSourceNodeId: loaded.conversation.currentSourceNodeId,
       anomalies: loaded.conversation.anomalies,

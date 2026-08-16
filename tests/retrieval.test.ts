@@ -1,5 +1,10 @@
 import { describe, expect, it } from "vitest";
-import { queryTerms, rankCandidates, recentLexicalScore } from "../src/search";
+import {
+  mergeSemanticCandidates,
+  queryTerms,
+  rankCandidates,
+  recentLexicalScore,
+} from "../src/search";
 
 describe("hybrid retrieval ranking", () => {
   const oldDecision = {
@@ -559,5 +564,556 @@ describe("hybrid retrieval ranking", () => {
 
     expect(ranked[0]?.chunkId).toBe("photobox");
     expect(ranked[0]?.score).toBeGreaterThan(ranked[1]?.score ?? 0);
+  });
+
+  it("retrieves the photobox event for an English phone-background paraphrase", () => {
+    const rows = new Map([
+      [
+        "event16",
+        {
+          id: "event16",
+          revision_id: "r1",
+          conversation_id: "c1",
+          title: "Event 16",
+          body: "Ravhi and Adriana became a newly official couple at the photobox. The photobox image became Adriana's chosen wallpaper and lock screen.",
+          conversation_timestamp: "2026-08-15T00:00:00.000Z",
+          namespace: "work",
+        },
+      ],
+      [
+        "generic",
+        {
+          id: "generic",
+          revision_id: "r2",
+          conversation_id: "c2",
+          title: "Couple record",
+          body: "They are a couple with an official relationship.",
+          conversation_timestamp: "2026-08-15T00:00:00.000Z",
+          namespace: "work",
+        },
+      ],
+    ]);
+    const ranked = rankCandidates(
+      [
+        { chunkId: "generic", semanticScore: 0.9 },
+        { chunkId: "event16", semanticScore: 0.85 },
+      ],
+      "picture Adriana uses as her phone background after she and Ravhi started dating",
+      rows,
+      Date.parse("2026-08-15T00:00:00.000Z"),
+    );
+
+    expect(ranked[0]?.chunkId).toBe("event16");
+    expect(ranked[0]?.debug.aliasOverlapBoost).toBe(0.15);
+  });
+
+  it("retrieves the photobox event for an Indonesian phone-background paraphrase", () => {
+    const rows = new Map([
+      [
+        "event16",
+        {
+          id: "event16",
+          revision_id: "r1",
+          conversation_id: "c1",
+          title: "Event 16",
+          body: "Ravhi dan Adriana baru jadian dan resmi jadi pasangan di photobox. Gambar photobox menjadi wallpaper dan lock screen pilihan Adriana.",
+          conversation_timestamp: "2026-08-15T00:00:00.000Z",
+          namespace: "work",
+        },
+      ],
+      [
+        "generic",
+        {
+          id: "generic",
+          revision_id: "r2",
+          conversation_id: "c2",
+          title: "Catatan pasangan",
+          body: "Mereka adalah pasangan resmi.",
+          conversation_timestamp: "2026-08-15T00:00:00.000Z",
+          namespace: "work",
+        },
+      ],
+    ]);
+    const ranked = rankCandidates(
+      [
+        { chunkId: "generic", semanticScore: 0.9 },
+        { chunkId: "event16", semanticScore: 0.85 },
+      ],
+      "gambar yang Adriana pakai sebagai latar layar HP setelah dia dan Ravhi mulai pacaran",
+      rows,
+      Date.parse("2026-08-15T00:00:00.000Z"),
+    );
+
+    expect(ranked[0]?.chunkId).toBe("event16");
+    // The picture concept ("gambar" on both sides) earns no cross-alias
+    // credit; phone-background and relationship do (2 of 3 concepts).
+    expect(ranked[0]?.debug.aliasOverlapBoost).toBeCloseTo(0.1, 10);
+  });
+
+  it("ranks a strong semantic paraphrase above weak irrelevant lexical overlap", () => {
+    const rows = new Map([
+      [
+        "semantic",
+        {
+          id: "semantic",
+          revision_id: "r1",
+          conversation_id: "c1",
+          title: "Wallpaper persistence",
+          body: "Her chosen wallpaper persists across device changes.",
+          conversation_timestamp: "2026-08-15T00:00:00.000Z",
+          namespace: "work",
+        },
+      ],
+      [
+        "lexical",
+        {
+          id: "lexical",
+          revision_id: "r2",
+          conversation_id: "c2",
+          title: "Phone purchase",
+          body: "The phone was bought last month for work.",
+          conversation_timestamp: "2026-08-15T00:00:00.000Z",
+          namespace: "work",
+        },
+      ],
+    ]);
+    const ranked = rankCandidates(
+      [
+        { chunkId: "semantic", semanticScore: 0.9 },
+        { chunkId: "lexical", lexicalRank: 25, semanticScore: 0.4 },
+      ],
+      "the image she keeps behind the icons on her phone",
+      rows,
+      Date.parse("2026-08-15T00:00:00.000Z"),
+    );
+
+    expect(ranked[0]?.chunkId).toBe("semantic");
+    expect(ranked[0]?.debug.semanticScore).toBeGreaterThan(ranked[1]?.debug.semanticScore ?? 0);
+  });
+
+  it("retrieves an Indonesian memory for an English paraphrase query", () => {
+    const rows = new Map([
+      [
+        "indonesian",
+        {
+          id: "indonesian",
+          revision_id: "r1",
+          conversation_id: "c1",
+          title: "Latar layar",
+          body: "Gambar photobox itu menjadi latar layar dan wallpaper HP Adriana.",
+          conversation_timestamp: "2026-08-15T00:00:00.000Z",
+          namespace: "work",
+        },
+      ],
+      [
+        "other",
+        {
+          id: "other",
+          revision_id: "r2",
+          conversation_id: "c2",
+          title: "Meeting notes",
+          body: "The team discussed the quarterly roadmap.",
+          conversation_timestamp: "2026-08-15T00:00:00.000Z",
+          namespace: "work",
+        },
+      ],
+    ]);
+    const ranked = rankCandidates(
+      [
+        { chunkId: "indonesian", semanticScore: 0.9 },
+        { chunkId: "other", semanticScore: 0.4 },
+      ],
+      "the picture she uses as her phone background",
+      rows,
+      Date.parse("2026-08-15T00:00:00.000Z"),
+    );
+
+    expect(ranked[0]?.chunkId).toBe("indonesian");
+  });
+});
+
+describe("query-side semantic representations", () => {
+  const event16Row = {
+    id: "event16",
+    revision_id: "r1",
+    conversation_id: "c1",
+    title: "Event 16",
+    body: "Ravhi and Adriana became a newly official couple at the photobox. The photobox image became Adriana's chosen wallpaper and lock screen.",
+    conversation_timestamp: "2026-08-15T00:00:00.000Z",
+    namespace: "work",
+  };
+  const event33Row = {
+    id: "event33",
+    revision_id: "r2",
+    conversation_id: "c2",
+    title: "Event 33",
+    body: "Adriana's current wallpaper is the photobox image migrated to her new phone and still set as the lock screen.",
+    conversation_timestamp: "2026-08-15T00:00:00.000Z",
+    namespace: "work",
+  };
+  const genericCoupleRow = {
+    id: "generic",
+    revision_id: "r3",
+    conversation_id: "c3",
+    title: "Couple record",
+    body: "They are a couple with an official relationship.",
+    conversation_timestamp: "2026-08-15T00:00:00.000Z",
+    namespace: "work",
+  };
+  const vienCoupleRow = {
+    id: "vien",
+    revision_id: "r4",
+    conversation_id: "c4",
+    title: "Vien Prasetyo record",
+    body: "Vien and Prasetyo became an established couple.",
+    conversation_timestamp: "2026-08-15T00:00:00.000Z",
+    namespace: "work",
+  };
+  const deviceRow = {
+    id: "device",
+    revision_id: "r5",
+    conversation_id: "c5",
+    title: "Device migration",
+    body: "The MacBook migration moved developer configuration to the new work laptop.",
+    conversation_timestamp: "2026-08-15T00:00:00.000Z",
+    namespace: "work",
+  };
+
+  it("ranks Event 16 in the top 1-3 for the long English paraphrase", () => {
+    const rows = new Map([
+      ["event16", event16Row],
+      ["generic", genericCoupleRow],
+      ["device", deviceRow],
+    ]);
+    const ranked = rankCandidates(
+      [
+        { chunkId: "event16", semanticScore: 0.72 },
+        { chunkId: "generic", semanticScore: 0.66 },
+        { chunkId: "device", semanticScore: 0.5 },
+      ],
+      "picture Adriana uses as her phone background after she and Ravhi started dating",
+      rows,
+      Date.parse("2026-08-15T00:00:00.000Z"),
+    );
+    expect(ranked[0]?.chunkId).toBe("event16");
+    expect(ranked.findIndex((item) => item.chunkId === "event16")).toBeLessThanOrEqual(2);
+    expect(ranked[0]?.debug.aliasOverlapBoost).toBe(0.15);
+    expect(ranked[0]?.sources).toContain("semantic");
+  });
+
+  it("ranks Event 16 in the top 1-3 for the Indonesian paraphrase", () => {
+    const rows = new Map([
+      ["event16", event16Row],
+      ["generic", genericCoupleRow],
+      ["device", deviceRow],
+    ]);
+    const ranked = rankCandidates(
+      [
+        { chunkId: "event16", semanticScore: 0.72 },
+        { chunkId: "generic", semanticScore: 0.63 },
+        { chunkId: "device", semanticScore: 0.5 },
+      ],
+      "gambar yang Adriana pakai sebagai latar layar HP setelah dia dan Ravhi mulai pacaran",
+      rows,
+      Date.parse("2026-08-15T00:00:00.000Z"),
+    );
+    expect(ranked.findIndex((item) => item.chunkId === "event16")).toBeLessThanOrEqual(2);
+    expect(ranked[0]?.chunkId).toBe("event16");
+  });
+
+  it("ranks Event 16 first for the lexically weak English paraphrase", () => {
+    const rows = new Map([
+      ["event16", event16Row],
+      ["generic", genericCoupleRow],
+      ["device", deviceRow],
+    ]);
+    const ranked = rankCandidates(
+      [
+        { chunkId: "event16", semanticScore: 0.61 },
+        { chunkId: "generic", semanticScore: 0.5 },
+        { chunkId: "device", semanticScore: 0.45 },
+      ],
+      "the image she keeps behind the icons on her phone from when they became a couple",
+      rows,
+      Date.parse("2026-08-15T00:00:00.000Z"),
+    );
+    expect(ranked[0]?.chunkId).toBe("event16");
+    expect(ranked[0]?.sources).toContain("semantic");
+  });
+
+  it("ranks Event 16 first for the lexically weak Indonesian paraphrase", () => {
+    const rows = new Map([
+      ["event16", event16Row],
+      ["generic", genericCoupleRow],
+      ["device", deviceRow],
+    ]);
+    const ranked = rankCandidates(
+      [
+        { chunkId: "event16", semanticScore: 0.67 },
+        { chunkId: "generic", semanticScore: 0.5 },
+        { chunkId: "device", semanticScore: 0.45 },
+      ],
+      "foto yang dipasang Adriana di layar HP sejak mereka jadian",
+      rows,
+      Date.parse("2026-08-15T00:00:00.000Z"),
+    );
+    expect(ranked[0]?.chunkId).toBe("event16");
+  });
+
+  it("keeps Event 16 and Event 33 on top for the lock-screen query", () => {
+    const rows = new Map([
+      ["event16", event16Row],
+      ["event33", event33Row],
+      ["generic", genericCoupleRow],
+    ]);
+    const ranked = rankCandidates(
+      [
+        { chunkId: "event16", semanticScore: 0.625 },
+        { chunkId: "event33", semanticScore: 0.598 },
+        { chunkId: "generic", semanticScore: 0.45 },
+      ],
+      "what photo is Adriana using on her phone lock screen",
+      rows,
+      Date.parse("2026-08-15T00:00:00.000Z"),
+    );
+    expect(["event16", "event33"]).toContain(ranked[0]?.chunkId);
+    expect(ranked.slice(0, 2).map((item) => item.chunkId)).toEqual(
+      expect.arrayContaining(["event16", "event33"]),
+    );
+  });
+
+  it("does not let a pure relationship memory flood past Event 16", () => {
+    const rows = new Map([
+      ["event16", event16Row],
+      ["vien", vienCoupleRow],
+    ]);
+    const ranked = rankCandidates(
+      [
+        { chunkId: "event16", semanticScore: 0.72 },
+        { chunkId: "vien", semanticScore: 0.95 },
+      ],
+      "picture Adriana uses as her phone background after she and Ravhi started dating",
+      rows,
+      Date.parse("2026-08-15T00:00:00.000Z"),
+    );
+    expect(ranked[0]?.chunkId).toBe("event16");
+    expect(ranked[1]?.chunkId).toBe("vien");
+  });
+
+  it("deduplicates identical candidates across query representations without extra credit", () => {
+    const merged = mergeSemanticCandidates([
+      [
+        { chunkId: "a", score: 0.7 },
+        { chunkId: "b", score: 0.6 },
+      ],
+      [
+        { chunkId: "a", score: 0.75 },
+        { chunkId: "c", score: 0.5 },
+      ],
+    ]);
+    expect(merged).toEqual([
+      { chunkId: "a", score: 0.75 },
+      { chunkId: "b", score: 0.6 },
+      { chunkId: "c", score: 0.5 },
+    ]);
+    expect(merged.filter((item) => item.chunkId === "a").length).toBe(1);
+  });
+});
+
+describe("evidence-sensitive hybrid reranking", () => {
+  const event16 = {
+    id: "event16",
+    revision_id: "r1",
+    conversation_id: "c1",
+    title: "[EVENT 16 / NEW-COUPLE PHOTOBOX + CANONICAL WALLPAPER]",
+    body: "Ravhi and Adriana became a newly official couple at the photobox. The photobox image became Adriana's chosen wallpaper and lock screen.",
+    conversation_timestamp: "2026-08-15T00:00:00.000Z",
+    namespace: "work",
+  };
+  const hpDevice = {
+    id: "hp-device",
+    revision_id: "r2",
+    conversation_id: "c2",
+    title: "[EVENT 4 / DEVICE SWAP]",
+    body: "Adriana and Ravhi changed the HP laptop after the OS upgrade failed. Her phone was not involved.",
+    conversation_timestamp: "2026-08-15T00:00:00.000Z",
+    namespace: "work",
+  };
+  const layarNotes = {
+    id: "layar",
+    revision_id: "r3",
+    conversation_id: "c3",
+    title: "[EVENT 9 / LAYAR CATATAN]",
+    body: "catatan layar proyek: ukuran latar layar dirapikan oleh Ravhi.",
+    conversation_timestamp: "2026-08-15T00:00:00.000Z",
+    namespace: "work",
+  };
+  const macbook = {
+    id: "macbook",
+    revision_id: "r4",
+    conversation_id: "c4",
+    title: "[EVENT 21 / MACBOOK DEVICE MIGRATION]",
+    body: "The MacBook migration moved developer configuration to the new work laptop.",
+    conversation_timestamp: "2026-08-15T00:00:00.000Z",
+    namespace: "work",
+  };
+  const prasetyo = {
+    id: "prasetyo",
+    revision_id: "r5",
+    conversation_id: "c5",
+    title: "[EVENT 12 / VIEN + PRASETYO BECOME ESTABLISHED COUPLE]",
+    body: "Vien and Prasetyo became an established couple with an official relationship.",
+    conversation_timestamp: "2026-08-15T00:00:00.000Z",
+    namespace: "work",
+  };
+  const rows = new Map([
+    ["event16", event16],
+    ["hp-device", hpDevice],
+    ["layar", layarNotes],
+    ["macbook", macbook],
+    ["prasetyo", prasetyo],
+  ]);
+  const now = Date.parse("2026-08-15T00:00:00.000Z");
+
+  it("keeps Event 16 first for the exact structured query", () => {
+    const ranked = rankCandidates(
+      [
+        { chunkId: "prasetyo", lexicalRank: 1, semanticScore: 0.99 },
+        { chunkId: "event16", lexicalRank: 2, semanticScore: 0.4 },
+      ],
+      "EVENT 16 NEW-COUPLE PHOTOBOX CANONICAL WALLPAPER",
+      rows,
+      now,
+    );
+    expect(ranked[0]?.chunkId).toBe("event16");
+    expect((ranked[0]?.score ?? 0) - (ranked[1]?.score ?? 0)).toBeGreaterThan(1);
+  });
+
+  it("keeps Event 16 first for rare content terms", () => {
+    const ranked = rankCandidates(
+      [
+        { chunkId: "layar", lexicalRank: 1 },
+        { chunkId: "hp-device", lexicalRank: 1 },
+        { chunkId: "event16", lexicalRank: 2 },
+      ],
+      "photobox wallpaper couple",
+      rows,
+      now,
+    );
+    expect(ranked[0]?.chunkId).toBe("event16");
+  });
+
+  it.each([
+    "picture Adriana uses as her phone background after she and Ravhi started dating",
+    "gambar yang Adriana pakai sebagai latar layar HP setelah dia dan Ravhi mulai pacaran",
+    "foto yang dipasang Adriana di layar HP sejak mereka jadian",
+  ])("ranks Event 16 in the top 1-3 for the paraphrase: %s", (query) => {
+    const ranked = rankCandidates(
+      [
+        { chunkId: "event16", lexicalRank: 6, semanticScore: 0.85 },
+        { chunkId: "hp-device", lexicalRank: 1, semanticScore: 0.5 },
+        { chunkId: "layar", lexicalRank: 2, semanticScore: 0.55 },
+        { chunkId: "macbook", semanticScore: 0.7 },
+        { chunkId: "prasetyo", semanticScore: 0.65 },
+      ],
+      query,
+      rows,
+      now,
+    );
+    const event16Rank = ranked.findIndex((item) => item.chunkId === "event16");
+    const deviceRank = ranked.findIndex((item) => item.chunkId === "hp-device");
+    expect(event16Rank).toBeLessThanOrEqual(2);
+    expect(deviceRank).toBeGreaterThan(event16Rank);
+    expect(ranked[event16Rank]?.debug.lexicalEvidence).toBeLessThan(1);
+    expect(ranked[event16Rank]?.debug.semanticLift).toBeGreaterThan(0);
+  });
+
+  it("does not let generic Adriana/Ravhi/HP overlap outrank Event 16", () => {
+    const ranked = rankCandidates(
+      [
+        { chunkId: "hp-device", lexicalRank: 1, semanticScore: 0.55 },
+        { chunkId: "event16", lexicalRank: 6, semanticScore: 0.85 },
+      ],
+      "gambar yang Adriana pakai sebagai latar layar HP setelah dia dan Ravhi mulai pacaran",
+      rows,
+      now,
+    );
+    expect(ranked[0]?.chunkId).toBe("event16");
+    expect(ranked[0]?.debug.semanticLift).toBeGreaterThan(ranked[1]?.debug.semanticLift ?? 0);
+  });
+});
+
+describe("evidence-sensitive reranking generalizes beyond the photobox example", () => {
+  const now = Date.parse("2026-08-15T00:00:00.000Z");
+  const row = (
+    id: string,
+    title: string,
+    body: string,
+  ): {
+    id: string;
+    revision_id: string;
+    conversation_id: string;
+    title: string;
+    body: string;
+    conversation_timestamp: string;
+    namespace: string;
+  } => ({
+    id,
+    revision_id: `r-${id}`,
+    conversation_id: `c-${id}`,
+    title,
+    body,
+    conversation_timestamp: "2026-08-15T00:00:00.000Z",
+    namespace: "work",
+  });
+
+  it("lets a strong semantic match beat weak lexical noise for a network-outage paraphrase", () => {
+    const rows = new Map([
+      [
+        "outage",
+        row(
+          "outage",
+          "Backup circuit notes",
+          "The secondary link stayed up when the primary circuit dropped packets during the failure drill.",
+        ),
+      ],
+      [
+        "noise",
+        row(
+          "noise",
+          "HP laptop check",
+          "Adriana and Ravhi checked the HP laptop before the drill.",
+        ),
+      ],
+    ]);
+    const ranked = rankCandidates(
+      [
+        { chunkId: "noise", lexicalRank: 1, semanticScore: 0.5 },
+        { chunkId: "outage", lexicalRank: 4, semanticScore: 0.85 },
+      ],
+      "which gateway lost packets during the wan outage drill",
+      rows,
+      now,
+    );
+    expect(ranked[0]?.chunkId).toBe("outage");
+    expect(ranked[0]?.debug.semanticLift).toBeGreaterThan(0);
+  });
+
+  it("lets a strong semantic match beat weak lexical noise for a concept-free query", () => {
+    const rows = new Map([
+      ["target", row("target", "Catatan deploy", "Cara mengembalikan deployment yang gagal.")],
+      ["noise", row("noise", "Rollback log", "Deployment failed; the team then rolled back.")],
+    ]);
+    const ranked = rankCandidates(
+      [
+        { chunkId: "noise", lexicalRank: 1, semanticScore: 0.5 },
+        { chunkId: "target", semanticScore: 0.85 },
+      ],
+      "how do I roll back a failed deployment",
+      rows,
+      now,
+    );
+    expect(ranked[0]?.chunkId).toBe("target");
+    expect(ranked[0]?.debug.semanticLift).toBeGreaterThan(0);
   });
 });

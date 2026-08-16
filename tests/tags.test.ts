@@ -10,12 +10,23 @@ describe("tag normalization", () => {
         "dragon-arc",
         "Ｂａｔｔｌｅ",
         "battle",
+        "RELATIONSHIP",
+        "relationship",
         "  ",
         "",
         "plot-line",
       ]),
-    ).toEqual(["dragon-arc", "battle", "plot-line"]);
+    ).toEqual(["dragon-arc", "battle", "relationship", "plot-line"]);
     expect(normalizeTags([])).toEqual([]);
+  });
+
+  it("preserves hyphens and does not merge distinct tags", () => {
+    expect(normalizeTags(["current-scene", "current_scene", "rules", "rule"])).toEqual([
+      "current-scene",
+      "current_scene",
+      "rules",
+      "rule",
+    ]);
   });
 });
 

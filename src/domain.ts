@@ -1,6 +1,6 @@
 export const SOURCE_CHATGPT = "chatgpt";
 export const SOURCE_MCP = "mcp";
-export const CHUNK_STRATEGY = "chat-turn-v1";
+export const CHUNK_STRATEGY = "chat-turn-v2";
 export const EMBEDDING_MODEL = "@cf/baai/bge-m3";
 export const EMBEDDING_DIMENSIONS = 1024;
 
@@ -106,6 +106,30 @@ export interface SearchResult {
   tags: string[];
   score: number;
   sources: Array<"lexical" | "semantic" | "recent_canonical">;
+  debug?: SearchResultDebug;
+}
+
+export interface SearchResultDebug {
+  finalScore: number;
+  lexicalScore: number;
+  semanticScore: number;
+  recentCanonicalScore: number;
+  sourceConfidence: number;
+  exactMatchBoost: number;
+  entityMatchBoost: number;
+  tokenOverlapBoost: number;
+  aliasOverlapBoost: number;
+  fieldMatchBoost: number;
+  recencyBoost: number;
+  tagMatchBoost: number;
+  headingMatchBoost: number;
+  structuredLabelBoost: number;
+  specificityBoost: number;
+  coOccurrenceBoost: number;
+  lexicalEvidence: number;
+  semanticLift: number;
+  semanticVariants: string[];
+  sources: SearchResult["sources"];
 }
 
 export interface SearchResponse {

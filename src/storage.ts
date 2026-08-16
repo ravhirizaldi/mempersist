@@ -285,7 +285,8 @@ export async function loadConversationTags(
     if (!batch.length) continue;
     const result = await env.MEMORY_DB.prepare(
       `SELECT conversation_id, tag FROM conversation_tags
-       WHERE conversation_id IN (${batch.map(() => "?").join(",")})`,
+       WHERE conversation_id IN (${batch.map(() => "?").join(",")})
+       ORDER BY rowid`,
     )
       .bind(...batch)
       .all<{ conversation_id: string; tag: string }>();
@@ -355,11 +356,31 @@ export async function loadCurrentConversation(
 
 export async function listConversations(
   env: AppEnv,
-  input: { limit: number; cursor?: string; namespace?: string },
+  input: {
+    limit: number;
+    cursor?: string;
+    namespace?: string;
+    tags?: string[];
+    tagMode?: "any" | "all";
+  },
 ): Promise<{ conversations: ConversationRow[]; nextCursor: string | null }> {
   const limit = Math.min(100, Math.max(1, input.limit));
   const where = ["deleted_at IS NULL"];
   const params: Array<string | number> = [];
+  const tags = normalizeTags(input.tags ?? []);
+  if (tags.length) {
+    where.push(
+      input.tagMode === "any"
+        ? `id IN (SELECT DISTINCT conversation_id FROM conversation_tags WHERE tag IN (${tags
+            .map(() => "?")
+            .join(",")}))`
+        : `id IN (SELECT conversation_id FROM conversation_tags WHERE tag IN (${tags
+            .map(() => "?")
+            .join(",")}) GROUP BY conversation_id HAVING COUNT(*) = ?)`,
+    );
+    params.push(...tags);
+    if (input.tagMode !== "any") params.push(tags.length);
+  }
   if (input.namespace) {
     where.push("namespace = ?");
     params.push(input.namespace);
@@ -382,6 +403,38 @@ export async function listConversations(
     conversations: await withTags(env, rows),
     nextCursor: hasMore ? (rows.at(-1)?.id ?? null) : null,
   };
+}
+
+export async function updateConversationTags(
+  env: AppEnv,
+  conversationId: string,
+  baseRevisionId: string,
+  add: string[],
+  remove: string[],
+): Promise<{ conversationId: string; tags: string[] }> {
+  const loaded = await loadCurrentConversation(env, conversationId);
+  if (loaded.row.current_revision_id !== baseRevisionId) {
+    throw new AppError("IMPORT_CONFLICT", "base_revision_id is stale", 409);
+  }
+  const toAdd = normalizeTags(add);
+  const toRemove = normalizeTags(remove);
+  // Removals are applied first so a tag present in both lists ends up added.
+  const statements: D1PreparedStatement[] = [
+    ...toRemove.map((tag) =>
+      env.MEMORY_DB.prepare(
+        `DELETE FROM conversation_tags WHERE conversation_id = ? AND tag = ?`,
+      ).bind(conversationId, tag),
+    ),
+    ...toAdd.map((tag) =>
+      env.MEMORY_DB.prepare(
+        `INSERT INTO conversation_tags (conversation_id, tag) VALUES (?, ?)
+         ON CONFLICT(conversation_id, tag) DO NOTHING`,
+      ).bind(conversationId, tag),
+    ),
+  ];
+  if (statements.length) await env.MEMORY_DB.batch(statements);
+  const tags = (await loadConversationTags(env, [conversationId])).get(conversationId) ?? [];
+  return { conversationId, tags };
 }
 
 export async function appendConversation(

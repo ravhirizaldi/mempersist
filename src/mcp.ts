@@ -11,7 +11,12 @@ import type { AppEnv } from "./domain";
 import { enqueueIndex } from "./jobs";
 import { getChunkContext, getConversationPage } from "./retrieval";
 import { searchMemory } from "./search";
-import { appendConversation, listConversations, writeCanonicalConversation } from "./storage";
+import {
+  appendConversation,
+  listConversations,
+  updateConversationTags,
+  writeCanonicalConversation,
+} from "./storage";
 
 const messageSchema = z.object({
   role: z.string().min(1).max(40),
@@ -63,12 +68,13 @@ export function createMemoryMcpServer(env: AppEnv): McpServer {
     "memory_search",
     {
       description:
-        "Search durable conversation memory and return compact references. Tags filter to conversations that match all given tags.",
+        "Search durable conversation memory and return compact references. Tags filter to conversations matching the given tags (tag_mode all = every tag, any = at least one).",
       inputSchema: z.object({
         query: z.string().min(1).max(2000),
         limit: z.number().int().min(1).max(20).default(8),
         namespace: z.string().min(1).max(100).optional(),
         tags: tagsSchema.optional(),
+        tag_mode: z.enum(["any", "all"]).default("all"),
       }),
     },
     async (input) =>
@@ -78,6 +84,7 @@ export function createMemoryMcpServer(env: AppEnv): McpServer {
           limit: input.limit,
           ...(input.namespace ? { namespace: input.namespace } : {}),
           ...(input.tags ? { tags: input.tags } : {}),
+          tagMode: input.tag_mode,
         }),
       ),
   );
@@ -114,11 +121,14 @@ export function createMemoryMcpServer(env: AppEnv): McpServer {
   server.registerTool(
     "memory_list_conversations",
     {
-      description: "List conversation metadata without transcript bodies.",
+      description:
+        "List conversation metadata without transcript bodies. Tags filter to conversations matching the given tags (tag_mode all = every tag, any = at least one).",
       inputSchema: z.object({
         limit: z.number().int().min(1).max(100).default(20),
         cursor: z.string().optional(),
         namespace: z.string().min(1).max(100).optional(),
+        tags: tagsSchema.optional(),
+        tag_mode: z.enum(["any", "all"]).default("all"),
       }),
     },
     async (input) =>
@@ -127,6 +137,8 @@ export function createMemoryMcpServer(env: AppEnv): McpServer {
           limit: input.limit,
           ...(input.cursor ? { cursor: input.cursor } : {}),
           ...(input.namespace ? { namespace: input.namespace } : {}),
+          ...(input.tags ? { tags: input.tags } : {}),
+          tagMode: input.tag_mode,
         }),
       ),
   );
@@ -188,6 +200,35 @@ export function createMemoryMcpServer(env: AppEnv): McpServer {
         indexing: { status: "queued", job_id: jobId },
       });
     },
+  );
+
+  server.registerTool(
+    "memory_update_tags",
+    {
+      description:
+        "Add or remove conversation tags with optimistic revision checking; base_revision_id must be the current revision. Removals apply before additions.",
+      inputSchema: z
+        .object({
+          conversation_id: conversationIdSchema,
+          base_revision_id: z.string().min(1),
+          add: tagsSchema.optional(),
+          remove: tagsSchema.optional(),
+        })
+        .refine((input) => (input.add?.length ?? 0) > 0 || (input.remove?.length ?? 0) > 0, {
+          message: "Provide at least one tag in add or remove",
+          path: ["add"],
+        }),
+    },
+    async ({ conversation_id, base_revision_id, add, remove }) =>
+      toolResult(
+        await updateConversationTags(
+          env,
+          conversation_id,
+          base_revision_id,
+          add ?? [],
+          remove ?? [],
+        ),
+      ),
   );
 
   server.registerTool(

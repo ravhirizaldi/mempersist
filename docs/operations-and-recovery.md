@@ -23,6 +23,13 @@ Create the correctly dimensioned replacement index and metadata indexes, update 
 
 Run reindex. The combined rebuild deterministically replaces FTS chunks, sources, and vectors. A future split-only optimization is unnecessary until combined AI cost becomes material.
 
+When `ACTIVE_INDEX_GENERATION` changes (for example `chat-turn-v1` → `chat-turn-v2` for the
+message-boundary chunking strategy), `yarn reindex` regenerates every current revision into the new
+generation and supersedes that revision's old-generation vectors from Vectorize once the new index
+completes, so stale vectors are not left behind. Old-generation D1 derived rows are retained per
+ADR 0007 (they coexist by generation and are never read by search, which filters on the active
+generation); a memory deletion clears vectors and rows for every generation.
+
 ### Import/queue crash
 
 Inspect the import/job. Canonical revisions already written are safe. Retry the job; it resumes from the committed ordinal and all writes are idempotent. For DLQ messages, correct the underlying cause before invoking retry.

@@ -6,7 +6,7 @@
   "compatibility_flags": ["nodejs_compat", "global_fetch_strictly_public"],
   "vars": {
     "ENVIRONMENT": "development",
-    "ACTIVE_INDEX_GENERATION": "bge-m3-chat-turn-v1",
+    "ACTIVE_INDEX_GENERATION": "bge-m3-chat-turn-v2",
     "RECENT_UNINDEXED_MAX_REVISIONS": 8,
     "RECENT_UNINDEXED_MAX_AGE_SECONDS": 86400,
     "RECENT_UNINDEXED_MAX_MESSAGES": 200,

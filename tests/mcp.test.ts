@@ -39,6 +39,7 @@ describe("MCP server", () => {
       "memory_list_conversations",
       "memory_search",
       "memory_store",
+      "memory_update_tags",
     ]);
   });
 
@@ -134,5 +135,23 @@ describe("MCP server", () => {
     expect(nonString.isError).toBe(true);
     expect(longTag.isError).toBe(true);
     expect(searchTooMany.isError).toBe(true);
+  });
+
+  it("requires an add or remove tag list on memory_update_tags", async () => {
+    const client = await connectedClient();
+    const empty = await client.callTool({
+      name: "memory_update_tags",
+      arguments: { conversation_id: crypto.randomUUID(), base_revision_id: "a".repeat(64) },
+    });
+    const invalid = await client.callTool({
+      name: "memory_update_tags",
+      arguments: {
+        conversation_id: crypto.randomUUID(),
+        base_revision_id: "a".repeat(64),
+        add: [""],
+      },
+    });
+    expect(empty.isError).toBe(true);
+    expect(invalid.isError).toBe(true);
   });
 });
