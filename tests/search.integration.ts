@@ -5,7 +5,12 @@ import { EMBEDDING_DIMENSIONS } from "../src/domain";
 import { indexRevision, type IndexingEnv } from "../src/indexing";
 import { enqueueIndex, retryJob } from "../src/jobs";
 import { searchMemory, type SearchEnv } from "../src/search";
-import { writeCanonicalConversation } from "../src/storage";
+import {
+  appendConversation,
+  listConversations,
+  loadCanonicalRevision,
+  writeCanonicalConversation,
+} from "../src/storage";
 
 const embedding = Array.from({ length: EMBEDDING_DIMENSIONS }, () => 0);
 
@@ -66,6 +71,7 @@ async function storeMemory(input: {
   id?: string;
   title: string;
   namespace: string;
+  tags?: string[];
   messages: Array<{ role: string; content: string; timestamp?: string }>;
 }) {
   const conversation = await createMcpConversation(input);
@@ -425,5 +431,103 @@ describe("recent unindexed canonical search", () => {
       degraded: false,
       unavailable: [],
     });
+  });
+
+  it("filters indexed results by conversation tags with AND semantics", async () => {
+    const tagged = await storeMemory({
+      title: "Dragon arc",
+      namespace: "work",
+      tags: ["Dragon-Arc", "battle"],
+      messages: [{ role: "user", content: "The guild defends the eastern gate of Aurelia." }],
+    });
+    await indexRevision(indexingEnv(), tagged.stored.revisionId, env.ACTIVE_INDEX_GENERATION);
+    const untagged = await storeMemory({
+      title: "Phoenix arc",
+      namespace: "work",
+      tags: ["phoenix-arc"],
+      messages: [{ role: "user", content: "The guild defends the western gate of Aurelia." }],
+    });
+    await indexRevision(indexingEnv(), untagged.stored.revisionId, env.ACTIVE_INDEX_GENERATION);
+
+    const matching = await searchMemory(searchEnv(), {
+      query: "guild eastern gate",
+      limit: 8,
+      namespace: "work",
+      tags: ["dragon-arc", "battle"],
+    });
+    expect(matching.results.map((result) => result.revisionId)).toEqual([tagged.stored.revisionId]);
+    expect(matching.results[0]?.tags).toEqual(expect.arrayContaining(["dragon-arc", "battle"]));
+
+    const missing = await searchMemory(searchEnv(), {
+      query: "guild eastern gate",
+      limit: 8,
+      namespace: "work",
+      tags: ["dragon-arc", "phoenix-arc"],
+    });
+    expect(missing.results).toEqual([]);
+  });
+
+  it("adds tags on append without removing existing ones", async () => {
+    const { stored, conversation } = await storeMemory({
+      title: "Prologue",
+      namespace: "work",
+      tags: ["prologue"],
+      messages: [{ role: "user", content: "The story begins at dawn." }],
+    });
+    const appended = await appendConversation(
+      env,
+      conversation.id,
+      stored.revisionId,
+      [{ role: "assistant", content: "The climax arrives at dusk." }],
+      ["Climax"],
+    );
+    const loaded = await loadCanonicalRevision(env, appended.revisionId);
+    expect(loaded.conversation.tags).toEqual(["prologue", "climax"]);
+
+    const listed = await listConversations(env, { limit: 100, namespace: "work" });
+    const row = listed.conversations.find((candidate) => candidate.id === conversation.id);
+    expect(row?.tags).toEqual(expect.arrayContaining(["prologue", "climax"]));
+  });
+
+  it("recalls morphological variants through FTS prefix terms", async () => {
+    const { stored } = await storeMemory({
+      title: "Coastal bird",
+      namespace: "work",
+      messages: [
+        { role: "user", content: "The coastal puffin returns each spring to the cliffs." },
+      ],
+    });
+    await indexRevision(indexingEnv(), stored.revisionId, env.ACTIVE_INDEX_GENERATION);
+
+    const result = await searchMemory(searchEnv(), {
+      query: "puffins",
+      limit: 8,
+      namespace: "work",
+    });
+    expect(result.results[0]?.revisionId).toBe(stored.revisionId);
+    expect(result.results[0]?.sources).toContain("lexical");
+  });
+
+  it("ranks adjacent phrase matches above scattered tokens", async () => {
+    const namespace = `phrase-${crypto.randomUUID()}`;
+    const adjacent = await storeMemory({
+      title: "Red dragon lore",
+      namespace,
+      messages: [{ role: "user", content: "The red dragon breathes fire at dusk." }],
+    });
+    await indexRevision(indexingEnv(), adjacent.stored.revisionId, env.ACTIVE_INDEX_GENERATION);
+    const scattered = await storeMemory({
+      title: "Dragon sightings",
+      namespace,
+      messages: [{ role: "user", content: "Red lights appeared, and later a dragon was seen." }],
+    });
+    await indexRevision(indexingEnv(), scattered.stored.revisionId, env.ACTIVE_INDEX_GENERATION);
+
+    const result = await searchMemory(searchEnv(), {
+      query: "red dragon",
+      limit: 8,
+      namespace,
+    });
+    expect(result.results[0]?.revisionId).toBe(adjacent.stored.revisionId);
   });
 });

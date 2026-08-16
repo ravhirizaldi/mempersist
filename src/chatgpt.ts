@@ -1,6 +1,11 @@
 import { z } from "zod";
 import { domainId } from "./crypto";
-import type { CanonicalConversation, CanonicalNode, JsonValue } from "./domain";
+import {
+  normalizeTags,
+  type CanonicalConversation,
+  type CanonicalNode,
+  type JsonValue,
+} from "./domain";
 import { SOURCE_CHATGPT } from "./domain";
 import { AppError } from "./errors";
 
@@ -139,6 +144,7 @@ export async function normalizeChatGptConversation(input: unknown): Promise<Cano
     sourceId,
     title: parsed.data.title?.trim() || "Untitled conversation",
     namespace: "personal",
+    tags: [],
     createdAt: timestamp(parsed.data.create_time),
     updatedAt: timestamp(parsed.data.update_time),
     currentSourceNodeId: parsed.data.current_node ?? branch.ids.at(-1) ?? null,
@@ -153,6 +159,7 @@ export async function createMcpConversation(input: {
   id?: string;
   title: string;
   namespace: string;
+  tags?: string[];
   messages: Array<{ role: string; content: string; timestamp?: string | undefined }>;
 }): Promise<CanonicalConversation> {
   const conversationId = input.id ?? crypto.randomUUID();
@@ -184,6 +191,7 @@ export async function createMcpConversation(input: {
     sourceId: null,
     title: input.title,
     namespace: input.namespace,
+    tags: normalizeTags(input.tags ?? []),
     createdAt: nodes[0]?.createdAt ?? now,
     updatedAt: nodes.at(-1)?.createdAt ?? now,
     currentSourceNodeId: parent,

@@ -28,16 +28,29 @@ Enqueue records revision state as `queued`; a worker attempt marks `processing`;
 
 ## Hybrid search
 
-1. Build safe quoted FTS terms.
+1. Build safe quoted FTS terms: a full-token phrase, each raw token, a stemmed-token prefix when
+   the stem differs, and a last-token prefix; stop words are excluded. See ADR 0014.
 2. Start D1 FTS, the semantic branch, and the recent-canonical fallback concurrently.
-3. Over-fetch `min(50, max(20, limit * 4))` candidates.
+3. Over-fetch `min(50, max(20, limit * 4))` candidates, or `min(200, max(20, limit * 8))` when the
+   search filters by tags.
 4. Drop semantic candidates below `0.35`, then normalize accepted similarity scores to `0.5..1.0`.
 5. For recent current revisions not yet indexed, use D1 state to select at most 8 revisions from the last 24 hours, load their canonical R2 objects, and score at most 200 active messages with exact phrase, normalized meaningful-token, safe singular/stem, and compact operational-alias overlap.
 6. Normalize lexical rank with `61/(60+rank)` and recent-canonical overlap to `0..1`. Use the strongest channel as source confidence, plus at most `0.10` for agreement across channels, so channel count cannot automatically outrank stronger content evidence.
-7. Add explainable content boosts: `1.0` for a full query or exact named phrase, an additional `0.35` entity boost, up to `0.80` for another exact multi-token phrase, `0.40` for an exact identifier, up to `0.45` for normalized-token overlap, `0.15` for a true alias match, and `0.15` for a matching labeled field.
+7. Add explainable content boosts: `1.0` for a full query or exact named phrase, an additional `0.35` entity boost, up to `0.80` for another exact multi-token phrase, `0.40` for an exact identifier, up to `0.45` for normalized-token overlap, `0.15` for a true alias match, `0.15` for a matching labeled field, and at most `0.25` for matching conversation tags.
+   7b. Add specificity signals: up to `0.9` for heading coverage (title or bracketed body
+   heading; `0.6` when the heading contains the full normalized query), up to `0.6` for
+   a query-named structured label such as `EVENT 16` (`0.3` in a heading, `0.1` in body
+   text only), up to `0.5` for candidate-local IDF-weighted rare-term coverage, and up
+   to `0.25` for covering several distinct rare concepts. See ADR 0015.
 8. Add at most `0.10` as an exponentially decaying recency boost.
-9. Require `0.25` unless an exact body match exists. Ranking strategy `normalized-weighted-v2` keeps component scores available internally for deterministic tests, but public responses expose only the final score.
+9. Require `0.25` unless an exact body match exists. Ranking strategy `normalized-weighted-v5` keeps component scores available internally for deterministic tests, but public responses expose only the final score.
 10. Return at most two chunks per conversation and 20 results.
+
+Tag filters on `memory_search` use AND semantics over `conversation_tags` and are applied after the
+candidate merge, so they constrain every channel (FTS, semantic, recent-canonical) uniformly, and
+the expanded pool keeps them from underfilling. Tags are intentionally absent from chunk bodies and
+embeddings; the D1 catalog join is the query-time signal, and the bounded tag boost keeps strong
+text matches dominant.
 
 Fallback candidate lookup always joins `conversations.current_revision_id`, filters namespace and deletion state, applies an indexed age predicate, and uses a SQL limit before any R2 read. Only active-branch chunks intersecting the newest message budget are scored. Deterministic chunk IDs deduplicate fallback and indexed matches during races.
 

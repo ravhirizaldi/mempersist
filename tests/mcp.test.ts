@@ -91,4 +91,48 @@ describe("MCP server", () => {
     expect(duplicates.isError).toBe(true);
     expect(malformed.isError).toBe(true);
   });
+
+  it("validates tag inputs on store, append, and search", async () => {
+    const client = await connectedClient();
+    const tooMany = await client.callTool({
+      name: "memory_store",
+      arguments: {
+        title: "Arc",
+        tags: Array.from({ length: 21 }, (_, index) => `tag-${index}`),
+        messages: [{ role: "user", content: "x" }],
+      },
+    });
+    const empty = await client.callTool({
+      name: "memory_store",
+      arguments: { title: "Arc", tags: [""], messages: [{ role: "user", content: "x" }] },
+    });
+    const blank = await client.callTool({
+      name: "memory_store",
+      arguments: { title: "Arc", tags: ["   "], messages: [{ role: "user", content: "x" }] },
+    });
+    const nonString = await client.callTool({
+      name: "memory_store",
+      arguments: { title: "Arc", tags: [42], messages: [{ role: "user", content: "x" }] },
+    });
+    const longTag = await client.callTool({
+      name: "memory_append",
+      arguments: {
+        conversation_id: crypto.randomUUID(),
+        base_revision_id: "a".repeat(64),
+        tags: ["x".repeat(65)],
+        messages: [{ role: "user", content: "x" }],
+      },
+    });
+    const searchTooMany = await client.callTool({
+      name: "memory_search",
+      arguments: { query: "arc", tags: Array.from({ length: 21 }, (_, index) => `t${index}`) },
+    });
+
+    expect(tooMany.isError).toBe(true);
+    expect(empty.isError).toBe(true);
+    expect(blank.isError).toBe(true);
+    expect(nonString.isError).toBe(true);
+    expect(longTag.isError).toBe(true);
+    expect(searchTooMany.isError).toBe(true);
+  });
 });

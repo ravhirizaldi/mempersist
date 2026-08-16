@@ -1,8 +1,8 @@
 import { z } from "zod";
 import { chunkConversation } from "./chunking";
 import { embedTexts, type EmbeddingEnv } from "./indexing";
-import type { AppEnv, SearchResponse, SearchResult } from "./domain";
-import { loadCanonicalRevision } from "./storage";
+import { normalizeTags, type AppEnv, type SearchResponse, type SearchResult } from "./domain";
+import { loadCanonicalRevision, loadConversationTags } from "./storage";
 
 export const RECENT_UNINDEXED_DEFAULTS = {
   maxRevisions: 8,
@@ -10,7 +10,36 @@ export const RECENT_UNINDEXED_DEFAULTS = {
   maxMessages: 200,
 } as const;
 
-const RANKING_STRATEGY = "normalized-weighted-v2";
+const RANKING_STRATEGY = "normalized-weighted-v5";
+
+// Structured labels that are usable as precision signals when the query names
+// them explicitly (EVENT 16, PHASE 3, CHAPTER 8). Generic markers such as
+// CURRENT or NOTES are excluded so bare generic headings cannot dominate.
+const STRUCTURED_LABEL_KINDS = new Set([
+  "event",
+  "phase",
+  "chapter",
+  "scene",
+  "act",
+  "level",
+  "mission",
+]);
+
+// Specificity-aware component scales, relative to existing components:
+// exactMatchBoost max 1.0, entityMatchBoost 0.35, tokenOverlapBoost max 0.45,
+// tagMatchBoost max 0.25. Heading signals sit below the full-query exact
+// signal but above entity and tag credit; partial heading credit scales with
+// rare-token coverage so generic headings earn almost nothing.
+const HEADING_EXACT_BOOST = 0.6;
+const HEADING_PHRASE_BOOST: Record<number, number> = { 2: 0.35, 3: 0.5, 4: 0.6 };
+const HEADING_COVERAGE_RATE = 0.4;
+const HEADING_MAX_PARTIAL = 0.9;
+const STRUCTURED_LABEL_HEADING_BOOST = 0.3;
+const STRUCTURED_LABEL_BODY_BOOST = 0.1;
+const STRUCTURED_LABEL_MAX = 0.6;
+const SPECIFICITY_RATE = 0.5;
+const COOCCURRENCE_PER_CONCEPT = 0.05;
+const COOCCURRENCE_MAX = 0.25;
 
 const SEMANTIC_MIN_SCORE = 0.35;
 const RRF_K = 60;
@@ -101,6 +130,11 @@ interface RankingDebug {
   aliasOverlapBoost: number;
   fieldMatchBoost: number;
   recencyBoost: number;
+  tagMatchBoost: number;
+  headingMatchBoost: number;
+  structuredLabelBoost: number;
+  specificityBoost: number;
+  coOccurrenceBoost: number;
   finalScore: number;
 }
 
@@ -312,9 +346,21 @@ export function lexicalTokens(value: string): string[] {
 }
 
 export function queryTerms(query: string): string {
-  return lexicalTokens(query)
-    .map((term) => `"${term.replaceAll('"', '""')}"`)
-    .join(" OR ");
+  const tokens = [...new Set(tokenize(query))].filter((token) => !QUERY_STOP_WORDS.has(token));
+  if (!tokens.length) return "";
+  const quote = (term: string) => `"${term.replaceAll('"', '""')}"`;
+  const terms: string[] = [];
+  if (tokens.length >= 2) {
+    terms.push(quote(tokens.join(" ")));
+  }
+  tokens.forEach((token, index) => {
+    const quoted = quote(token);
+    terms.push(quoted);
+    const stemmed = stemToken(token);
+    if (stemmed !== token && stemmed.length >= 4) terms.push(`"${stemmed}"*`);
+    if (index === tokens.length - 1 && token.length >= 4) terms.push(`${quoted}*`);
+  });
+  return terms.join(" OR ");
 }
 
 export function recentLexicalScore(query: string, text: string): number | null {
@@ -361,6 +407,65 @@ function hasExactNamedPhrase(query: string, text: string): boolean {
   return phrases.some((phrase) => normalizedText.includes(tokenize(phrase).join(" ")));
 }
 
+function structuredLabels(value: string): Set<string> {
+  const tokens = tokenize(value.replaceAll(/[._:@/\\]+/gu, " "));
+  const labels = new Set<string>();
+  for (let index = 0; index < tokens.length - 1; index += 1) {
+    const kind = tokens[index];
+    const number = tokens[index + 1];
+    if (kind && number && /^\d+$/u.test(number) && STRUCTURED_LABEL_KINDS.has(kind)) {
+      labels.add(`${kind} ${number}`);
+    }
+  }
+  return labels;
+}
+
+function headingTexts(row: ChunkRow): string[] {
+  const texts = [row.title];
+  for (const line of row.body.split("\n")) {
+    const trimmed = line.trim();
+    if (trimmed.length > 2 && trimmed.startsWith("[") && trimmed.endsWith("]")) {
+      texts.push(trimmed.slice(1, -1));
+      if (texts.length >= 3) break;
+    }
+  }
+  return texts;
+}
+
+// Heading comparisons collapse the exact-identifier separators (`. _ : @ / \`)
+// that normalizeText deliberately preserves, so "[EVENT 16 / NEW-COUPLE ...]"
+// and "EVENT 16 NEW COUPLE ..." compare as the same heading text.
+function headingNormalized(value: string): string {
+  return normalizeText(value)
+    .replaceAll(/[._:@/\\]+/gu, " ")
+    .replaceAll(/\s+/gu, " ")
+    .trim();
+}
+
+function textTokenSet(...values: string[]): Set<string> {
+  return new Set(values.flatMap((value) => textSignals(value).tokens));
+}
+
+// Candidate-local IDF: a query token present in every candidate earns ~0
+// weight, a token unique to one candidate earns ~1. Weights are ratios against
+// the per-query total, so the absolute scale cancels out of the boosts.
+function queryTokenWeights(tokens: string[], rows: Map<string, ChunkRow>): Map<string, number> {
+  const documentCount = rows.size;
+  const df = new Map<string, number>();
+  for (const row of rows.values()) {
+    const rowTokens = textTokenSet(row.title, row.body);
+    for (const token of tokens) {
+      if (rowTokens.has(token)) df.set(token, (df.get(token) ?? 0) + 1);
+    }
+  }
+  const weights = new Map<string, number>();
+  for (const token of tokens) {
+    const docs = df.get(token) ?? 0;
+    weights.set(token, Math.log2((documentCount + 0.5) / (docs + 0.5)));
+  }
+  return weights;
+}
+
 function normalizedSemanticScore(score: number | undefined): number {
   if (score === undefined || score < SEMANTIC_MIN_SCORE) return 0;
   return 0.5 + 0.5 * Math.min(1, Math.max(0, (score - SEMANTIC_MIN_SCORE) / 0.65));
@@ -371,9 +476,18 @@ export function rankCandidates(
   query: string,
   rows: Map<string, ChunkRow>,
   now = Date.now(),
+  context: { conversationTags?: Map<string, string[]>; requestedTags?: string[] } = {},
 ): RankedResult[] {
   const normalizedQuery = normalizeText(query);
   const queryTokens = meaningfulTokens(query);
+  // Pure-number tokens are excluded from rarity weighting: bare digits are
+  // low-information in this domain, and numeric precision is carried by the
+  // structured-label and heading-phrase signals instead.
+  const rarityTokens = queryTokens.filter((token) => !/^\d+$/u.test(token));
+  const tokenWeights = queryTokenWeights(rarityTokens, rows);
+  const totalWeight = [...tokenWeights.values()].reduce((sum, weight) => sum + weight, 0);
+  const queryLabels = structuredLabels(query);
+  const requestedTags = context.requestedTags ?? [];
   return candidates
     .map((candidate) => {
       const row = rows.get(candidate.chunkId);
@@ -430,6 +544,59 @@ export function rankCandidates(
           recencyBoost = 0.1 * Math.exp(-ageDays / 365);
         }
       }
+      const conversationTags = context.conversationTags?.get(row.conversation_id) ?? [];
+      const queryTagTokens = new Set(queryTokens);
+      const matchedTags = conversationTags.filter(
+        (tag) =>
+          requestedTags.includes(tag) ||
+          meaningfulTokens(tag).some((token) => queryTagTokens.has(token)),
+      ).length;
+      const tagMatchBoost = Math.min(0.25, matchedTags * 0.1);
+      const headings = headingTexts(row);
+      const headingTokens = textTokenSet(...headings);
+      const headingExact = headings.some((heading) =>
+        headingNormalized(heading).includes(headingNormalized(query)),
+      );
+      const headingPhraseLength = Math.max(
+        0,
+        ...headings.map((heading) => longestExactPhrase(query, heading)),
+      );
+      let headingMatchedWeight = 0;
+      for (const [token, weight] of tokenWeights) {
+        if (headingTokens.has(token)) headingMatchedWeight += weight;
+      }
+      const headingCoverage = totalWeight > 0 ? headingMatchedWeight / totalWeight : 0;
+      const headingPhraseBoost = HEADING_PHRASE_BOOST[Math.min(4, headingPhraseLength)] ?? 0;
+      const headingMatchBoost = headingExact
+        ? HEADING_EXACT_BOOST
+        : Math.min(
+            HEADING_MAX_PARTIAL,
+            headingPhraseBoost + headingCoverage * HEADING_COVERAGE_RATE,
+          );
+      const headingLabels = new Set(headings.flatMap((heading) => [...structuredLabels(heading)]));
+      const bodyLabels = structuredLabels(row.body);
+      let structuredLabelBoost = 0;
+      for (const label of queryLabels) {
+        if (headingLabels.has(label)) structuredLabelBoost += STRUCTURED_LABEL_HEADING_BOOST;
+        else if (bodyLabels.has(label)) structuredLabelBoost += STRUCTURED_LABEL_BODY_BOOST;
+      }
+      structuredLabelBoost = Math.min(STRUCTURED_LABEL_MAX, structuredLabelBoost);
+      const fullTextTokens = textTokenSet(row.title, row.body);
+      let specificityWeight = 0;
+      let matchedRareConcepts = 0;
+      for (const token of rarityTokens) {
+        const weight = tokenWeights.get(token) ?? 0;
+        if (weight > 0 && fullTextTokens.has(token)) {
+          specificityWeight += weight;
+          matchedRareConcepts += 1;
+        }
+      }
+      const specificityBoost =
+        totalWeight > 0 ? (specificityWeight / totalWeight) * SPECIFICITY_RATE : 0;
+      const coOccurrenceBoost = Math.min(
+        COOCCURRENCE_MAX,
+        Math.max(0, matchedRareConcepts - 1) * COOCCURRENCE_PER_CONCEPT,
+      );
       const finalScore =
         sourceConfidence +
         sourceAgreementBoost +
@@ -438,7 +605,12 @@ export function rankCandidates(
         tokenOverlapBoost +
         aliasOverlapBoost +
         fieldMatchBoost +
-        recencyBoost;
+        recencyBoost +
+        tagMatchBoost +
+        headingMatchBoost +
+        structuredLabelBoost +
+        specificityBoost +
+        coOccurrenceBoost;
       const debug: RankingDebug = {
         strategy: RANKING_STRATEGY,
         lexicalScore,
@@ -452,6 +624,11 @@ export function rankCandidates(
         aliasOverlapBoost,
         fieldMatchBoost,
         recencyBoost,
+        tagMatchBoost,
+        headingMatchBoost,
+        structuredLabelBoost,
+        specificityBoost,
+        coOccurrenceBoost,
         finalScore,
       };
       return {
@@ -667,11 +844,14 @@ async function recentCanonicalSearch(
 
 export async function searchMemory(
   env: SearchEnv,
-  input: { query: string; limit: number; namespace?: string },
+  input: { query: string; limit: number; namespace?: string; tags?: string[] },
 ): Promise<SearchResponse> {
   if (!lexicalTokens(input.query).length) return { results: [], degraded: false, unavailable: [] };
   const limit = Math.min(20, Math.max(1, input.limit));
-  const candidateCount = Math.min(50, Math.max(20, limit * 4));
+  const requestedTags = normalizeTags(input.tags ?? []);
+  // Tag-filtered searches expand the pool so the AND predicate does not starve
+  // results on narrow tags; the cap keeps Vectorize topK and FTS reads bounded.
+  const candidateCount = Math.min(200, Math.max(20, limit * (requestedTags.length ? 8 : 4)));
   const generation = env.ACTIVE_INDEX_GENERATION;
   const [lexicalResult, semanticResult, recentResult] = await Promise.allSettled([
     lexicalSearch(env, input.query, generation, candidateCount, input.namespace),
@@ -713,7 +893,21 @@ export async function searchMemory(
   for (const row of lexical) rows.set(row.id, row);
   for (const match of recent.matches)
     if (!rows.has(match.row.id)) rows.set(match.row.id, match.row);
-  const ranked = rankCandidates([...merged.values()], input.query, rows);
+  const conversationTags = await loadConversationTags(env, [
+    ...new Set([...rows.values()].map((row) => row.conversation_id)),
+  ]);
+  let ranked = rankCandidates([...merged.values()], input.query, rows, undefined, {
+    conversationTags,
+    requestedTags,
+  });
+  if (requestedTags.length) {
+    ranked = ranked.filter((item) => {
+      const row = rows.get(item.chunkId);
+      if (!row) return false;
+      const tags = conversationTags.get(row.conversation_id) ?? [];
+      return requestedTags.every((tag) => tags.includes(tag));
+    });
+  }
   const perConversation = new Map<string, number>();
   const results: SearchResult[] = [];
   for (const item of ranked) {
@@ -732,6 +926,7 @@ export async function searchMemory(
       snippet: row.body.length > 500 ? `${row.body.slice(0, 497)}...` : row.body,
       timestamp: row.conversation_timestamp,
       namespace: row.namespace,
+      tags: conversationTags.get(row.conversation_id) ?? [],
       score: Number(item.score.toFixed(6)),
       sources: item.sources,
     });

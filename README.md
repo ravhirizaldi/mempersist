@@ -98,6 +98,11 @@ Available tools:
 - `memory_list_conversations`
 - `memory_store`
 - `memory_append`
+
+`memory_store` and `memory_append` accept optional tags (lowercased, deduplicated, up to 20);
+`memory_search` filters by tags with AND semantics and returns each conversation's tags. See
+[docs/mcp.md](docs/mcp.md) and ADR 0013.
+
 - `memory_delete_conversations`
 - `memory_delete_namespace`
 - `memory_delete_all`

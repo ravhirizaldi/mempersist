@@ -1,9 +1,10 @@
 import { domainId, sha256, stableJson } from "./crypto";
-import type {
-  AppEnv,
-  CanonicalConversation,
-  CanonicalNode,
-  CanonicalRevisionManifest,
+import {
+  normalizeTags,
+  type AppEnv,
+  type CanonicalConversation,
+  type CanonicalNode,
+  type CanonicalRevisionManifest,
 } from "./domain";
 import { AppError } from "./errors";
 
@@ -14,6 +15,7 @@ interface ConversationRow {
   source_type: string;
   source_id: string | null;
   title: string;
+  tags: string[];
   current_revision_id: string | null;
   current_node_id: string | null;
   created_at: string | null;
@@ -91,6 +93,7 @@ export async function writeCanonicalConversation(
     sourceId: conversation.sourceId,
     title: conversation.title,
     namespace: conversation.namespace,
+    tags: conversation.tags ?? [],
     createdAt: conversation.createdAt,
     updatedAt: conversation.updatedAt,
     currentSourceNodeId: conversation.currentSourceNodeId,
@@ -207,6 +210,14 @@ export async function writeCanonicalConversation(
       ),
     );
   }
+  for (const tag of conversation.tags ?? []) {
+    statements.push(
+      env.MEMORY_DB.prepare(
+        `INSERT INTO conversation_tags (conversation_id, tag) VALUES (?, ?)
+         ON CONFLICT(conversation_id, tag) DO NOTHING`,
+      ).bind(conversation.id, tag),
+    );
+  }
   for (const group of chunked(statements, 50)) await env.MEMORY_DB.batch(group);
 
   if (expectedRevisionId) {
@@ -249,14 +260,53 @@ function parseSegment(text: string): CanonicalConversation {
   if (!header || typeof header !== "object" || !("conversation" in header)) {
     throw new AppError("CANONICAL_STORAGE", "Invalid canonical segment header", 500);
   }
-  const conversation = (header as { conversation: Omit<CanonicalConversation, "nodes"> })
-    .conversation;
+  const headerConversation = (
+    header as { conversation: Partial<Omit<CanonicalConversation, "nodes">> }
+  ).conversation;
   const nodes: CanonicalNode[] = lines.map((line) => {
     const entry = JSON.parse(line) as { node?: CanonicalNode };
     if (!entry.node) throw new AppError("CANONICAL_STORAGE", "Invalid canonical node line", 500);
     return entry.node;
   });
-  return { ...conversation, nodes };
+  return {
+    ...(headerConversation as Omit<CanonicalConversation, "nodes">),
+    tags: normalizeTags(headerConversation.tags ?? []),
+    nodes,
+  };
+}
+
+export async function loadConversationTags(
+  env: CanonicalReadEnv,
+  conversationIds: string[],
+): Promise<Map<string, string[]>> {
+  const tags = new Map<string, string[]>();
+  for (let index = 0; index < conversationIds.length; index += 50) {
+    const batch = conversationIds.slice(index, index + 50);
+    if (!batch.length) continue;
+    const result = await env.MEMORY_DB.prepare(
+      `SELECT conversation_id, tag FROM conversation_tags
+       WHERE conversation_id IN (${batch.map(() => "?").join(",")})`,
+    )
+      .bind(...batch)
+      .all<{ conversation_id: string; tag: string }>();
+    for (const row of result.results) {
+      const list = tags.get(row.conversation_id) ?? [];
+      list.push(row.tag);
+      tags.set(row.conversation_id, list);
+    }
+  }
+  return tags;
+}
+
+async function withTags(
+  env: CanonicalReadEnv,
+  rows: ConversationRow[],
+): Promise<ConversationRow[]> {
+  const tags = await loadConversationTags(
+    env,
+    rows.map((row) => row.id),
+  );
+  return rows.map((row) => ({ ...row, tags: tags.get(row.id) ?? [] }));
 }
 
 export async function loadCanonicalRevision(
@@ -296,7 +346,11 @@ export async function loadCurrentConversation(
     .bind(conversationId)
     .first<ConversationRow>();
   if (!row?.current_revision_id) throw new AppError("NOT_FOUND", "Conversation not found", 404);
-  return { row, ...(await loadCanonicalRevision(env, row.current_revision_id)) };
+  const tags = (await loadConversationTags(env, [row.id])).get(row.id) ?? [];
+  return {
+    row: { ...row, tags },
+    ...(await loadCanonicalRevision(env, row.current_revision_id)),
+  };
 }
 
 export async function listConversations(
@@ -324,7 +378,10 @@ export async function listConversations(
   const rows = result.results;
   const hasMore = rows.length > limit;
   if (hasMore) rows.pop();
-  return { conversations: rows, nextCursor: hasMore ? (rows.at(-1)?.id ?? null) : null };
+  return {
+    conversations: await withTags(env, rows),
+    nextCursor: hasMore ? (rows.at(-1)?.id ?? null) : null,
+  };
 }
 
 export async function appendConversation(
@@ -332,6 +389,7 @@ export async function appendConversation(
   conversationId: string,
   baseRevisionId: string,
   messages: Array<{ role: string; content: string; timestamp?: string | undefined }>,
+  tags?: string[],
 ): Promise<StoredRevision> {
   const loaded = await loadCurrentConversation(env, conversationId);
   if (loaded.row.current_revision_id !== baseRevisionId) {
@@ -365,6 +423,7 @@ export async function appendConversation(
   const updated: CanonicalConversation = {
     ...loaded.conversation,
     nodes,
+    tags: normalizeTags([...(loaded.conversation.tags ?? []), ...(tags ?? [])]),
     updatedAt: new Date().toISOString(),
     currentSourceNodeId: parent,
     activeSourceNodeIds: [

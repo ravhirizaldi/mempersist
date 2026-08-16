@@ -9,6 +9,18 @@ export type AppEnv = Env & { MEMORY_API_TOKEN: string };
 export type JsonPrimitive = string | number | boolean | null;
 export type JsonValue = JsonPrimitive | JsonValue[] | { [key: string]: JsonValue };
 
+export function normalizeTags(input: string[]): string[] {
+  const seen = new Set<string>();
+  const tags: string[] = [];
+  for (const raw of input) {
+    const tag = raw.normalize("NFKC").toLowerCase().trim();
+    if (!tag || seen.has(tag)) continue;
+    seen.add(tag);
+    tags.push(tag);
+  }
+  return tags;
+}
+
 export interface CanonicalNode {
   id: string;
   sourceNodeId: string;
@@ -30,6 +42,7 @@ export interface CanonicalConversation {
   sourceId: string | null;
   title: string;
   namespace: string;
+  tags: string[];
   createdAt: string | null;
   updatedAt: string | null;
   currentSourceNodeId: string | null;
@@ -47,6 +60,7 @@ export interface CanonicalRevisionManifest {
   sourceId: string | null;
   title: string;
   namespace: string;
+  tags: string[];
   createdAt: string | null;
   updatedAt: string | null;
   currentSourceNodeId: string | null;
@@ -89,6 +103,7 @@ export interface SearchResult {
   snippet: string;
   timestamp: string | null;
   namespace: string;
+  tags: string[];
   score: number;
   sources: Array<"lexical" | "semantic" | "recent_canonical">;
 }

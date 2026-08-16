@@ -118,7 +118,7 @@ function consentPage(
 <body>
   <main class="shell">
     <section class="panel" aria-labelledby="page-title">
-      <div class="brand"><span class="mark">M</span><span>MemPersist</span></div>
+      <div class="brand"><span class="mark">M</span><span>MemPersist · Ravhi Rizaldi</span></div>
       <div class="panel-heading">
         <p class="eyebrow">AUTHORIZATION</p>
         <h1 id="page-title">Approve this connection</h1>

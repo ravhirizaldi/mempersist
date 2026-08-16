@@ -36,6 +36,8 @@ const nonEmptyNamespaceSchema = z
   .max(100)
   .refine((value) => /\S/u.test(value), "Namespace must not be empty");
 
+const tagsSchema = z.array(z.string().trim().min(1).max(64)).max(20).default([]);
+
 function toolResult(value: unknown) {
   const text = JSON.stringify(value);
   if (new TextEncoder().encode(text).byteLength > 64 * 1024) {
@@ -55,16 +57,18 @@ function toolResult(value: unknown) {
 }
 
 export function createMemoryMcpServer(env: AppEnv): McpServer {
-  const server = new McpServer({ name: "mempersist", version: "0.1.0" });
+  const server = new McpServer({ name: "Ravhi Rizaldi", version: "0.1.0" });
 
   server.registerTool(
     "memory_search",
     {
-      description: "Search durable conversation memory and return compact references.",
+      description:
+        "Search durable conversation memory and return compact references. Tags filter to conversations that match all given tags.",
       inputSchema: z.object({
         query: z.string().min(1).max(2000),
         limit: z.number().int().min(1).max(20).default(8),
         namespace: z.string().min(1).max(100).optional(),
+        tags: tagsSchema.optional(),
       }),
     },
     async (input) =>
@@ -73,6 +77,7 @@ export function createMemoryMcpServer(env: AppEnv): McpServer {
           query: input.query,
           limit: input.limit,
           ...(input.namespace ? { namespace: input.namespace } : {}),
+          ...(input.tags ? { tags: input.tags } : {}),
         }),
       ),
   );
@@ -133,11 +138,17 @@ export function createMemoryMcpServer(env: AppEnv): McpServer {
       inputSchema: z.object({
         title: z.string().min(1).max(500),
         namespace: z.string().min(1).max(100).default("personal"),
+        tags: tagsSchema,
         messages: z.array(messageSchema).min(1).max(1000),
       }),
     },
     async (input) => {
-      const conversation = await createMcpConversation(input);
+      const conversation = await createMcpConversation({
+        title: input.title,
+        namespace: input.namespace,
+        tags: input.tags,
+        messages: input.messages,
+      });
       const stored = await writeCanonicalConversation(env, conversation, null);
       const jobId = await enqueueIndex(env, stored.revisionId);
       return toolResult({
@@ -153,15 +164,22 @@ export function createMemoryMcpServer(env: AppEnv): McpServer {
     "memory_append",
     {
       description:
-        "Append messages with optimistic revision checking; canonical success precedes indexing.",
+        "Append messages with optimistic revision checking; canonical success precedes indexing. Tags add to the conversation's existing tag set.",
       inputSchema: z.object({
         conversation_id: z.string().min(1),
         base_revision_id: z.string().min(1),
+        tags: tagsSchema.optional(),
         messages: z.array(messageSchema).min(1).max(100),
       }),
     },
-    async ({ conversation_id, base_revision_id, messages }) => {
-      const stored = await appendConversation(env, conversation_id, base_revision_id, messages);
+    async ({ conversation_id, base_revision_id, tags, messages }) => {
+      const stored = await appendConversation(
+        env,
+        conversation_id,
+        base_revision_id,
+        messages,
+        tags,
+      );
       const jobId = await enqueueIndex(env, stored.revisionId);
       return toolResult({
         conversation_id: conversation_id,

@@ -23,12 +23,12 @@ Do not paste the owner key into ChatGPT's app configuration. OAuth discovery is 
 
 | Tool                          | Important inputs                               | Result                                                |
 | ----------------------------- | ---------------------------------------------- | ----------------------------------------------------- |
-| `memory_search`               | query, limit 1–20, optional namespace          | compact ranked chunk references and degradation state |
+| `memory_search`               | query, limit 1–20, namespace, tags (AND)       | compact ranked chunk references and degradation state |
 | `memory_get_context`          | chunk ID, before/after 0–10                    | canonical matched ranges and surrounding messages     |
 | `memory_get_conversation`     | conversation ID, branch, offset, limit         | paginated active timeline or all graph nodes          |
-| `memory_list_conversations`   | cursor, limit, namespace                       | metadata only                                         |
-| `memory_store`                | title, namespace, 1–1000 messages              | durable revision plus queued index job                |
-| `memory_append`               | conversation ID, base revision, 1–100 messages | optimistic durable revision plus queued index job     |
+| `memory_list_conversations`   | cursor, limit, namespace                       | metadata and tags only                                |
+| `memory_store`                | title, namespace, tags, 1–1000 messages        | durable revision plus queued index job                |
+| `memory_append`               | conversation ID, base revision, tags, messages | optimistic durable revision plus queued index job     |
 | `memory_delete_conversations` | 1–100 unique conversation IDs                  | deleted, missing, and per-ID failures                 |
 | `memory_delete_namespace`     | namespace plus an exact `confirm_namespace`    | bounded count, failures, remaining, and completion    |
 | `memory_delete_all`           | exact confirmation `DELETE_ALL_MEMORIES`       | bounded count, failures, remaining, and completion    |
@@ -41,3 +41,14 @@ conversation only after its canonical R2 keys have been deleted and its D1 catal
 committed.
 
 The intended client pattern is search → select → get context. Administrative retry/reindex/integrity operations remain HTTP/CLI only so ordinary LLM tool calls cannot trigger expensive maintenance accidentally.
+
+## Tags
+
+Tags are optional conversation-level strings on `memory_store` and `memory_append`. They are
+trimmed, lowercased, deduplicated, capped at 20 tags of 64 characters each, and stored in both the
+canonical revision manifest and the D1 catalog. `memory_append` adds tags to the existing set
+(union); there is no removal tool in V1. `memory_search` accepts a `tags` array with AND semantics:
+only conversations matching every requested tag are returned. Matching tags also add a bounded
+ranking boost of at most 0.25. Roleplay uses: tag story arcs (`dragon-arc`), scenes (`battle`),
+locations (`jakarta`), or characters, then filter with `memory_search` and narrow with
+`memory_get_context`.
