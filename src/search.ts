@@ -773,13 +773,18 @@ async function lexicalSearch(
   query: string,
   generationId: string,
   candidateCount: number,
-  namespace?: string,
+  namespaces?: string[],
+  userId?: string,
 ): Promise<LexicalRow[]> {
   const fts = queryTerms(query);
   if (!fts) return [];
-  const namespaceSql = namespace ? "AND c.namespace = ?" : "";
+  const namespaceSql = namespaces?.length
+    ? `AND c.namespace IN (${namespaces.map(() => "?").join(",")})`
+    : "";
+  const userSql = userId ? " AND current.user_id = ?" : "";
   const params: Array<string | number> = [fts, generationId];
-  if (namespace) params.push(namespace);
+  if (namespaces?.length) params.push(...namespaces);
+  if (userId) params.push(userId);
   params.push(candidateCount);
   const result = await env.MEMORY_DB.prepare(
     `SELECT c.id, c.revision_id, c.conversation_id, c.title, c.body, c.conversation_timestamp,
@@ -788,7 +793,7 @@ async function lexicalSearch(
      JOIN chunks c ON c.id = chunk_fts.chunk_id
      JOIN conversations current ON current.id = c.conversation_id
        AND current.current_revision_id = c.revision_id AND current.deleted_at IS NULL
-     WHERE chunk_fts MATCH ? AND c.generation_id = ? ${namespaceSql}
+     WHERE chunk_fts MATCH ? AND c.generation_id = ? ${namespaceSql}${userSql}
      ORDER BY lexical_score LIMIT ?`,
   )
     .bind(...params)
@@ -822,14 +827,17 @@ async function semanticSearch(
   query: string,
   generationId: string,
   candidateCount: number,
-  namespace?: string,
+  namespaces?: string[],
+  userId?: string,
 ): Promise<SemanticMatches> {
   const variants = semanticQueryVariants(query);
   if (!variants.length) return { candidates: [], variants };
   const embeddings = await embedTexts(env, variants);
-  const filter: VectorizeVectorMetadataFilter = namespace
-    ? { generation: { $eq: generationId }, namespace: { $eq: namespace } }
-    : { generation: { $eq: generationId } };
+  const filter: VectorizeVectorMetadataFilter = {
+    generation: { $eq: generationId },
+    ...(userId ? { user_id: { $eq: userId } } : {}),
+    ...(namespaces?.length ? { namespace: { $in: namespaces } } : {}),
+  };
   const groups: Array<Array<{ chunkId: string; score: number }>> = [];
   for (let index = 0; index < variants.length; index += 1) {
     const embedding = embeddings[index];
@@ -861,17 +869,27 @@ async function semanticSearchWithRetry(
   query: string,
   generationId: string,
   candidateCount: number,
-  namespace?: string,
+  namespaces?: string[],
+  userId?: string,
 ): Promise<SemanticMatches> {
   try {
-    return await semanticSearch(env, query, generationId, candidateCount, namespace);
+    return await semanticSearch(env, query, generationId, candidateCount, namespaces, userId);
   } catch {
-    return semanticSearch(env, query, generationId, candidateCount, namespace);
+    return semanticSearch(env, query, generationId, candidateCount, namespaces, userId);
   }
 }
 
-async function fetchChunkRows(env: SearchEnv, ids: string[]): Promise<Map<string, ChunkRow>> {
+async function fetchChunkRows(
+  env: SearchEnv,
+  ids: string[],
+  userId?: string,
+  namespaces?: string[],
+): Promise<Map<string, ChunkRow>> {
   const rows = new Map<string, ChunkRow>();
+  const userSql = userId ? " AND current.user_id = ?" : "";
+  const namespaceSql = namespaces?.length
+    ? ` AND current.namespace IN (${namespaces.map(() => "?").join(",")})`
+    : "";
   for (let index = 0; index < ids.length; index += 50) {
     const batch = ids.slice(index, index + 50);
     if (!batch.length) continue;
@@ -881,9 +899,9 @@ async function fetchChunkRows(env: SearchEnv, ids: string[]): Promise<Map<string
        FROM chunks c
        JOIN conversations current ON current.id = c.conversation_id
          AND current.current_revision_id = c.revision_id AND current.deleted_at IS NULL
-       WHERE c.id IN (${batch.map(() => "?").join(",")})`,
+       WHERE c.id IN (${batch.map(() => "?").join(",")})${userSql}${namespaceSql}`,
     )
-      .bind(...batch)
+      .bind(...batch, ...(userId ? [userId] : []), ...(namespaces ?? []))
       .all<ChunkRow>();
     for (const row of result.results) rows.set(row.id, row);
   }
@@ -895,13 +913,18 @@ async function recentCanonicalSearch(
   query: string,
   generationId: string,
   candidateCount: number,
-  namespace?: string,
+  namespaces?: string[],
+  userId?: string,
 ): Promise<RecentSearchResult> {
   const config = recentConfig(env);
   const cutoff = new Date(Date.now() - config.maxAgeSeconds * 1000).toISOString();
-  const namespaceSql = namespace ? "AND current.namespace = ?" : "";
+  const namespaceSql = namespaces?.length
+    ? `AND current.namespace IN (${namespaces.map(() => "?").join(",")})`
+    : "";
+  const userSql = userId ? " AND current.user_id = ?" : "";
   const params: Array<string | number> = [generationId, cutoff];
-  if (namespace) params.push(namespace);
+  if (namespaces?.length) params.push(...namespaces);
+  if (userId) params.push(userId);
   params.push(config.maxRevisions);
   const candidateRows = await env.MEMORY_DB.prepare(
     `SELECT state.revision_id, revision.conversation_id, state.status, state.queued_at
@@ -911,7 +934,7 @@ async function recentCanonicalSearch(
        AND current.current_revision_id = revision.id AND current.deleted_at IS NULL
      WHERE state.generation_id = ?
        AND state.status IN ('queued', 'processing', 'failed')
-       AND state.queued_at >= ? ${namespaceSql}
+       AND state.queued_at >= ? ${namespaceSql}${userSql}
      ORDER BY CASE state.status WHEN 'failed' THEN 1 ELSE 0 END, state.queued_at DESC
      LIMIT ?`,
   )
@@ -1025,6 +1048,8 @@ export async function searchMemory(
     query: string;
     limit: number;
     namespace?: string;
+    namespaces?: string[];
+    userId?: string;
     tags?: string[];
     tagMode?: "any" | "all";
     debug?: boolean;
@@ -1034,14 +1059,19 @@ export async function searchMemory(
   const limit = Math.min(20, Math.max(1, input.limit));
   const requestedTags = normalizeTags(input.tags ?? []);
   const tagMode = input.tagMode === "any" ? "any" : "all";
+  const namespaces = input.namespaces?.length
+    ? input.namespaces
+    : input.namespace
+      ? [input.namespace]
+      : undefined;
   // Tag-filtered searches expand the pool so the AND predicate does not starve
   // results on narrow tags; the cap keeps Vectorize topK and FTS reads bounded.
   const candidateCount = Math.min(200, Math.max(20, limit * (requestedTags.length ? 8 : 4)));
   const generation = env.ACTIVE_INDEX_GENERATION;
   const [lexicalResult, semanticResult, recentResult] = await Promise.allSettled([
-    lexicalSearch(env, input.query, generation, candidateCount, input.namespace),
-    semanticSearchWithRetry(env, input.query, generation, candidateCount, input.namespace),
-    recentCanonicalSearch(env, input.query, generation, candidateCount, input.namespace),
+    lexicalSearch(env, input.query, generation, candidateCount, namespaces, input.userId),
+    semanticSearchWithRetry(env, input.query, generation, candidateCount, namespaces, input.userId),
+    recentCanonicalSearch(env, input.query, generation, candidateCount, namespaces, input.userId),
   ]);
   const unavailable: UnavailableSource[] = [];
   const lexical = lexicalResult.status === "fulfilled" ? lexicalResult.value : [];
@@ -1075,7 +1105,7 @@ export async function searchMemory(
     merged.set(match.row.id, candidate);
   });
 
-  const rows = await fetchChunkRows(env, [...merged.keys()]);
+  const rows = await fetchChunkRows(env, [...merged.keys()], input.userId, namespaces);
   for (const row of lexical) rows.set(row.id, row);
   for (const match of recent.matches)
     if (!rows.has(match.row.id)) rows.set(match.row.id, match.row);

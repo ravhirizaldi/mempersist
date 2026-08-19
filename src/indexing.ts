@@ -250,6 +250,10 @@ export async function indexRevision(
   let chunks: SearchChunk[] = [];
   try {
     const loaded = await loadCanonicalRevision(env, revisionId);
+    const owner = await env.MEMORY_DB.prepare("SELECT user_id FROM conversations WHERE id = ?")
+      .bind(loaded.conversation.id)
+      .first<{ user_id: string }>();
+    const userId = owner?.user_id ?? "";
     if (!(await isRevisionIndexable(env, revisionId))) {
       await removeDerivedRevision(env, revisionId, generationId, []);
       return 0;
@@ -289,6 +293,7 @@ export async function indexRevision(
             generation: generationId,
             strategy: CHUNK_STRATEGY,
             namespace: chunk.namespace,
+            user_id: userId,
             timestamp: chunk.conversationTimestamp ?? "",
           },
         })),

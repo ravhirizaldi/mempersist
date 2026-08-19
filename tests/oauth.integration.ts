@@ -1,4 +1,5 @@
 import type { AuthRequest, ClientInfo, OAuthHelpers } from "@cloudflare/workers-oauth-provider";
+import { env } from "cloudflare:workers";
 import { SELF } from "cloudflare:test";
 import { describe, expect, it, vi } from "vitest";
 import {
@@ -8,6 +9,7 @@ import {
   MCP_SCOPE,
   type OAuthEnv,
 } from "../src/oauth";
+import { userIdForEmail } from "../src/tenant";
 
 const oauthRequest: AuthRequest = {
   responseType: "code",
@@ -33,7 +35,11 @@ function testEnv(redirectTo = "https://chatgpt.com/connector/oauth/callback?code
     completeAuthorization,
   } as unknown as OAuthHelpers;
   return {
-    env: { MEMORY_API_TOKEN: "owner-secret", OAUTH_PROVIDER: helpers } as OAuthEnv,
+    env: {
+      MEMORY_API_TOKEN: "owner-secret",
+      MEMORY_DB: env.MEMORY_DB,
+      OAUTH_PROVIDER: helpers,
+    } as OAuthEnv,
     completeAuthorization,
   };
 }
@@ -67,14 +73,15 @@ describe("OAuth authorization consent", () => {
     expect(response.headers.get("set-cookie")).toContain("HttpOnly; Secure; SameSite=Lax");
     expect(html).toContain("Approve this connection");
     expect(html).toContain("#061225");
+    expect(html).toContain('name="email" type="email"');
     expect(html).not.toContain("owner-secret");
   });
 
-  it("rejects an invalid owner key without completing authorization", async () => {
+  it("rejects an invalid email without completing authorization", async () => {
     const { env, completeAuthorization } = testEnv();
     const getResponse = await consent(env);
     const { cookie, token } = csrfFrom(getResponse, await getResponse.text());
-    const body = new URLSearchParams({ csrf: token, decision: "allow", owner_token: "wrong" });
+    const body = new URLSearchParams({ csrf: token, decision: "allow", email: "not-an-email" });
 
     const response = await handleAuthorization(
       new Request("https://mempersist.example/authorize?client_id=chatgpt-client", {
@@ -90,19 +97,21 @@ describe("OAuth authorization consent", () => {
     );
 
     expect(response.status).toBe(401);
-    expect(await response.text()).toContain("That access key is not valid");
+    expect(await response.text()).toContain("Enter a valid email address");
     expect(completeAuthorization).not.toHaveBeenCalled();
   });
 
-  it("completes authorization only after the owner key and CSRF state are valid", async () => {
+  it("completes authorization after a valid email and CSRF state", async () => {
     const redirectTo = "https://chatgpt.com/connector/oauth/callback?code=approved";
     const { env, completeAuthorization } = testEnv(redirectTo);
     const getResponse = await consent(env);
     const { cookie, token } = csrfFrom(getResponse, await getResponse.text());
+    const email = "vhie1046@gmail.com";
+    const expectedUserId = await userIdForEmail(email);
     const body = new URLSearchParams({
       csrf: token,
       decision: "allow",
-      owner_token: "owner-secret",
+      email,
     });
 
     const response = await handleAuthorization(
@@ -122,8 +131,16 @@ describe("OAuth authorization consent", () => {
     expect(response.status).toBe(302);
     expect(response.headers.get("location")).toBe(redirectTo);
     expect(completeAuthorization).toHaveBeenCalledWith(
-      expect.objectContaining({ userId: "owner", scope: [MCP_SCOPE] }),
+      expect.objectContaining({
+        userId: expectedUserId,
+        scope: [MCP_SCOPE],
+        props: { userId: expectedUserId, authType: "oauth" },
+      }),
     );
+    const user = await env.MEMORY_DB.prepare("SELECT id, namespace FROM users WHERE id = ?")
+      .bind(expectedUserId)
+      .first<{ id: string; namespace: string }>();
+    expect(user?.namespace).toBe("personal");
   });
 });
 
@@ -189,7 +206,7 @@ describe("OAuth provider", () => {
     const consentBody = new URLSearchParams({
       csrf,
       decision: "allow",
-      owner_token: "integration-test-token",
+      email: "second-user@example.com",
     });
     const approval = await SELF.fetch(authorizeUrl, {
       method: "POST",
@@ -244,5 +261,54 @@ describe("OAuth provider", () => {
     });
     const initializedBody = await initialized.text();
     expect(initialized.status, initializedBody).toBe(200);
+
+    async function mcpCall(id: number, method: string, params: unknown) {
+      const response = await SELF.fetch(MCP_RESOURCE, {
+        method: "POST",
+        headers: {
+          authorization: `Bearer ${accessToken}`,
+          accept: "application/json, text/event-stream",
+          "content-type": "application/json",
+          host: new URL(MCP_ORIGIN).host,
+        },
+        body: JSON.stringify({ jsonrpc: "2.0", id, method, params }),
+      });
+      const text = await response.text();
+      const data = text
+        .split("\n")
+        .filter((line) => line.startsWith("data:"))
+        .map((line) => line.slice(5))
+        .join("");
+      return JSON.parse(data) as {
+        result?: { content?: Array<{ text: string }>; isError?: boolean };
+        error?: { message: string };
+      };
+    }
+
+    const emptyList = await mcpCall(2, "tools/call", {
+      name: "memory_list_conversations",
+      arguments: {},
+    });
+    const emptyText = emptyList.result?.content?.[0]?.text;
+    expect(JSON.parse(emptyText ?? "{}")).toEqual({ conversations: [], nextCursor: null });
+
+    const ownStore = await mcpCall(3, "tools/call", {
+      name: "memory_store",
+      arguments: {
+        title: "second-user personal",
+        namespace: "personal",
+        messages: [{ role: "user", content: "second-user content" }],
+      },
+    });
+    expect(ownStore.result?.isError ?? false).toBe(false);
+
+    const ownList = await mcpCall(4, "tools/call", {
+      name: "memory_list_conversations",
+      arguments: { namespace: "personal" },
+    });
+    const ownText = ownList.result?.content?.[0]?.text;
+    expect(JSON.parse(ownText ?? "{}")).toMatchObject({
+      conversations: [{ title: "second-user personal" }],
+    });
   });
 });

@@ -16,6 +16,17 @@ import {
 import { getChunkContext, getConversationPage, verifyIntegrity } from "./retrieval";
 import { searchMemory } from "./search";
 import { appendConversation, listConversations, writeCanonicalConversation } from "./storage";
+import {
+  grantNamespace,
+  OWNER_USER_ID,
+  resolveTenant,
+  scopeNamespaces,
+  type Tenant,
+} from "./tenant";
+
+function ownerTenant(env: AppEnv): Promise<Tenant> {
+  return resolveTenant(env, { userId: OWNER_USER_ID });
+}
 
 type Variables = { requestId: string };
 const app = new Hono<{ Bindings: AppEnv; Variables: Variables }>();
@@ -58,18 +69,23 @@ app.get("/api/search", async (c) => {
   const query = z.string().min(1).max(2000).parse(c.req.query("q"));
   const limit = z.coerce.number().int().min(1).max(20).default(8).parse(c.req.query("limit"));
   const namespace = z.string().min(1).max(100).optional().parse(c.req.query("namespace"));
-  return c.json(await searchMemory(c.env, { query, limit, ...(namespace ? { namespace } : {}) }));
+  const tenant = await ownerTenant(c.env);
+  const namespaces = scopeNamespaces(tenant, namespace);
+  return c.json(await searchMemory(c.env, { query, limit, namespaces, userId: tenant.userId }));
 });
 
 app.get("/api/conversations", async (c) => {
   const limit = z.coerce.number().int().min(1).max(100).default(20).parse(c.req.query("limit"));
   const cursor = z.string().optional().parse(c.req.query("cursor"));
   const namespace = z.string().min(1).max(100).optional().parse(c.req.query("namespace"));
+  const tenant = await ownerTenant(c.env);
+  const namespaces = scopeNamespaces(tenant, namespace);
   return c.json(
     await listConversations(c.env, {
       limit,
       ...(cursor ? { cursor } : {}),
-      ...(namespace ? { namespace } : {}),
+      namespaces,
+      userId: tenant.userId,
     }),
   );
 });
@@ -78,21 +94,47 @@ app.get("/api/conversations/:id", async (c) => {
   const offset = z.coerce.number().int().min(0).default(0).parse(c.req.query("offset"));
   const limit = z.coerce.number().int().min(1).max(100).default(20).parse(c.req.query("limit"));
   const branch = z.enum(["active", "all"]).default("active").parse(c.req.query("branch"));
-  return c.json(await getConversationPage(c.env, c.req.param("id"), offset, limit, branch));
+  const tenant = await ownerTenant(c.env);
+  return c.json(
+    await getConversationPage(
+      c.env,
+      c.req.param("id"),
+      offset,
+      limit,
+      branch,
+      tenant.namespaces,
+      tenant.userId,
+    ),
+  );
 });
 
 app.get("/api/chunks/:id/context", async (c) => {
   const before = z.coerce.number().int().min(0).max(10).default(2).parse(c.req.query("before"));
   const after = z.coerce.number().int().min(0).max(10).default(2).parse(c.req.query("after"));
-  return c.json(await getChunkContext(c.env, c.req.param("id"), before, after));
+  const tenant = await ownerTenant(c.env);
+  return c.json(
+    await getChunkContext(
+      c.env,
+      c.req.param("id"),
+      before,
+      after,
+      tenant.namespaces,
+      tenant.userId,
+    ),
+  );
 });
 
 app.post("/api/memories", async (c) => {
   const length = Number(c.req.header("content-length") ?? 0);
   if (length > 1024 * 1024) throw new AppError("VALIDATION", "JSON body exceeds 1 MiB", 413);
   const input = storeSchema.parse(await c.req.json());
-  const conversation = await createMcpConversation(input);
-  const stored = await writeCanonicalConversation(c.env, conversation, null);
+  const tenant = await ownerTenant(c.env);
+  const namespace = input.namespace ?? tenant.defaultNamespace;
+  if (!tenant.namespaces.includes(namespace)) {
+    await grantNamespace(c.env, tenant.userId, namespace);
+  }
+  const conversation = await createMcpConversation({ ...input, namespace });
+  const stored = await writeCanonicalConversation(c.env, conversation, null, null, tenant.userId);
   const jobId = await enqueueIndex(c.env, stored.revisionId);
   return c.json(
     {
@@ -107,11 +149,15 @@ app.post("/api/memories", async (c) => {
 
 app.post("/api/conversations/:id/append", async (c) => {
   const input = appendSchema.parse(await c.req.json());
+  const tenant = await ownerTenant(c.env);
   const stored = await appendConversation(
     c.env,
     c.req.param("id"),
     input.base_revision_id,
     input.messages,
+    undefined,
+    tenant.namespaces,
+    tenant.userId,
   );
   const jobId = await enqueueIndex(c.env, stored.revisionId);
   return c.json({

@@ -18,7 +18,11 @@ describe("MCP server", () => {
   async function connectedClient(): Promise<Client> {
     const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
     const client = new Client({ name: "mempersist-test", version: "1.0.0" });
-    const server = createMemoryMcpServer({} as AppEnv);
+    const server = createMemoryMcpServer({} as AppEnv, {
+      userId: "owner",
+      defaultNamespace: "personal",
+      namespaces: ["personal"],
+    });
     await server.connect(serverTransport);
     await client.connect(clientTransport);
     connections.push({ client, server });
@@ -30,14 +34,15 @@ describe("MCP server", () => {
     const result = await client.listTools();
     expect(result.tools.map((tool) => tool.name).sort()).toEqual([
       "memory_append",
-      "memory_delete_all",
       "memory_delete_conversations",
-      "memory_delete_namespace",
+      "memory_empty_namespace",
       "memory_get_context",
       "memory_get_conversation",
       "memory_import_status",
       "memory_list_conversations",
+      "memory_list_namespaces",
       "memory_search",
+      "memory_stats",
       "memory_store",
       "memory_update_tags",
     ]);
@@ -55,21 +60,16 @@ describe("MCP server", () => {
   it("requires exact destructive confirmations", async () => {
     const client = await connectedClient();
     const namespace = await client.callTool({
-      name: "memory_delete_namespace",
+      name: "memory_empty_namespace",
       arguments: { namespace: "astara_alt", confirm_namespace: "astara-alt" },
     });
     const emptyNamespace = await client.callTool({
-      name: "memory_delete_namespace",
+      name: "memory_empty_namespace",
       arguments: { namespace: "   ", confirm_namespace: "   " },
-    });
-    const all = await client.callTool({
-      name: "memory_delete_all",
-      arguments: { confirm: "delete all" },
     });
 
     expect(namespace.isError).toBe(true);
     expect(emptyNamespace.isError).toBe(true);
-    expect(all.isError).toBe(true);
   });
 
   it("validates deletion IDs and the maximum batch size", async () => {

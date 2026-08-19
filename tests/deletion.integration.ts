@@ -12,6 +12,7 @@ import { indexRevision, type IndexingEnv } from "../src/indexing";
 import { enqueueIndex, processJobMessage } from "../src/jobs";
 import { searchMemory, type SearchEnv } from "../src/search";
 import { writeCanonicalConversation } from "../src/storage";
+import { OWNER_DB_USER_ID } from "../src/tenant";
 
 const embedding = Array.from({ length: EMBEDDING_DIMENSIONS }, () => 0);
 
@@ -206,7 +207,11 @@ describe("safe memory deletion", () => {
     const second = await storeMemory("astara-alt", "namespace second");
     const isolated = await storeMemory("personal", "namespace survivor");
 
-    const result = await deleteNamespace(deletionEnv(vectors.binding), "astara-alt");
+    const result = await deleteNamespace(
+      deletionEnv(vectors.binding),
+      OWNER_DB_USER_ID,
+      "astara-alt",
+    );
 
     expect(result).toMatchObject({
       namespace: "astara-alt",
@@ -222,19 +227,22 @@ describe("safe memory deletion", () => {
     expect(await count("conversations", "id", isolated.conversation.id)).toBe(1);
   });
 
-  it("deletes all canonical memories while retaining raw import archives", async () => {
+  it("deletes all of the caller's memories while retaining raw archives and other tenants", async () => {
     const vectors = vectorBindings();
-    await storeMemory("all-a", "delete all first");
-    await storeMemory("all-b", "delete all second");
+    await storeMemory("personal", "delete all first");
+    await storeMemory("personal", "delete all second");
+    await storeMemory("other-tenant", "untouched tenant");
     const rawKey = `raw/imports/${crypto.randomUUID()}/source/conversations.json`;
     await env.MEMORY_BUCKET.put(rawKey, "[]");
     const before = await env.MEMORY_DB.prepare(
-      "SELECT COUNT(*) AS count FROM conversations",
+      "SELECT COUNT(*) AS count FROM conversations WHERE namespace = 'personal'",
     ).first<{
       count: number;
     }>();
 
-    const result = await deleteAllMemories(deletionEnv(vectors.binding));
+    const result = await deleteAllMemories(deletionEnv(vectors.binding), OWNER_DB_USER_ID, [
+      "personal",
+    ]);
 
     expect(result).toMatchObject({
       requested: before?.count ?? 0,
@@ -244,6 +252,7 @@ describe("safe memory deletion", () => {
     });
     expect(result.failed).toEqual([]);
     expect(await env.MEMORY_BUCKET.head(rawKey)).not.toBeNull();
+    expect(await count("conversations", "namespace", "other-tenant")).toBe(1);
   });
 
   it("makes stale queued indexing messages harmless after deletion", async () => {

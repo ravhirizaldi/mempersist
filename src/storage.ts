@@ -7,6 +7,7 @@ import {
   type CanonicalRevisionManifest,
 } from "./domain";
 import { AppError } from "./errors";
+import { OWNER_DB_USER_ID } from "./tenant";
 
 const encoder = new TextEncoder();
 
@@ -21,6 +22,7 @@ interface ConversationRow {
   created_at: string | null;
   updated_at: string | null;
   namespace: string;
+  user_id: string;
 }
 
 interface RevisionRow {
@@ -66,6 +68,7 @@ export async function writeCanonicalConversation(
   conversation: CanonicalConversation,
   importId: string | null,
   expectedRevisionId: string | null = null,
+  userId: string = OWNER_DB_USER_ID,
 ): Promise<StoredRevision> {
   const header = { ...conversation, nodes: undefined };
   const lines = [
@@ -131,8 +134,8 @@ export async function writeCanonicalConversation(
   const conversationStatement = expectedRevisionId
     ? env.MEMORY_DB.prepare(
         `INSERT INTO conversations
-         (id, source_type, source_id, title, current_revision_id, current_node_id, created_at, updated_at, imported_at, namespace)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+         (id, source_type, source_id, title, current_revision_id, current_node_id, created_at, updated_at, imported_at, namespace, user_id)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
          ON CONFLICT(id) DO UPDATE SET
            title = excluded.title,
            namespace = excluded.namespace,
@@ -140,8 +143,8 @@ export async function writeCanonicalConversation(
       )
     : env.MEMORY_DB.prepare(
         `INSERT INTO conversations
-       (id, source_type, source_id, title, current_revision_id, current_node_id, created_at, updated_at, imported_at, namespace)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+       (id, source_type, source_id, title, current_revision_id, current_node_id, created_at, updated_at, imported_at, namespace, user_id)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
        ON CONFLICT(id) DO UPDATE SET
          title = excluded.title,
          current_revision_id = excluded.current_revision_id,
@@ -163,6 +166,7 @@ export async function writeCanonicalConversation(
       conversation.updatedAt,
       now,
       conversation.namespace,
+      userId,
     ),
     env.MEMORY_DB.prepare(
       `INSERT INTO canonical_segments (id, object_key, sha256, size_bytes, created_at)
@@ -335,18 +339,23 @@ export async function loadCanonicalRevision(
 export async function loadCurrentConversation(
   env: AppEnv,
   conversationId: string,
+  expectedNamespaces?: string[],
+  expectedUserId?: string,
 ): Promise<{
   row: ConversationRow;
   manifest: CanonicalRevisionManifest;
   conversation: CanonicalConversation;
 }> {
   const row = await env.MEMORY_DB.prepare(
-    `SELECT id, source_type, source_id, title, current_revision_id, current_node_id, created_at, updated_at, namespace
-     FROM conversations WHERE id = ? AND deleted_at IS NULL`,
+    `SELECT id, source_type, source_id, title, current_revision_id, current_node_id, created_at, updated_at, namespace, user_id
+     FROM conversations WHERE id = ? AND deleted_at IS NULL${expectedUserId ? " AND user_id = ?" : ""}`,
   )
-    .bind(conversationId)
+    .bind(conversationId, ...(expectedUserId ? [expectedUserId] : []))
     .first<ConversationRow>();
   if (!row?.current_revision_id) throw new AppError("NOT_FOUND", "Conversation not found", 404);
+  if (expectedNamespaces?.length && !expectedNamespaces.includes(row.namespace)) {
+    throw new AppError("NOT_FOUND", "Conversation not found", 404);
+  }
   const tags = (await loadConversationTags(env, [row.id])).get(row.id) ?? [];
   return {
     row: { ...row, tags },
@@ -359,7 +368,9 @@ export async function listConversations(
   input: {
     limit: number;
     cursor?: string;
+    userId?: string;
     namespace?: string;
+    namespaces?: string[];
     tags?: string[];
     tagMode?: "any" | "all";
   },
@@ -381,9 +392,18 @@ export async function listConversations(
     params.push(...tags);
     if (input.tagMode !== "any") params.push(tags.length);
   }
-  if (input.namespace) {
-    where.push("namespace = ?");
-    params.push(input.namespace);
+  const namespaces = input.namespaces?.length
+    ? input.namespaces
+    : input.namespace
+      ? [input.namespace]
+      : [];
+  if (namespaces.length) {
+    where.push(`namespace IN (${namespaces.map(() => "?").join(",")})`);
+    params.push(...namespaces);
+  }
+  if (input.userId) {
+    where.push("user_id = ?");
+    params.push(input.userId);
   }
   if (input.cursor) {
     where.push("id > ?");
@@ -391,7 +411,7 @@ export async function listConversations(
   }
   params.push(limit + 1);
   const result = await env.MEMORY_DB.prepare(
-    `SELECT id, source_type, source_id, title, current_revision_id, current_node_id, created_at, updated_at, namespace
+    `SELECT id, source_type, source_id, title, current_revision_id, current_node_id, created_at, updated_at, namespace, user_id
      FROM conversations WHERE ${where.join(" AND ")} ORDER BY id LIMIT ?`,
   )
     .bind(...params)
@@ -411,8 +431,15 @@ export async function updateConversationTags(
   baseRevisionId: string,
   add: string[],
   remove: string[],
+  expectedNamespaces?: string[],
+  expectedUserId?: string,
 ): Promise<{ conversationId: string; tags: string[] }> {
-  const loaded = await loadCurrentConversation(env, conversationId);
+  const loaded = await loadCurrentConversation(
+    env,
+    conversationId,
+    expectedNamespaces,
+    expectedUserId,
+  );
   if (loaded.row.current_revision_id !== baseRevisionId) {
     throw new AppError("IMPORT_CONFLICT", "base_revision_id is stale", 409);
   }
@@ -443,8 +470,15 @@ export async function appendConversation(
   baseRevisionId: string,
   messages: Array<{ role: string; content: string; timestamp?: string | undefined }>,
   tags?: string[],
+  expectedNamespaces?: string[],
+  expectedUserId?: string,
 ): Promise<StoredRevision> {
-  const loaded = await loadCurrentConversation(env, conversationId);
+  const loaded = await loadCurrentConversation(
+    env,
+    conversationId,
+    expectedNamespaces,
+    expectedUserId,
+  );
   if (loaded.row.current_revision_id !== baseRevisionId) {
     throw new AppError("IMPORT_CONFLICT", "base_revision_id is stale", 409);
   }
@@ -484,5 +518,5 @@ export async function appendConversation(
       ...nodes.slice(-messages.length).map((node) => node.sourceNodeId),
     ],
   };
-  return writeCanonicalConversation(env, updated, null, baseRevisionId);
+  return writeCanonicalConversation(env, updated, null, baseRevisionId, loaded.row.user_id);
 }

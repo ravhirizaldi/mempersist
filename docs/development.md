@@ -10,6 +10,15 @@
 
 Wrangler simulates D1, R2, and Queues locally. The main configuration marks Workers AI and Vectorize remote; those calls can incur usage. Unit and Workers integration tests use pure logic or local D1/R2 and never call remote AI.
 
+The local database seeds the owner account (`vhie1046@gmail.com`, namespace `personal`) from
+migration 0005, so the archive you see in `yarn dev` is the same one the static
+`MEMORY_API_TOKEN` protects. New emails entered on the `/authorize` consent page are
+provisioned on the fly into isolated namespaces.
+
+Preview the OAuth consent page without a registered client at
+`http://localhost:8787/authorize?client_id=DEVMODE` (GET only; submitting the form is not
+part of the preview).
+
 ## Tests
 
 - `yarn test`: parser, graph, chunking, ranking, JSON streaming, MCP discovery/validation.

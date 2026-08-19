@@ -12,6 +12,7 @@ import {
   updateConversationTags,
   writeCanonicalConversation,
 } from "../src/storage";
+import { OWNER_DB_USER_ID } from "../src/tenant";
 
 const embedding = Array.from({ length: EMBEDDING_DIMENSIONS }, () => 0);
 
@@ -986,8 +987,15 @@ describe("message-boundary semantic chunking", () => {
       query: "canonical memory",
       limit: 8,
       namespace,
+      userId: OWNER_DB_USER_ID,
     });
-    expect(seenFilters).toEqual([{ generation: { $eq: g2 }, namespace: { $eq: namespace } }]);
+    expect(seenFilters).toEqual([
+      {
+        generation: { $eq: g2 },
+        namespace: { $in: [namespace] },
+        user_id: { $eq: OWNER_DB_USER_ID },
+      },
+    ]);
     expect(result.results[0]?.chunkId).toBe(g2Rows[0]?.id);
     expect(result.results.map((item) => item.chunkId)).toEqual([
       ...new Set(result.results.map((item) => item.chunkId)),
@@ -1103,8 +1111,8 @@ describe("message-boundary semantic chunking", () => {
     });
     expect(vectorCalls).toBe(2);
     expect(seenFilters).toEqual([
-      { generation: { $eq: env.ACTIVE_INDEX_GENERATION }, namespace: { $eq: namespace } },
-      { generation: { $eq: env.ACTIVE_INDEX_GENERATION }, namespace: { $eq: namespace } },
+      { generation: { $eq: env.ACTIVE_INDEX_GENERATION }, namespace: { $in: [namespace] } },
+      { generation: { $eq: env.ACTIVE_INDEX_GENERATION }, namespace: { $in: [namespace] } },
     ]);
     expect(result.results.filter((item) => item.chunkId === wallpaperChunk).length).toBe(1);
     const wallpaperHit = result.results.find((item) => item.chunkId === wallpaperChunk);
@@ -1113,5 +1121,35 @@ describe("message-boundary semantic chunking", () => {
     expect(wallpaperHit?.debug?.semanticVariants[0]).toBe("photobox wallpaper phone");
     expect(wallpaperHit?.debug?.semanticVariants).toHaveLength(2);
     expect(result.results[0]?.chunkId).toBe(wallpaperChunk);
+  });
+});
+
+describe("per-user search isolation in same-named namespaces", () => {
+  it("never returns another user's conversations in the same-named namespace", async () => {
+    const owner = await createMcpConversation({
+      title: "owner shared",
+      namespace: "shared-ns",
+      messages: [{ role: "user", content: "Tidepool-77 owner secret" }],
+    });
+    const ownerStored = await writeCanonicalConversation(env, owner, null, null, "user-owner");
+    await indexRevision(indexingEnv(), ownerStored.revisionId, env.ACTIVE_INDEX_GENERATION);
+
+    const other = await createMcpConversation({
+      title: "other shared",
+      namespace: "shared-ns",
+      messages: [{ role: "user", content: "Tidepool-77 other user content" }],
+    });
+    const otherStored = await writeCanonicalConversation(env, other, null, null, "user-other");
+    await indexRevision(indexingEnv(), otherStored.revisionId, env.ACTIVE_INDEX_GENERATION);
+
+    const results = await searchMemory(searchEnv(), {
+      query: "Tidepool-77",
+      limit: 8,
+      namespaces: ["shared-ns"],
+      userId: "user-other",
+    });
+    const conversationIds = results.results.map((item) => item.conversationId);
+    expect(conversationIds).not.toContain(owner.id);
+    expect(conversationIds).toContain(other.id);
   });
 });

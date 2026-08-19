@@ -117,11 +117,19 @@ async function deleteRevisionCatalog(
 async function deleteOneConversation(
   env: DeletionEnv,
   conversationId: string,
+  expectedNamespaces?: string[],
+  expectedUserId?: string,
 ): Promise<"deleted" | "missing" | DeleteFailure> {
-  const existing = await env.MEMORY_DB.prepare("SELECT id FROM conversations WHERE id = ?")
+  const existing = await env.MEMORY_DB.prepare(
+    "SELECT id, namespace, user_id FROM conversations WHERE id = ?",
+  )
     .bind(conversationId)
-    .first<{ id: string }>();
+    .first<{ id: string; namespace: string; user_id: string }>();
   if (!existing) return "missing";
+  if (expectedNamespaces?.length && !expectedNamespaces.includes(existing.namespace)) {
+    return "missing";
+  }
+  if (expectedUserId && existing.user_id !== expectedUserId) return "missing";
 
   try {
     await env.MEMORY_DB.prepare(
@@ -195,6 +203,8 @@ async function deleteOneConversation(
 export async function deleteConversations(
   env: DeletionEnv,
   conversationIds: string[],
+  expectedNamespaces?: string[],
+  expectedUserId?: string,
 ): Promise<DeleteConversationsResult> {
   const result: DeleteConversationsResult = {
     requested: conversationIds.length,
@@ -203,7 +213,12 @@ export async function deleteConversations(
     failed: [],
   };
   for (const conversationId of conversationIds) {
-    const outcome = await deleteOneConversation(env, conversationId);
+    const outcome = await deleteOneConversation(
+      env,
+      conversationId,
+      expectedNamespaces,
+      expectedUserId,
+    );
     if (outcome === "deleted") result.deleted.push(conversationId);
     else if (outcome === "missing") result.missing.push(conversationId);
     else result.failed.push(outcome);
@@ -211,19 +226,34 @@ export async function deleteConversations(
   return result;
 }
 
-async function countScope(env: DeletionEnv, namespace?: string): Promise<number> {
-  const row = namespace
-    ? await env.MEMORY_DB.prepare("SELECT COUNT(*) AS count FROM conversations WHERE namespace = ?")
-        .bind(namespace)
+async function countScope(
+  env: DeletionEnv,
+  userId: string | undefined,
+  namespaces?: string[],
+): Promise<number> {
+  const row = namespaces?.length
+    ? await env.MEMORY_DB.prepare(
+        `SELECT COUNT(*) AS count FROM conversations
+         WHERE user_id = ? AND namespace IN (${namespaces.map(() => "?").join(",")})`,
+      )
+        .bind(userId ?? "", ...namespaces)
         .first<{ count: number }>()
-    : await env.MEMORY_DB.prepare("SELECT COUNT(*) AS count FROM conversations").first<{
-        count: number;
-      }>();
+    : userId
+      ? await env.MEMORY_DB.prepare("SELECT COUNT(*) AS count FROM conversations WHERE user_id = ?")
+          .bind(userId)
+          .first<{ count: number }>()
+      : await env.MEMORY_DB.prepare("SELECT COUNT(*) AS count FROM conversations").first<{
+          count: number;
+        }>();
   return row?.count ?? 0;
 }
 
-async function deleteScope(env: DeletionEnv, namespace?: string): Promise<DeleteScopeResult> {
-  const requested = await countScope(env, namespace);
+async function deleteScope(
+  env: DeletionEnv,
+  userId: string | undefined,
+  namespaces?: string[],
+): Promise<DeleteScopeResult> {
+  const requested = await countScope(env, userId, namespaces);
   const result: DeleteScopeResult = {
     requested,
     processed: 0,
@@ -235,37 +265,51 @@ async function deleteScope(env: DeletionEnv, namespace?: string): Promise<Delete
   let cursor = "";
   while (result.processed < SCOPE_DELETE_LIMIT) {
     const limit = Math.min(SCOPE_PAGE_SIZE, SCOPE_DELETE_LIMIT - result.processed);
-    const rows = namespace
+    const rows = namespaces?.length
       ? await env.MEMORY_DB.prepare(
           `SELECT id FROM conversations
-           WHERE namespace = ? AND id > ? ORDER BY id LIMIT ?`,
+           WHERE user_id = ? AND namespace IN (${namespaces.map(() => "?").join(",")})
+             AND id > ? ORDER BY id LIMIT ?`,
         )
-          .bind(namespace, cursor, limit)
+          .bind(userId ?? "", ...namespaces, cursor, limit)
           .all<{ id: string }>()
-      : await env.MEMORY_DB.prepare("SELECT id FROM conversations WHERE id > ? ORDER BY id LIMIT ?")
-          .bind(cursor, limit)
-          .all<{ id: string }>();
+      : userId
+        ? await env.MEMORY_DB.prepare(
+            "SELECT id FROM conversations WHERE user_id = ? AND id > ? ORDER BY id LIMIT ?",
+          )
+            .bind(userId, cursor, limit)
+            .all<{ id: string }>()
+        : await env.MEMORY_DB.prepare(
+            "SELECT id FROM conversations WHERE id > ? ORDER BY id LIMIT ?",
+          )
+            .bind(cursor, limit)
+            .all<{ id: string }>();
     if (!rows.results.length) break;
     for (const row of rows.results) {
       cursor = row.id;
       result.processed += 1;
-      const outcome = await deleteOneConversation(env, row.id);
+      const outcome = await deleteOneConversation(env, row.id, namespaces, userId);
       if (outcome === "deleted") result.deleted += 1;
       else if (outcome !== "missing") result.failed.push(outcome);
     }
   }
-  result.remaining = await countScope(env, namespace);
+  result.remaining = await countScope(env, userId, namespaces);
   result.complete = result.remaining === 0 && result.failed.length === 0;
   return result;
 }
 
 export async function deleteNamespace(
   env: DeletionEnv,
+  userId: string,
   namespace: string,
 ): Promise<DeleteScopeResult & { namespace: string }> {
-  return { namespace, ...(await deleteScope(env, namespace)) };
+  return { namespace, ...(await deleteScope(env, userId, [namespace])) };
 }
 
-export async function deleteAllMemories(env: DeletionEnv): Promise<DeleteScopeResult> {
-  return deleteScope(env);
+export async function deleteAllMemories(
+  env: DeletionEnv,
+  userId: string,
+  namespaces: string[],
+): Promise<DeleteScopeResult> {
+  return deleteScope(env, userId, namespaces);
 }

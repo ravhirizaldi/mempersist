@@ -6,10 +6,16 @@ import type { AppEnv, JobMessage } from "./domain";
 import { processJobMessage } from "./jobs";
 import { createMemoryMcpServer } from "./mcp";
 import { handleAuthorization, MCP_ORIGIN, MCP_RESOURCE, MCP_SCOPE, type OAuthEnv } from "./oauth";
+import { resolveTenant } from "./tenant";
 
 const mcpHandler = {
   async fetch(request: Request, env: AppEnv, ctx: ExecutionContext): Promise<Response> {
-    const handler = createMcpHandler(() => createMemoryMcpServer(env), {
+    // The OAuth provider decrypts grant props onto this ExecutionContext before
+    // dispatching the MCP route; getMcpAuthContext() is not populated until
+    // createMcpHandler wraps the request, so read props from ctx here.
+    const props = (ctx as ExecutionContext & { props?: unknown }).props;
+    const tenant = await resolveTenant(env, props);
+    const handler = createMcpHandler(() => createMemoryMcpServer(env, tenant), {
       route: "/mcp",
       corsOptions: false,
     });

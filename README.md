@@ -86,9 +86,20 @@ See [docs/chatgpt-import.md](docs/chatgpt-import.md).
 
 ## MCP
 
-The Streamable HTTP endpoint is `https://<worker>/mcp`. Developer scripts may send `MEMORY_API_TOKEN` as a bearer token. Interactive clients such as ChatGPT use OAuth 2.1 authorization-code flow with PKCE; the owner approves the connection on MemPersist's navy consent page using the same access key.
+The Streamable HTTP endpoint is `https://<worker>/mcp`. Interactive clients such as ChatGPT
+use OAuth 2.1 authorization-code flow with PKCE: the consent page takes an email, provisions
+an isolated per-user archive on the fly, and completes the connection. The owner archive is
+bound to `vhie1046@gmail.com` across all of its namespaces (`personal`, `astara_alt_v2`,
+`coding/mempersist`, `test/mempersist-blackbox`); entering that email reconnects to the same
+data. Each account can own multiple namespaces, and the same namespace name may exist in
+different accounts with fully separated data.
+Developer scripts and the CLI may keep sending `MEMORY_API_TOKEN` as a bearer token for the
+owner archive.
 
-For the deployed Worker, add `https://mempersist.nextostaging.net/mcp` as a custom MCP app in ChatGPT Developer mode. ChatGPT discovers OAuth automatically, opens the consent page, and stores the issued access/refresh tokens. Do not paste `MEMORY_API_TOKEN` into ChatGPT's connector settings.
+For the deployed Worker, add `https://mempersist.nextostaging.net/mcp` as a custom MCP app in
+ChatGPT Developer mode. ChatGPT discovers OAuth automatically, opens the consent page, and
+stores the issued access/refresh tokens. Existing connections keep working after upgrades
+without re-authorization. Do not paste `MEMORY_API_TOKEN` into ChatGPT's connector settings.
 
 Available tools:
 
@@ -96,6 +107,8 @@ Available tools:
 - `memory_get_context`
 - `memory_get_conversation`
 - `memory_list_conversations`
+- `memory_list_namespaces`
+- `memory_stats`
 - `memory_store`
 - `memory_append`
 
@@ -104,8 +117,7 @@ Available tools:
 [docs/mcp.md](docs/mcp.md) and ADR 0013.
 
 - `memory_delete_conversations`
-- `memory_delete_namespace`
-- `memory_delete_all`
+- `memory_empty_namespace`
 - `memory_import_status`
 
 Search returns compact references; call `memory_get_context` only for selected results. See [docs/mcp.md](docs/mcp.md).

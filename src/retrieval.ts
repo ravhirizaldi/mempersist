@@ -16,18 +16,25 @@ export async function getChunkContext(
   chunkId: string,
   before = 2,
   after = 2,
+  expectedNamespaces?: string[],
+  expectedUserId?: string,
 ): Promise<{
   chunkId: string;
   revisionId: string;
   messages: CanonicalNode[];
   matchedRanges: Array<{ sourceNodeId: string; charStart: number; charEnd: number }>;
 }> {
+  const namespaceSql = expectedNamespaces?.length
+    ? ` AND c.namespace IN (${expectedNamespaces.map(() => "?").join(",")})`
+    : "";
+  const userIdSql = expectedUserId ? " AND cv.user_id = ?" : "";
   const result = await env.MEMORY_DB.prepare(
     `SELECT c.revision_id, s.source_node_id, s.source_sequence, s.char_start, s.char_end, s.ordinal
      FROM chunks c JOIN chunk_sources s ON s.chunk_id = c.id
-     WHERE c.id = ? ORDER BY s.ordinal`,
+     JOIN conversations cv ON cv.id = c.conversation_id
+     WHERE c.id = ?${namespaceSql}${userIdSql} ORDER BY s.ordinal`,
   )
-    .bind(chunkId)
+    .bind(chunkId, ...(expectedNamespaces ?? []), ...(expectedUserId ? [expectedUserId] : []))
     .all<ChunkSourceRow>();
   const first = result.results[0];
   if (!first) throw new AppError("NOT_FOUND", "Chunk not found", 404);
@@ -73,13 +80,19 @@ export async function getConversationPage(
   offset: number,
   limit: number,
   branch: "active" | "all" = "active",
+  expectedNamespaces?: string[],
+  expectedUserId?: string,
 ) {
   const row = await env.MEMORY_DB.prepare(
-    "SELECT current_revision_id FROM conversations WHERE id = ? AND deleted_at IS NULL",
+    `SELECT current_revision_id, namespace, user_id FROM conversations
+     WHERE id = ? AND deleted_at IS NULL${expectedUserId ? " AND user_id = ?" : ""}`,
   )
-    .bind(conversationId)
-    .first<{ current_revision_id: string | null }>();
+    .bind(conversationId, ...(expectedUserId ? [expectedUserId] : []))
+    .first<{ current_revision_id: string | null; namespace: string; user_id: string }>();
   if (!row?.current_revision_id) throw new AppError("NOT_FOUND", "Conversation not found", 404);
+  if (expectedNamespaces?.length && !expectedNamespaces.includes(row.namespace)) {
+    throw new AppError("NOT_FOUND", "Conversation not found", 404);
+  }
   const loaded = await loadCanonicalRevision(env, row.current_revision_id);
   const tags = (await loadConversationTags(env, [conversationId])).get(conversationId) ?? [];
   const byId = new Map(loaded.conversation.nodes.map((node) => [node.sourceNodeId, node]));
