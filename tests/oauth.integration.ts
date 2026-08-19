@@ -61,9 +61,7 @@ describe("OAuth authorization consent", () => {
     const html = await response.text();
 
     expect(response.status).toBe(200);
-    expect(response.headers.get("content-security-policy")).toContain(
-      "form-action 'self' https://chatgpt.com",
-    );
+    expect(response.headers.get("content-security-policy")).toContain("form-action *");
     expect(response.headers.get("content-security-policy")).toContain("frame-ancestors 'none'");
     expect(response.headers.get("cache-control")).toBe("no-store, no-transform");
     expect(response.headers.get("set-cookie")).toContain("HttpOnly; Secure; SameSite=Lax");

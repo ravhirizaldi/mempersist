@@ -90,16 +90,10 @@ function statusPage(title: string, message: string, status: number): Response {
   );
 }
 
-function consentPage(
-  request: Request,
-  client: ClientInfo,
-  redirectUri: string,
-  error?: string,
-): Response {
+function consentPage(request: Request, client: ClientInfo, error?: string): Response {
   const csrf = newCsrfToken();
   const url = new URL(request.url);
   const action = escapeHtml(`${url.pathname}${url.search}`);
-  const redirectOrigin = new URL(redirectUri).origin;
   const rawClientName = client.clientName?.trim() || "ChatGPT";
   const clientName = escapeHtml(rawClientName);
   const errorMarkup = error
@@ -153,7 +147,7 @@ function consentPage(
         ...SECURITY_HEADERS,
         "Content-Security-Policy": SECURITY_HEADERS["Content-Security-Policy"].replace(
           "form-action 'self'",
-          `form-action 'self' ${redirectOrigin}`,
+          "form-action *",
         ),
         "Content-Type": "text/html; charset=UTF-8",
         "Set-Cookie": `${CSRF_COOKIE}=${csrf}; Path=/; Max-Age=600; HttpOnly; Secure; SameSite=Lax`,
@@ -174,7 +168,7 @@ export async function handleAuthorization(request: Request, env: OAuthEnv): Prom
   const client = await env.OAUTH_PROVIDER.lookupClient(oauthRequest.clientId);
   if (!client)
     return statusPage("Unknown client", "The requesting application is not registered.", 400);
-  if (request.method === "GET") return consentPage(request, client, oauthRequest.redirectUri);
+  if (request.method === "GET") return consentPage(request, client);
   if (request.method !== "POST") {
     return new Response("Method not allowed", {
       status: 405,
@@ -211,12 +205,7 @@ export async function handleAuthorization(request: Request, env: OAuthEnv): Prom
     ownerToken.length > 1024 ||
     !(await verifySecret(ownerToken, env.MEMORY_API_TOKEN))
   ) {
-    return consentPage(
-      request,
-      client,
-      oauthRequest.redirectUri,
-      "That access key is not valid. Try again.",
-    );
+    return consentPage(request, client, "That access key is not valid. Try again.");
   }
 
   const requestedScopes = oauthRequest.scope.filter((scope) => scope === MCP_SCOPE);
