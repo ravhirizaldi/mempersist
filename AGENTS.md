@@ -1,5 +1,7 @@
 # AGENTS.md
 
+@SKILLS.md
+
 This file is the operational contract for every human or AI coding session in this repository.
 
 ## Mission and boundaries

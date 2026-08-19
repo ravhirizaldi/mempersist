@@ -15,6 +15,7 @@ import {
 } from "./jobs";
 import { getChunkContext, getConversationPage, verifyIntegrity } from "./retrieval";
 import { searchMemory } from "./search";
+import { landingRoutes } from "./landing";
 import { appendConversation, listConversations, writeCanonicalConversation } from "./storage";
 import {
   grantNamespace,
@@ -64,6 +65,9 @@ app.get("/readyz", async (c) => {
   await c.env.MEMORY_DB.prepare("SELECT 1 AS ready").first();
   return c.json({ status: "ready" });
 });
+for (const [path, handler] of Object.entries(landingRoutes)) {
+  app.get(path, () => handler());
+}
 
 app.get("/api/search", async (c) => {
   const query = z.string().min(1).max(2000).parse(c.req.query("q"));

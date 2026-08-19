@@ -34,6 +34,30 @@ Do not paste `MEMORY_API_TOKEN` into ChatGPT's app configuration; it is for deve
 CLI use only. OAuth discovery is exposed at `/.well-known/oauth-protected-resource/mcp` and
 `/.well-known/oauth-authorization-server`.
 
+## Coding agents (Codex, Claude Code, Cursor, IDE extensions)
+
+MemPersist is a remote Streamable HTTP MCP server, so no `npx` bridge is needed — point the
+client at the endpoint URL and authorize with the email tied to your archive.
+
+Codex (add to `~/.codex/config.toml`, or a project-scoped `.codex/config.toml`):
+
+```toml
+[mcp_servers.mempersist]
+type = "remote"
+url = "https://mempersist.nextostaging.net/mcp"
+# auth = "oauth" is the default; run `codex mcp login mempersist` to authorize
+```
+
+Verify with `codex mcp list`. Codex CLI, the ChatGPT desktop app, and the IDE extension share
+this configuration.
+
+Claude Code: add the server as an HTTP transport and authorize in the OAuth consent page
+(`claude mcp add --transport http mempersist https://mempersist.nextostaging.net/mcp`, then
+complete the email prompt).
+
+See [SKILLS.md](../SKILLS.md) for the memory conventions coding agents should follow
+(`project/<slug>` namespaces, search-first workflow, event records).
+
 | Tool                          | Important inputs                               | Result                                                |
 | ----------------------------- | ---------------------------------------------- | ----------------------------------------------------- |
 | `memory_search`               | query, limit 1–20, tags, tag_mode              | compact ranked chunk references and degradation state |
