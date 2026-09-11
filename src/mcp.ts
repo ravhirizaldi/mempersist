@@ -10,6 +10,7 @@ import { grantNamespace, scopeNamespaces, type Tenant } from "./tenant";
 import {
   appendConversation,
   listConversations,
+  replaceConversation,
   updateConversationTags,
   writeCanonicalConversation,
 } from "./storage";
@@ -214,6 +215,36 @@ export function createMemoryMcpServer(env: AppEnv, tenant: Tenant): McpServer {
       const jobId = await enqueueIndex(env, stored.revisionId);
       return toolResult({
         conversation_id: conversation_id,
+        revision_id: stored.revisionId,
+        durable: true,
+        indexing: { status: "queued", job_id: jobId },
+      });
+    },
+  );
+
+  server.registerTool(
+    "memory_replace",
+    {
+      description:
+        "Replace a conversation with the complete message list using optimistic revision checking; identity, namespace, title, and tags are preserved. Canonical success precedes indexing.",
+      inputSchema: z.object({
+        conversation_id: conversationIdSchema,
+        base_revision_id: z.string().min(1),
+        messages: z.array(messageSchema).min(1).max(1000),
+      }),
+    },
+    async ({ conversation_id, base_revision_id, messages }) => {
+      const stored = await replaceConversation(
+        env,
+        conversation_id,
+        base_revision_id,
+        messages,
+        tenant.namespaces,
+        tenant.userId,
+      );
+      const jobId = await enqueueIndex(env, stored.revisionId);
+      return toolResult({
+        conversation_id,
         revision_id: stored.revisionId,
         durable: true,
         indexing: { status: "queued", job_id: jobId },

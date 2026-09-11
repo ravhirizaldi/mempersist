@@ -838,26 +838,23 @@ async function semanticSearch(
     ...(userId ? { user_id: { $eq: userId } } : {}),
     ...(namespaces?.length ? { namespace: { $in: namespaces } } : {}),
   };
-  const groups: Array<Array<{ chunkId: string; score: number }>> = [];
-  for (let index = 0; index < variants.length; index += 1) {
-    const embedding = embeddings[index];
-    if (!embedding) continue;
-    const matches = await env.MEMORY_VECTOR.query(embedding, {
-      // Cloudflare Vectorize rejects topK above its hard cap of 50, so the
-      // semantic channel clamps while FTS and recent-canonical channels keep
-      // their larger candidate pools. Variant count is bounded (at most two),
-      // so the whole semantic channel stays within a few bounded queries.
-      topK: Math.min(50, candidateCount),
-      returnMetadata: "all",
-      filter,
-    });
-    groups.push(
-      matches.matches.flatMap((match) => {
+  const groups = await Promise.all(
+    embeddings.slice(0, variants.length).map(async (embedding) => {
+      const matches = await env.MEMORY_VECTOR.query(embedding, {
+        // Cloudflare Vectorize rejects topK above its hard cap of 50, so the
+        // semantic channel clamps while FTS and recent-canonical channels keep
+        // their larger candidate pools. Variant count is bounded (at most two),
+        // so the whole semantic channel stays within a few bounded queries.
+        topK: Math.min(50, candidateCount),
+        returnMetadata: "all",
+        filter,
+      });
+      return matches.matches.flatMap((match) => {
         const chunkId = match.metadata?.chunk_id;
         return typeof chunkId === "string" ? [{ chunkId, score: match.score }] : [];
-      }),
-    );
-  }
+      });
+    }),
+  );
   return { candidates: mergeSemanticCandidates(groups), variants };
 }
 
@@ -1055,7 +1052,44 @@ export async function searchMemory(
     debug?: boolean;
   },
 ): Promise<SearchResponse> {
-  if (!lexicalTokens(input.query).length) return { results: [], degraded: false, unavailable: [] };
+  const searchStartedAt = performance.now();
+  const timingsMs = {
+    total: 0,
+    lexical: 0,
+    semantic: 0,
+    recent_canonical: 0,
+    hydrate: 0,
+    tags: 0,
+  };
+  const timed = async <T>(
+    name: keyof typeof timingsMs,
+    operation: () => Promise<T>,
+  ): Promise<T> => {
+    const startedAt = performance.now();
+    try {
+      return await operation();
+    } finally {
+      timingsMs[name] = Math.max(0, Math.round(performance.now() - startedAt));
+    }
+  };
+  if (!lexicalTokens(input.query).length) {
+    timingsMs.total = Math.max(0, Math.round(performance.now() - searchStartedAt));
+    console.info(
+      JSON.stringify({
+        message: "memory_search_summary",
+        timings_ms: timingsMs,
+        semantic_variant_count: 0,
+        indexed_result_count: 0,
+        recent_fallback_candidate_count: 0,
+        recent_fallback_match_count: 0,
+        merged_result_count: 0,
+        indexing_status: { queued: 0, processing: 0, failed: 0 },
+        fallback_used: false,
+        unavailable: [],
+      }),
+    );
+    return { results: [], degraded: false, unavailable: [] };
+  }
   const limit = Math.min(20, Math.max(1, input.limit));
   const requestedTags = normalizeTags(input.tags ?? []);
   const tagMode = input.tagMode === "any" ? "any" : "all";
@@ -1069,9 +1103,22 @@ export async function searchMemory(
   const candidateCount = Math.min(200, Math.max(20, limit * (requestedTags.length ? 8 : 4)));
   const generation = env.ACTIVE_INDEX_GENERATION;
   const [lexicalResult, semanticResult, recentResult] = await Promise.allSettled([
-    lexicalSearch(env, input.query, generation, candidateCount, namespaces, input.userId),
-    semanticSearchWithRetry(env, input.query, generation, candidateCount, namespaces, input.userId),
-    recentCanonicalSearch(env, input.query, generation, candidateCount, namespaces, input.userId),
+    timed("lexical", () =>
+      lexicalSearch(env, input.query, generation, candidateCount, namespaces, input.userId),
+    ),
+    timed("semantic", () =>
+      semanticSearchWithRetry(
+        env,
+        input.query,
+        generation,
+        candidateCount,
+        namespaces,
+        input.userId,
+      ),
+    ),
+    timed("recent_canonical", () =>
+      recentCanonicalSearch(env, input.query, generation, candidateCount, namespaces, input.userId),
+    ),
   ]);
   const unavailable: UnavailableSource[] = [];
   const lexical = lexicalResult.status === "fulfilled" ? lexicalResult.value : [];
@@ -1105,13 +1152,15 @@ export async function searchMemory(
     merged.set(match.row.id, candidate);
   });
 
-  const rows = await fetchChunkRows(env, [...merged.keys()], input.userId, namespaces);
+  const rows = await timed("hydrate", () =>
+    fetchChunkRows(env, [...merged.keys()], input.userId, namespaces),
+  );
   for (const row of lexical) rows.set(row.id, row);
   for (const match of recent.matches)
     if (!rows.has(match.row.id)) rows.set(match.row.id, match.row);
-  const conversationTags = await loadConversationTags(env, [
-    ...new Set([...rows.values()].map((row) => row.conversation_id)),
-  ]);
+  const conversationTags = await timed("tags", () =>
+    loadConversationTags(env, [...new Set([...rows.values()].map((row) => row.conversation_id))]),
+  );
   let ranked = rankCandidates([...merged.values()], input.query, rows, undefined, {
     conversationTags,
     requestedTags,
@@ -1198,23 +1247,27 @@ export async function searchMemory(
     }
   }
 
-  if (recent.candidateCount > 0 || unavailable.length > 0) {
-    const indexedIds = new Set([
-      ...lexical.map((row) => row.id),
-      ...semantic.candidates.map((match) => match.chunkId),
-    ]);
-    console.info(
-      JSON.stringify({
-        message: "memory_search_summary",
-        indexed_result_count: [...indexedIds].filter((id) => rows.has(id)).length,
-        recent_fallback_candidate_count: recent.candidateCount,
-        recent_fallback_match_count: recent.matches.length,
-        merged_result_count: results.length,
-        indexing_status: recent.statusCounts,
-        fallback_used: recent.matches.length > 0,
-        unavailable,
-      }),
-    );
-  }
+  const indexedIds = new Set([
+    ...lexical.map((row) => row.id),
+    ...semantic.candidates.map((match) => match.chunkId),
+  ]);
+  timingsMs.total = Math.max(0, Math.round(performance.now() - searchStartedAt));
+  console.info(
+    JSON.stringify({
+      message: "memory_search_summary",
+      timings_ms: timingsMs,
+      semantic_variant_count:
+        semanticResult.status === "fulfilled"
+          ? semantic.variants.length
+          : semanticQueryVariants(input.query).length,
+      indexed_result_count: [...indexedIds].filter((id) => rows.has(id)).length,
+      recent_fallback_candidate_count: recent.candidateCount,
+      recent_fallback_match_count: recent.matches.length,
+      merged_result_count: results.length,
+      indexing_status: recent.statusCounts,
+      fallback_used: recent.matches.length > 0,
+      unavailable,
+    }),
+  );
   return { results, degraded: unavailable.length > 0, unavailable };
 }

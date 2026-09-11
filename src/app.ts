@@ -5,6 +5,14 @@ import { createMcpConversation } from "./chatgpt";
 import type { AppEnv } from "./domain";
 import { AppError } from "./errors";
 import {
+  isLocale,
+  localeCookie,
+  localeHeaders,
+  resolveLocale,
+  safeReturnPath,
+  type Locale,
+} from "./i18n";
+import {
   completeMultipartImport,
   createDirectImport,
   createMultipartImport,
@@ -29,7 +37,7 @@ function ownerTenant(env: AppEnv): Promise<Tenant> {
   return resolveTenant(env, { userId: OWNER_USER_ID });
 }
 
-type Variables = { requestId: string };
+type Variables = { requestId: string; locale: Locale };
 const app = new Hono<{ Bindings: AppEnv; Variables: Variables }>();
 
 const messageSchema = z.object({
@@ -49,6 +57,7 @@ const appendSchema = z.object({
 
 app.use("*", async (c, next) => {
   c.set("requestId", crypto.randomUUID());
+  c.set("locale", resolveLocale(c.req.raw));
   await next();
   c.header("X-Request-Id", c.get("requestId"));
   c.header("X-Content-Type-Options", "nosniff");
@@ -66,8 +75,22 @@ app.get("/readyz", async (c) => {
   return c.json({ status: "ready" });
 });
 for (const [path, handler] of Object.entries(landingRoutes)) {
-  app.get(path, () => handler());
+  app.get(path, (c) => handler(c.get("locale")));
 }
+
+app.get("/language/:locale", (c) => {
+  const locale = c.req.param("locale");
+  if (!isLocale(locale)) return c.text("Unsupported locale", 404);
+  const target = safeReturnPath(c.req.query("return_to"));
+  return new Response(null, {
+    status: 303,
+    headers: {
+      Location: target,
+      "Set-Cookie": localeCookie(locale),
+      ...localeHeaders(locale),
+    },
+  });
+});
 
 app.get("/api/search", async (c) => {
   const query = z.string().min(1).max(2000).parse(c.req.query("q"));

@@ -12,12 +12,52 @@ Wrangler simulates D1, R2, and Queues locally. The main configuration marks Work
 
 The local database seeds the owner account (`vhie1046@gmail.com`, namespace `personal`) from
 migration 0005, so the archive you see in `yarn dev` is the same one the static
-`MEMORY_API_TOKEN` protects. New emails entered on the `/authorize` consent page are
-provisioned on the fly into isolated namespaces.
+`MEMORY_API_TOKEN` protects. New emails entered on the `/authorize` consent page must
+complete registration through the emailed magic link before their isolated namespace is
+created.
+
+The Worker uses the `EMAIL` send binding and `AUTH_EMAIL_FROM` for magic links. The configured
+sender domain must be onboarded to Cloudflare Email Service before testing delivery.
 
 Preview the OAuth consent page without a registered client at
 `http://localhost:8787/authorize?client_id=DEVMODE` (GET only; submitting the form is not
 part of the preview).
+
+## Browser pages
+
+Public pages (`/`, `/whitepaper`, `/architecture`, `/security`, `/adrs`, `/about`)
+use the shared warm monochrome foundation in `src/ui.ts`. Public layout and browser
+enhancements live in `src/site.ts`; page content stays in `src/landing.ts`.
+Native Web Animations and IntersectionObserver provide short entry transitions,
+with no animation dependency or CDN JavaScript. Reduced-motion preferences are
+honored, including changes while the page is open. Google Fonts are optional;
+system fallbacks keep the layout usable if external fonts are blocked.
+
+All browser pages support `en` and `id`. The language switch calls `/language/:locale` and writes
+the secure `__Host-mempersist_lang` cookie; without it, request negotiation uses
+`Accept-Language` and then English. Check every route in both languages. Verify the switch with
+JavaScript disabled and confirm that a switched `/authorize` URL preserves all OAuth query
+parameters.
+
+The homepage includes a labeled illustrative memory lifecycle and copy controls
+for the endpoint and client configuration. The decision log filters locally, with
+result counts and an empty state. Copy failures select the original text for manual
+copying. No browser-side archive requests, analytics, or persistent state are added.
+Without JavaScript, navigation, all setup instructions, examples, and decisions
+remain visible; script-dependent controls stay hidden.
+
+Consent and connection-status pages in `src/oauth.ts` share the foundation but remain
+script-free and external-asset-free under their existing restrictive CSP. Privacy
+details use native disclosure, Cancel bypasses email validation, and short/zoomed
+viewports scroll rather than clipping the form. OAuth, CSRF, PKCE, and email delivery
+behavior are unchanged.
+
+For visual checks without remote bindings, use `yarn dev --local --port 8787`.
+Check all six public routes in English and Indonesian, `/authorize?client_id=DEVMODE`, and
+`/auth/magic-link` (the missing-link error screen). Do not submit the preview form
+or send real email. Verify narrow viewports, keyboard navigation, copy success and
+failure, ADR filtering/clear, reduced motion, and disabled JavaScript. OAuth status
+variants and validation are also covered by the Workers integration suite.
 
 ## Tests
 

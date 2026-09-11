@@ -1,0 +1,234 @@
+import type { Locale } from "../i18n";
+
+const replacements: ReadonlyArray<readonly [string, string]> = [
+  ["Durable AI conversation memory", "Memori percakapan AI yang tahan lama"],
+  ["DURABLE AI CONVERSATION MEMORY", "MEMORI PERCAKAPAN AI YANG TAHAN LAMA"],
+  [
+    "Keep the context.<span>Continue the thought.</span>",
+    "Simpan konteksnya.<span>Lanjutkan pemikirannya.</span>",
+  ],
+  [
+    "Your next session shouldn’t start from zero. Keep original conversations, recall what matters, and pick up where you left off.",
+    "Sesi berikutnya tidak harus dimulai dari nol. Simpan percakapan asli, ingat kembali hal penting, dan lanjutkan dari tempat Anda berhenti.",
+  ],
+  ["Read the thinking behind it", "Baca pemikiran di baliknya"],
+  ["Interactive memory example", "Contoh memori interaktif"],
+  ["Explore the memory lifecycle", "Jelajahi siklus hidup memori"],
+  ["ILLUSTRATIVE EXAMPLE", "CONTOH ILUSTRATIF"],
+  ["01 Save", "01 Simpan"],
+  ["02 Find", "02 Temukan"],
+  ["03 Continue", "03 Lanjutkan"],
+  [
+    "“Keep the decision, not just the summary.”",
+    "“Simpan keputusannya, bukan hanya ringkasannya.”",
+  ],
+  [
+    "Save the original conversation with its context. A new revision preserves what was said.",
+    "Simpan percakapan asli beserta konteksnya. Revisi baru mempertahankan apa yang disampaikan.",
+  ],
+  ["“Why did we choose object storage?”", "“Mengapa kita memilih penyimpanan objek?”"],
+  [
+    "Search across words and meaning. Each result points back to a canonical conversation and source range.",
+    "Cari berdasarkan kata dan makna. Setiap hasil merujuk kembali ke percakapan kanonis dan rentang sumber.",
+  ],
+  ["“Right. Let’s build on that.”", "“Baik. Mari lanjutkan dari sana.”"],
+  [
+    "Bring the surrounding messages into the next session. Verify the source before continuing the work.",
+    "Bawa pesan-pesan terkait ke sesi berikutnya. Verifikasi sumber sebelum melanjutkan pekerjaan.",
+  ],
+  ["Original context. Not invented history.", "Konteks asli. Bukan riwayat rekaan."],
+  ["YOUR MCP ENDPOINT", "ENDPOINT MCP ANDA"],
+  ["Copy MCP endpoint", "Salin endpoint MCP"],
+  ["Copy endpoint", "Salin endpoint"],
+  ["EMAIL-ONLY ACCESS", "AKSES HANYA DENGAN EMAIL"],
+  ["One email. No password.", "Satu email. Tanpa kata sandi."],
+  [
+    "MemPersist sends a one-use magic link to your email. Existing archives reopen automatically, and a new archive is created after the first link is opened. The same email always reconnects you to the same private memory archive.",
+    "MemPersist mengirim tautan ajaib sekali pakai ke email Anda. Arsip yang ada terbuka kembali secara otomatis, dan arsip baru dibuat setelah tautan pertama dibuka. Email yang sama selalu menghubungkan Anda kembali ke arsip memori privat yang sama.",
+  ],
+  ["Passwordless access flow", "Alur akses tanpa kata sandi"],
+  ["Enter your email", "Masukkan email Anda"],
+  ["Open the magic link", "Buka tautan ajaib"],
+  ["Return to your archive", "Kembali ke arsip Anda"],
+  ["Connect ChatGPT", "Hubungkan ChatGPT"],
+  [
+    "MemPersist is not in the official ChatGPT plugin catalog. Connect it as a custom MCP app from Developer mode — the same endpoint works with every other MCP client too:",
+    "MemPersist belum tersedia di katalog plugin resmi ChatGPT. Hubungkan sebagai aplikasi MCP khusus dari mode Pengembang — endpoint yang sama juga bekerja dengan klien MCP lain:",
+  ],
+  [
+    "Open ChatGPT and go to <strong>Settings → Developer</strong>.",
+    "Buka ChatGPT lalu masuk ke <strong>Settings → Developer</strong>.",
+  ],
+  [
+    "Select <strong>Custom MCP app</strong> (or enable Developer mode and add a custom app).",
+    "Pilih <strong>Custom MCP app</strong> (atau aktifkan mode Pengembang dan tambahkan aplikasi khusus).",
+  ],
+  ["Paste the endpoint:", "Tempel endpoint:"],
+  [
+    "Complete the OAuth prompt and enter your email. Existing archives reconnect automatically; a new archive is created after the first link is opened.",
+    "Selesaikan permintaan OAuth dan masukkan email Anda. Arsip yang ada terhubung kembali secara otomatis; arsip baru dibuat setelah tautan pertama dibuka.",
+  ],
+  [
+    "A one-use magic link is sent to your email. No password is created or stored, and the same email reconnects you to the same archive on any client.",
+    "Tautan ajaib sekali pakai dikirim ke email Anda. Tidak ada kata sandi yang dibuat atau disimpan, dan email yang sama menghubungkan Anda ke arsip yang sama pada klien apa pun.",
+  ],
+  ["Connect coding agents", "Hubungkan agen pemrograman"],
+  [
+    "Then authorize with your email through the one-use magic-link flow:",
+    "Kemudian beri otorisasi dengan email Anda melalui alur tautan ajaib sekali pakai:",
+  ],
+  [
+    "Complete the OAuth prompt with your email. If you reconnect later, request a fresh magic link; your archive remains tied to the same email. Codex CLI, ChatGPT desktop, and the IDE extension share the same Codex configuration.",
+    "Selesaikan permintaan OAuth dengan email Anda. Jika terhubung kembali nanti, minta tautan ajaib baru; arsip tetap terikat pada email yang sama. Codex CLI, ChatGPT desktop, dan ekstensi IDE berbagi konfigurasi Codex yang sama.",
+  ],
+  ["Any other MCP client", "Klien MCP lainnya"],
+  [
+    "Point any client that supports remote Streamable HTTP MCP servers at the endpoint above and authorize with your email through the magic-link flow. Cursor, JetBrains, VS Code extensions, and custom tooling all work the same way.",
+    "Arahkan klien yang mendukung server MCP Streamable HTTP jarak jauh ke endpoint di atas dan beri otorisasi dengan email melalui alur tautan ajaib. Cursor, JetBrains, ekstensi VS Code, dan perangkat khusus bekerja dengan cara yang sama.",
+  ],
+  ["Memory conventions", "Konvensi memori"],
+  [
+    "For coding agents, keep memory organized and reviewable:",
+    "Untuk agen pemrograman, jaga agar memori teratur dan mudah ditinjau:",
+  ],
+  [
+    "Store into <code>project/&lt;slug&gt;</code> namespaces — the first write claims the name for your account.",
+    "Simpan ke namespace <code>project/&lt;slug&gt;</code> — penulisan pertama mengklaim nama tersebut untuk akun Anda.",
+  ],
+  [
+    "Record architecture decisions, breaking changes, deploy behavior changes, and incident root causes; skip routine commits.",
+    "Catat keputusan arsitektur, perubahan yang memutus kompatibilitas, perubahan perilaku deployment, dan akar penyebab insiden; lewati commit rutin.",
+  ],
+  [
+    "Search first (<code>memory_search</code>), verify with <code>memory_get_context</code>, then <code>memory_append</code> instead of duplicating.",
+    "Cari dahulu (<code>memory_search</code>), verifikasi dengan <code>memory_get_context</code>, lalu gunakan <code>memory_append</code> alih-alih menduplikasi.",
+  ],
+  [
+    "Delete only on explicit user confirmation (<code>memory_delete_conversations</code> or <code>memory_empty_namespace</code>).",
+    "Hapus hanya dengan konfirmasi pengguna yang tegas (<code>memory_delete_conversations</code> atau <code>memory_empty_namespace</code>).",
+  ],
+  [
+    "Never invent memory; cite the conversation and revision ids returned by the tools.",
+    "Jangan pernah mengarang memori; kutip ID percakapan dan revisi yang dikembalikan alat.",
+  ],
+  ["Tools", "Alat"],
+  ["Use", "Kegunaan"],
+  ["find memories; tags + tag_mode filter", "temukan memori; filter tags + tag_mode"],
+  ["original messages around a hit", "pesan asli di sekitar hasil"],
+  ["page a full conversation", "tampilkan percakapan lengkap per halaman"],
+  ["metadata and tags", "metadata dan tag"],
+  ["namespaces your account owns", "namespace milik akun Anda"],
+  ["counts and indexing health", "jumlah dan kesehatan pengindeksan"],
+  ["durable new memory", "memori baru yang tahan lama"],
+  [
+    "extend a conversation, optimistic revision check",
+    "perpanjang percakapan, pemeriksaan revisi optimistis",
+  ],
+  ["change tags", "ubah tag"],
+  ["delete specific memories (confirmed)", "hapus memori tertentu (dikonfirmasi)"],
+  ["empty one namespace (exact confirmation)", "kosongkan satu namespace (konfirmasi persis)"],
+  ["Privacy and isolation", "Privasi dan isolasi"],
+  [
+    "Namespaces are scoped per account: the same namespace name in another account is separate and invisible. Every tool only ever sees the namespaces your account owns. Raw and canonical conversation bodies live in private object storage; D1 holds only the catalog and disposable search data.",
+    "Namespace dibatasi per akun: nama namespace yang sama pada akun lain tetap terpisah dan tidak terlihat. Setiap alat hanya melihat namespace milik akun Anda. Isi percakapan mentah dan kanonis berada di penyimpanan objek privat; D1 hanya menyimpan katalog dan data pencarian yang dapat dibangun ulang.",
+  ],
+  ["Designing durable AI conversation memory", "Merancang memori percakapan AI yang tahan lama"],
+  [
+    "MemPersist treats memory as a first-class archive: canonical, versioned, rebuildable, and explicitly written — not scraped.",
+    "MemPersist memperlakukan memori sebagai arsip kelas utama: kanonis, berversi, dapat dibangun ulang, dan ditulis secara eksplisit — bukan dikikis otomatis.",
+  ],
+  ["Problem", "Masalah"],
+  ["Principles", "Prinsip"],
+  ["Storage model", "Model penyimpanan"],
+  ["Multi-account isolation", "Isolasi multi-akun"],
+  ["Retrieval", "Pengambilan"],
+  ["Trust boundaries", "Batas kepercayaan"],
+  ["How search works", "Cara kerja pencarian"],
+  ["Scope and limitations", "Cakupan dan batasan"],
+  [
+    'AI sessions are ephemeral. Context windows reset, exports are static snapshots, and every new session re-derives what previous sessions already decided. The result is repeated work, invented history, and decisions that drift. Existing "memory" features are either opaque, non-portable, or scrape conversations the user never intended to persist.',
+    'Sesi AI bersifat sementara. Jendela konteks diatur ulang, ekspor hanya cuplikan statis, dan setiap sesi baru menyimpulkan ulang keputusan sesi sebelumnya. Akibatnya pekerjaan berulang, riwayat rekaan, dan keputusan yang menyimpang. Fitur "memori" yang ada cenderung tidak transparan, tidak portabel, atau mengambil percakapan yang tidak pernah dimaksudkan pengguna untuk disimpan.',
+  ],
+  ["Intentional writes.", "Penulisan yang disengaja."],
+  ["Canonical first.", "Kanonis lebih dahulu."],
+  ["Disposable derived data.", "Data turunan dapat dibuang."],
+  ["Deterministic identity.", "Identitas deterministik."],
+  [
+    "Hybrid retrieval combines lexical FTS, semantic vector search, and a bounded recent-canonical fallback for unindexed writes. Ranking fuses the channels deterministically and reports degraded channels instead of silently returning partial results.",
+    "Pengambilan hibrida menggabungkan FTS leksikal, pencarian vektor semantik, dan fallback kanonis terbaru yang terbatas untuk penulisan yang belum diindeks. Pemeringkatan menggabungkan kanal secara deterministik dan melaporkan kanal yang menurun alih-alih diam-diam mengembalikan hasil parsial.",
+  ],
+  [
+    "A query flows through three independent retrieval channels that are fused and ranked in one pass:",
+    "Kueri mengalir melalui tiga kanal pengambilan independen yang digabungkan dan diperingkat dalam satu proses:",
+  ],
+  ["Cloudflare-native, clean-room", "Cloudflare-native, clean-room"],
+  ["Cloudflare services", "Layanan Cloudflare"],
+  ["Service", "Layanan"],
+  ["Role", "Peran"],
+  ["Module map", "Peta modul"],
+  ["Module", "Modul"],
+  ["Responsibility", "Tanggung jawab"],
+  ["Invariants", "Invarian"],
+  ["Stack", "Tumpukan teknologi"],
+  [
+    "Everything runs on Cloudflare Workers — no external infrastructure. R2 holds canonical truth, D1 is the catalog, derived indexes are rebuildable, and OAuth-protected MCP sits on top.",
+    "Semuanya berjalan di Cloudflare Workers — tanpa infrastruktur eksternal. R2 menyimpan kebenaran kanonis, D1 menjadi katalog, indeks turunan dapat dibangun ulang, dan MCP yang dilindungi OAuth berada di atasnya.",
+  ],
+  ["Threat model and controls", "Model ancaman dan kontrol"],
+  ["Controls", "Kontrol"],
+  ["Isolation", "Isolasi"],
+  [
+    "MemPersist holds sensitive conversation history. The primary risks are unauthorized reads/writes, leaked tokens or magic links, mailbox compromise, malicious imports, oversized input, log leakage, and accidental canonical deletion.",
+    "MemPersist menyimpan riwayat percakapan sensitif. Risiko utama mencakup pembacaan atau penulisan tanpa izin, kebocoran token atau tautan ajaib, kompromi kotak surat, impor berbahaya, masukan terlalu besar, kebocoran log, dan penghapusan data kanonis secara tidak sengaja.",
+  ],
+  ["Architecture decision records", "Catatan keputusan arsitektur"],
+  ["ARCHITECTURE DECISION RECORDS", "CATATAN KEPUTUSAN ARSITEKTUR"],
+  ["Accepted decisions", "Keputusan yang diterima"],
+  [
+    "Every significant architecture decision is recorded as an ADR with status and context. Accepted history is never rewritten; new decisions supersede old ones.",
+    "Setiap keputusan arsitektur penting dicatat sebagai ADR beserta status dan konteksnya. Riwayat yang diterima tidak pernah ditulis ulang; keputusan baru menggantikan keputusan lama.",
+  ],
+  ["Find a decision", "Cari keputusan"],
+  ["Search by topic or number…", "Cari berdasarkan topik atau nomor…"],
+  ["Clear", "Bersihkan"],
+  ["decisions", "keputusan"],
+  ["Decision", "Keputusan"],
+  ["Status", "Status"],
+  ["Accepted", "Diterima"],
+  ["No matching decisions", "Tidak ada keputusan yang cocok"],
+  [
+    "Try “storage”, “OAuth”, or a decision number. Clear the search to see everything.",
+    "Coba “penyimpanan”, “OAuth”, atau nomor keputusan. Bersihkan pencarian untuk melihat semuanya.",
+  ],
+  ["ABOUT", "TENTANG"],
+  [
+    "Software engineer building AI systems, distributed backends, and engineering tools. Based in Indonesia.",
+    "Insinyur perangkat lunak yang membangun sistem AI, backend terdistribusi, dan alat rekayasa. Berbasis di Indonesia.",
+  ],
+  ["Creator of MemPersist", "Pembuat MemPersist"],
+  ["Also working on", "Juga mengerjakan"],
+  ["Find me", "Temukan saya"],
+  [
+    "MemPersist is designed around a simple idea: AI memory should be durable, explicit, and portable. It stores high-fidelity conversation history on Cloudflare, rebuilds derived search indexes from canonical data, and exposes itself to any MCP-compatible client through OAuth-protected Streamable HTTP.",
+    "MemPersist dirancang berdasarkan gagasan sederhana: memori AI harus tahan lama, eksplisit, dan portabel. MemPersist menyimpan riwayat percakapan berketelitian tinggi di Cloudflare, membangun ulang indeks pencarian turunan dari data kanonis, dan tersedia bagi klien yang kompatibel dengan MCP melalui Streamable HTTP yang dilindungi OAuth.",
+  ],
+  [
+    "a desktop simulation and flight-software workbench for an aerospace project.",
+    "meja kerja simulasi desktop dan perangkat lunak penerbangan untuk proyek dirgantara.",
+  ],
+  [
+    "AI systems, distributed backends, and engineering tooling across personal and client work.",
+    "Sistem AI, backend terdistribusi, dan perangkat rekayasa untuk pekerjaan pribadi maupun klien.",
+  ],
+  ["Copy Codex configuration · TOML", "Salin konfigurasi Codex · TOML"],
+  ["Copy Codex authorization · Shell", "Salin otorisasi Codex · Shell"],
+  ["Copy Claude Code · Shell", "Salin Claude Code · Shell"],
+  [">Copy</button>", ">Salin</button>"],
+];
+
+export function localizePageMarkup(locale: Locale, html: string): string {
+  if (locale === "en") return html;
+  return replacements
+    .toSorted(([left], [right]) => right.length - left.length)
+    .reduce((localized, [source, translation]) => localized.replaceAll(source, translation), html);
+}

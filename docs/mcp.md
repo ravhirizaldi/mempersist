@@ -8,9 +8,13 @@ Endpoint: `https://mempersist.nextostaging.net/mcp`. Browser CORS is disabled. T
 
 - ChatGPT and other interactive MCP clients use OAuth 2.1 authorization code with PKCE S256.
 - OAuth discovery, token exchange, refresh, revocation, Client ID Metadata Documents, and dynamic client registration are provided by Cloudflare's official Workers OAuth package.
-- The consent page asks for an email. The email is normalized and auto-provisioned into an
-  isolated per-user archive; it is never returned to the client. The existing owner archive
-  is bound to `vhie1046@gmail.com`.
+- The consent page asks for an email and offers one `Continue with email` action.
+  MemPersist sends a single-use, 15-minute magic link through Cloudflare Email Service. An
+  existing email reconnects to its archive; a new user is created only after opening the link.
+  The existing owner archive is bound to `vhie1046@gmail.com`.
+- Consent, status pages, and email are available in English and Bahasa Indonesia. The selected
+  browser language is carried in the application-owned magic link; OAuth protocol fields and MCP
+  contracts remain English.
 - Developer MCP clients may continue sending `Authorization: Bearer <MEMORY_API_TOKEN>` directly.
 - The single V1 scope is `memory`, covering search, retrieval, and intentional writes.
 - Every request is scoped to the caller's own archive. Each account owns one or more
@@ -23,8 +27,9 @@ To connect ChatGPT:
 
 1. Enable Developer mode in ChatGPT settings.
 2. Add a custom MCP app/plugin with endpoint `https://mempersist.nextostaging.net/mcp`.
-3. Complete the OAuth prompt and enter the email tied to your MemPersist archive.
-4. Review the discovered tools, then enable the app for a conversation.
+3. Enter the email tied to your MemPersist archive and click `Continue with email`.
+4. Open the magic link sent to that email. ChatGPT will finish the OAuth connection.
+5. Review the discovered tools, then enable the app for a conversation.
 
 Already-connected ChatGPT clients keep working after deployment: pre-existing grants map to
 the owner archive without re-authorization. If you want the grant to record the real user id,
@@ -68,6 +73,7 @@ See [SKILLS.md](../SKILLS.md) for the memory conventions coding agents should fo
 | `memory_stats`                | —                                              | per-namespace counts plus indexing health             |
 | `memory_store`                | title, tags, 1–1000 messages                   | durable revision plus queued index job                |
 | `memory_append`               | conversation ID, base revision, tags, messages | optimistic durable revision plus queued index job     |
+| `memory_replace`              | conversation ID, base revision, messages       | replacement revision plus queued index job            |
 | `memory_update_tags`          | conversation ID, base revision, add/remove     | live tag list after revision-safe mutation            |
 | `memory_delete_conversations` | 1–100 unique conversation IDs                  | deleted, missing, and per-ID failures                 |
 | `memory_empty_namespace`      | matching namespace confirmation pair           | deletes one of your namespaces; bounded, resumable    |
@@ -80,7 +86,10 @@ ChatGPT import archives are intentionally retained. A deletion is reported as co
 conversation only after its canonical R2 keys have been deleted and its D1 catalog cleanup has
 committed.
 
-The intended client pattern is search → select → get context. Administrative retry/reindex/integrity operations remain HTTP/CLI only so ordinary LLM tool calls cannot trigger expensive maintenance accidentally.
+The intended client pattern is search → select → get context. Use `memory_append` for genuine
+continuation and `memory_replace` with the complete desired transcript when correcting or
+superseding a memory. Administrative retry/reindex/integrity operations remain HTTP/CLI only so
+ordinary LLM tool calls cannot trigger expensive maintenance accidentally.
 
 ## Tags
 

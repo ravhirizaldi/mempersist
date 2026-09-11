@@ -2,13 +2,16 @@ import type { AuthRequest, ClientInfo, OAuthHelpers } from "@cloudflare/workers-
 import { env } from "cloudflare:workers";
 import { SELF } from "cloudflare:test";
 import { describe, expect, it, vi } from "vitest";
+import { consumeMagicLink, issueMagicLink } from "../src/auth";
 import {
   handleAuthorization,
+  handleMagicLink,
   MCP_ORIGIN,
   MCP_RESOURCE,
   MCP_SCOPE,
   type OAuthEnv,
 } from "../src/oauth";
+import { sha256 } from "../src/crypto";
 import { userIdForEmail } from "../src/tenant";
 
 const oauthRequest: AuthRequest = {
@@ -29,6 +32,7 @@ const client: ClientInfo = {
 
 function testEnv(redirectTo = "https://chatgpt.com/connector/oauth/callback?code=approved") {
   const completeAuthorization = vi.fn().mockResolvedValue({ redirectTo });
+  const send = vi.fn().mockResolvedValue({ messageId: "magic-link-test" });
   const helpers = {
     parseAuthRequest: vi.fn().mockResolvedValue(oauthRequest),
     lookupClient: vi.fn().mockResolvedValue(client),
@@ -36,11 +40,14 @@ function testEnv(redirectTo = "https://chatgpt.com/connector/oauth/callback?code
   } as unknown as OAuthHelpers;
   return {
     env: {
+      AUTH_EMAIL_FROM: "noreply@mempersist.nextostaging.net",
+      EMAIL: { send },
       MEMORY_API_TOKEN: "owner-secret",
       MEMORY_DB: env.MEMORY_DB,
       OAUTH_PROVIDER: helpers,
-    } as OAuthEnv,
+    } as unknown as OAuthEnv,
     completeAuthorization,
+    send,
   };
 }
 
@@ -60,8 +67,20 @@ function csrfFrom(response: Response, html: string): { cookie: string; token: st
   return { cookie, token };
 }
 
+function tokenFrom(send: { mock: { calls: unknown[][] } }): string {
+  const message = send.mock.calls.at(-1)?.[0];
+  if (!message || typeof message !== "object" || !("html" in message)) {
+    throw new Error("Magic-link email was not captured");
+  }
+  const html = message.html;
+  if (typeof html !== "string") throw new Error("Magic-link email has no HTML body");
+  const token = html.match(/\/auth\/magic-link\?token=([^"&]+)/)?.[1];
+  if (!token) throw new Error("Magic-link email did not contain a token");
+  return decodeURIComponent(token);
+}
+
 describe("OAuth authorization consent", () => {
-  it("renders a secure navy consent page", async () => {
+  it("renders a minimalist, script-free consent page", async () => {
     const { env } = testEnv();
     const response = await consent(env);
     const html = await response.text();
@@ -72,16 +91,70 @@ describe("OAuth authorization consent", () => {
     expect(response.headers.get("cache-control")).toBe("no-store, no-transform");
     expect(response.headers.get("set-cookie")).toContain("HttpOnly; Secure; SameSite=Lax");
     expect(html).toContain("Approve this connection");
-    expect(html).toContain("#061225");
+    expect(html).toContain("--canvas:#f7f6f2");
+    expect(html).toContain('class="connection-steps"');
+    expect(html).toContain('aria-invalid="false"');
+    expect(html).toContain('value="deny" formnovalidate');
+    expect(html).toContain('<details class="privacy">');
+    expect(html).toContain('href="/security"');
+    expect(html).not.toContain("<script");
+    expect(html).not.toContain("fonts.googleapis.com");
+    expect(html).not.toMatch(/body\{[^}]*overflow:hidden/);
     expect(html).toContain('name="email" type="email"');
+    expect(html).toContain("Continue with email");
+    expect(html).not.toContain('name="mode"');
     expect(html).not.toContain("owner-secret");
+  });
+
+  it("localizes consent, status, and magic-link email in Indonesian", async () => {
+    const { env, send } = testEnv();
+    const getResponse = await handleAuthorization(
+      new Request("https://mempersist.example/authorize?client_id=chatgpt-client", {
+        headers: { "accept-language": "id-ID" },
+      }),
+      env,
+    );
+    const html = await getResponse.text();
+    expect(getResponse.headers.get("content-language")).toBe("id");
+    expect(html).toContain('lang="id"');
+    expect(html).toContain("Setujui koneksi ini");
+    expect(html).toContain("Lanjutkan dengan email");
+    expect(html).not.toContain("<script");
+    const { cookie, token } = csrfFrom(getResponse, html);
+    const body = new URLSearchParams({ csrf: token, email: "vhie1046@gmail.com" });
+    const response = await handleAuthorization(
+      new Request("https://mempersist.example/authorize?client_id=chatgpt-client", {
+        method: "POST",
+        headers: {
+          cookie: `${cookie}; __Host-mempersist_lang=id`,
+          "content-type": "application/x-www-form-urlencoded",
+        },
+        body,
+      }),
+      env,
+    );
+    expect(await response.text()).toContain("Periksa email Anda");
+    const message = send.mock.calls.at(-1)?.[0] as
+      { subject?: string; html?: string; text?: string } | undefined;
+    expect(message?.subject).toBe("Tautan akses MemPersist Anda");
+    expect(message?.html).toContain("Lanjutkan ke MemPersist");
+    expect(message?.html).toContain("&amp;lang=id");
+    expect(message?.text).toContain("lang=id");
+    await consumeMagicLink(env, tokenFrom(send));
+
+    const invalid = await handleMagicLink(
+      new Request("https://mempersist.example/auth/magic-link?lang=id"),
+      env,
+    );
+    expect(invalid.headers.get("content-language")).toBe("id");
+    expect(await invalid.text()).toContain("Tautan tidak valid");
   });
 
   it("rejects an invalid email without completing authorization", async () => {
     const { env, completeAuthorization } = testEnv();
     const getResponse = await consent(env);
     const { cookie, token } = csrfFrom(getResponse, await getResponse.text());
-    const body = new URLSearchParams({ csrf: token, decision: "allow", email: "not-an-email" });
+    const body = new URLSearchParams({ csrf: token, email: "not-an-email" });
 
     const response = await handleAuthorization(
       new Request("https://mempersist.example/authorize?client_id=chatgpt-client", {
@@ -97,20 +170,68 @@ describe("OAuth authorization consent", () => {
     );
 
     expect(response.status).toBe(401);
-    expect(await response.text()).toContain("Enter a valid email address");
+    const html = await response.text();
+    expect(html).toContain("Enter a valid email address");
+    expect(html).toContain('aria-invalid="true"');
+    expect(html).toContain('aria-describedby="email-help email-error"');
     expect(completeAuthorization).not.toHaveBeenCalled();
   });
 
-  it("completes authorization after a valid email and CSRF state", async () => {
+  it("allows cancellation without an email and preserves the OAuth redirect", async () => {
+    const { env, completeAuthorization, send } = testEnv();
+    const getResponse = await consent(env);
+    const { cookie, token } = csrfFrom(getResponse, await getResponse.text());
+    const response = await handleAuthorization(
+      new Request("https://mempersist.example/authorize?client_id=chatgpt-client", {
+        method: "POST",
+        headers: { cookie, "content-type": "application/x-www-form-urlencoded" },
+        body: new URLSearchParams({ csrf: token, decision: "deny" }),
+      }),
+      env,
+    );
+    expect(response.status).toBe(302);
+    const target = new URL(response.headers.get("location")!);
+    expect(target.searchParams.get("error")).toBe("access_denied");
+    expect(target.searchParams.get("state")).toBe(oauthRequest.state);
+    expect(completeAuthorization).not.toHaveBeenCalled();
+    expect(send).not.toHaveBeenCalled();
+  });
+
+  it("escapes client metadata in the redesigned consent shell", async () => {
+    const { env } = testEnv();
+    vi.spyOn(env.OAUTH_PROVIDER, "lookupClient").mockResolvedValueOnce({
+      ...client,
+      clientName: '<img src=x onerror="alert(1)">',
+    });
+    const html = await (await consent(env)).text();
+    expect(html).toContain("&lt;img src=x onerror=&quot;alert(1)&quot;&gt;");
+    expect(html).not.toContain("<img src=x");
+  });
+
+  it("renders recoverable, script-free status pages without changing HTTP status", async () => {
+    const { env } = testEnv();
+    const response = await handleMagicLink(
+      new Request("https://mempersist.example/auth/magic-link"),
+      env,
+    );
+    const html = await response.text();
+    expect(response.status).toBe(400);
+    expect(html).toContain("Invalid link");
+    expect(html).toContain("Back to MemPersist");
+    expect(html).toContain("start a new connection request");
+    expect(html).not.toContain("<script");
+    expect(response.headers.get("content-security-policy")).toContain("default-src 'none'");
+  });
+
+  it("sends a sign-in link for an existing user and completes authorization once", async () => {
     const redirectTo = "https://chatgpt.com/connector/oauth/callback?code=approved";
-    const { env, completeAuthorization } = testEnv(redirectTo);
+    const { env, completeAuthorization, send } = testEnv(redirectTo);
     const getResponse = await consent(env);
     const { cookie, token } = csrfFrom(getResponse, await getResponse.text());
     const email = "vhie1046@gmail.com";
     const expectedUserId = await userIdForEmail(email);
     const body = new URLSearchParams({
       csrf: token,
-      decision: "allow",
       email,
     });
 
@@ -128,8 +249,17 @@ describe("OAuth authorization consent", () => {
       env,
     );
 
-    expect(response.status).toBe(302);
-    expect(response.headers.get("location")).toBe(redirectTo);
+    expect(response.status).toBe(200);
+    expect(await response.text()).toContain("Check your email");
+    expect(completeAuthorization).not.toHaveBeenCalled();
+    const magicToken = tokenFrom(send);
+
+    const callback = await handleMagicLink(
+      new Request(`https://mempersist.example/auth/magic-link?token=${magicToken}`),
+      env,
+    );
+    expect(callback.status).toBe(302);
+    expect(callback.headers.get("location")).toBe(redirectTo);
     expect(completeAuthorization).toHaveBeenCalledWith(
       expect.objectContaining({
         userId: expectedUserId,
@@ -141,6 +271,96 @@ describe("OAuth authorization consent", () => {
       .bind(expectedUserId)
       .first<{ id: string; namespace: string }>();
     expect(user?.namespace).toBe("personal");
+
+    const replay = await handleMagicLink(
+      new Request(`https://mempersist.example/auth/magic-link?token=${magicToken}`),
+      env,
+    );
+    expect(replay.status).toBe(400);
+    expect(completeAuthorization).toHaveBeenCalledTimes(1);
+  });
+
+  it("creates a new user only after a registration link is opened", async () => {
+    const email = `new-user-${crypto.randomUUID()}@example.com`;
+    const { env, completeAuthorization, send } = testEnv();
+    const getResponse = await consent(env);
+    const { cookie, token } = csrfFrom(getResponse, await getResponse.text());
+    const body = new URLSearchParams({ csrf: token, email });
+
+    const response = await handleAuthorization(
+      new Request("https://mempersist.example/authorize?client_id=chatgpt-client", {
+        method: "POST",
+        headers: {
+          cookie,
+          "content-type": "application/x-www-form-urlencoded",
+          "content-length": String(body.size),
+        },
+        body,
+      }),
+      env,
+    );
+
+    expect(response.status).toBe(200);
+    expect(
+      await env.MEMORY_DB.prepare("SELECT id FROM users WHERE email = ?").bind(email).first(),
+    ).toBeNull();
+
+    const callback = await handleMagicLink(
+      new Request(`https://mempersist.example/auth/magic-link?token=${tokenFrom(send)}`),
+      env,
+    );
+    expect(callback.status).toBe(302);
+    expect(completeAuthorization).toHaveBeenCalledWith(
+      expect.objectContaining({
+        props: { userId: await userIdForEmail(email), authType: "oauth" },
+      }),
+    );
+    await expect(
+      env.MEMORY_DB.prepare("SELECT namespace FROM users WHERE email = ?")
+        .bind(email)
+        .first<{ namespace: string }>(),
+    ).resolves.toMatchObject({ namespace: await userIdForEmail(email) });
+  });
+
+  it("removes a challenge when email delivery fails", async () => {
+    const { env, send } = testEnv();
+    send.mockRejectedValueOnce(new Error("email service unavailable"));
+    const getResponse = await consent(env);
+    const { cookie, token } = csrfFrom(getResponse, await getResponse.text());
+    const body = new URLSearchParams({
+      csrf: token,
+      email: "vhie1046@gmail.com",
+    });
+
+    const response = await handleAuthorization(
+      new Request("https://mempersist.example/authorize?client_id=chatgpt-client", {
+        method: "POST",
+        headers: {
+          cookie,
+          "content-type": "application/x-www-form-urlencoded",
+        },
+        body,
+      }),
+      env,
+    );
+
+    expect(response.status).toBe(503);
+    await expect(
+      env.MEMORY_DB.prepare("SELECT COUNT(*) AS count FROM auth_magic_links").first<{
+        count: number;
+      }>(),
+    ).resolves.toEqual({ count: 0 });
+  });
+
+  it("rejects an expired magic link", async () => {
+    const now = new Date("2026-08-20T00:00:00.000Z");
+    const issue = await issueMagicLink(env, "login", "vhie1046@gmail.com", oauthRequest, now);
+    expect(issue).not.toBeNull();
+    if (!issue) throw new Error("Expected a magic-link challenge");
+
+    await expect(
+      consumeMagicLink(env, issue.token, new Date(now.getTime() + 901_000)),
+    ).resolves.toBeNull();
   });
 });
 
@@ -201,20 +421,33 @@ describe("OAuth provider", () => {
 
     const consentResponse = await SELF.fetch(authorizeUrl);
     expect(consentResponse.status).toBe(200);
-    const consentHtml = await consentResponse.text();
-    const { cookie, token: csrf } = csrfFrom(consentResponse, consentHtml);
-    const consentBody = new URLSearchParams({
-      csrf,
-      decision: "allow",
-      email: "second-user@example.com",
-    });
-    const approval = await SELF.fetch(authorizeUrl, {
-      method: "POST",
-      headers: {
-        cookie,
-        "content-type": "application/x-www-form-urlencoded",
-      },
-      body: consentBody,
+    await consentResponse.text();
+    const magicToken = "integration-magic-token";
+    const oauthRequestForChallenge: AuthRequest = {
+      responseType: "code",
+      clientId,
+      redirectUri,
+      scope: [MCP_SCOPE],
+      state: "integration-state",
+      codeChallenge: challenge,
+      codeChallengeMethod: "S256",
+      resource: MCP_RESOURCE,
+    };
+    const now = new Date();
+    await env.MEMORY_DB.prepare(
+      `INSERT INTO auth_magic_links
+       (token_hash, email, mode, oauth_request_json, created_at, expires_at)
+       VALUES (?, ?, 'register', ?, ?, ?)`,
+    )
+      .bind(
+        await sha256(magicToken),
+        "second-user@example.com",
+        JSON.stringify(oauthRequestForChallenge),
+        now.toISOString(),
+        new Date(now.getTime() + 900_000).toISOString(),
+      )
+      .run();
+    const approval = await SELF.fetch(`${MCP_ORIGIN}/auth/magic-link?token=${magicToken}`, {
       redirect: "manual",
     });
     expect(approval.status).toBe(302);

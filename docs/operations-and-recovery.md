@@ -11,7 +11,7 @@
 
 Structured logs expose request/job IDs and categories. D1 tables `imports`, `import_items`, `jobs`, and `chunk_index_state` provide durable progress/error state. Cloudflare dashboards provide queue backlog, Worker latency/errors, storage growth, AI usage, and Vectorize counts without an extra monitoring stack.
 
-Search emits one content-free summary only when fallback candidates or channel failures exist. It includes indexed/fallback/merged counts, aggregate indexing states, fallback use, and unavailable channels; it never includes the query or conversation text.
+Search emits one content-free summary per request. It includes total and per-stage timings, semantic variant count, indexed/fallback/merged counts, aggregate indexing states, fallback use, and unavailable channels; it never includes the query or conversation text.
 
 ## Recovery cases
 

@@ -34,8 +34,9 @@ Do not store routine commits, "I did X" churn, or facts you can read from the re
 3. **Store with full context.** `memory_store` with title, `project/<slug>`, tags, and
    messages that include the decision, the reasoning, and the constraints. Titles should be
    descriptive nouns, not commands.
-4. **Update, never duplicate.** Use `memory_append` on the existing conversation id with the
-   `base_revision_id` returned by the previous store/append. Append supersedes earlier text.
+4. **Update, never duplicate.** Use `memory_replace` to correct or supersede an existing memory,
+   sending the complete intended message list and the `base_revision_id` returned by the previous
+   store/append/replace. Use `memory_append` only for genuine continuation.
 5. **Delete only on explicit user confirmation.** Remove specific memories with
    `memory_delete_conversations`; clear an entire project with `memory_empty_namespace`
    (exact confirmation required). Never delete memory unprompted.
@@ -60,6 +61,7 @@ Do not store routine commits, "I did X" churn, or facts you can read from the re
 | `memory_stats`                | counts + indexing health                                    |
 | `memory_store`                | durable new memory (claims `project/<slug>` on first write) |
 | `memory_append`               | extend an existing conversation, optimistic revision check  |
+| `memory_replace`              | replace its transcript, optimistic revision check           |
 | `memory_update_tags`          | change tags on an existing conversation                     |
 | `memory_delete_conversations` | delete specific memories (user-confirmed)                   |
 | `memory_empty_namespace`      | empty one of your namespaces (exact confirmation)           |

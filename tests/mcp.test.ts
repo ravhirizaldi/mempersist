@@ -41,6 +41,7 @@ describe("MCP server", () => {
       "memory_import_status",
       "memory_list_conversations",
       "memory_list_namespaces",
+      "memory_replace",
       "memory_search",
       "memory_stats",
       "memory_store",
@@ -135,6 +136,29 @@ describe("MCP server", () => {
     expect(nonString.isError).toBe(true);
     expect(longTag.isError).toBe(true);
     expect(searchTooMany.isError).toBe(true);
+  });
+
+  it("validates complete replacement inputs", async () => {
+    const client = await connectedClient();
+    const emptyMessages = await client.callTool({
+      name: "memory_replace",
+      arguments: {
+        conversation_id: crypto.randomUUID(),
+        base_revision_id: "a".repeat(64),
+        messages: [],
+      },
+    });
+    const malformedConversation = await client.callTool({
+      name: "memory_replace",
+      arguments: {
+        conversation_id: "not-a-memory-id",
+        base_revision_id: "a".repeat(64),
+        messages: [{ role: "user", content: "x" }],
+      },
+    });
+
+    expect(emptyMessages.isError).toBe(true);
+    expect(malformedConversation.isError).toBe(true);
   });
 
   it("requires an add or remove tag list on memory_update_tags", async () => {

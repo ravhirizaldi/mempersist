@@ -23,12 +23,13 @@ yarn wrangler kv namespace create mempersist-oauth --binding OAUTH_KV
 yarn wrangler vectorize create mempersist-bge-m3-v1 --dimensions=1024 --metric=cosine
 yarn wrangler vectorize create-metadata-index mempersist-bge-m3-v1 --property-name=generation --type=string
 yarn wrangler vectorize create-metadata-index mempersist-bge-m3-v1 --property-name=namespace --type=string
+yarn wrangler vectorize create-metadata-index mempersist-bge-m3-v1 --property-name=user_id --type=string
 yarn wrangler vectorize create-metadata-index mempersist-bge-m3-v1 --property-name=source_type --type=string
 yarn wrangler queues create mempersist-dead-letter
 yarn wrangler queues create mempersist-import
 yarn wrangler queues create mempersist-index
 ```
 
-Add the real D1 and KV IDs printed by Wrangler to their matching bindings. Vectorize dimensions and metric are immutable; a model dimension change requires a new index. Metadata indexes must exist before relevant vectors are inserted.
+Add the real D1 and KV IDs printed by Wrangler to their matching bindings. Vectorize dimensions and metric are immutable; a model dimension change requires a new index. Metadata indexes must exist before relevant vectors are inserted; adding `user_id` to an existing index requires a reindex so stored vectors receive it.
 
 Local D1/R2/KV/Queues are simulated. AI and Vectorize are remote in normal `yarn dev`; the test configuration omits them. R2 canonical data should eventually have an independent portable backup because accidental bucket deletion is not repaired by D1 or Vectorize. Losing OAuth KV disconnects clients but does not lose conversation memory.

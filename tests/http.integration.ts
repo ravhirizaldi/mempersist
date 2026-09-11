@@ -36,6 +36,50 @@ describe("HTTP security boundary", () => {
     }
   });
 
+  it("negotiates Indonesian and allows a cookie preference to override it", async () => {
+    const appEnv = env as AppEnv;
+    const indonesian = await app.request(
+      "/whitepaper",
+      { headers: { "accept-language": "id-ID, en;q=0.5" } },
+      appEnv,
+    );
+    expect(indonesian.headers.get("content-language")).toBe("id");
+    expect(await indonesian.text()).toContain("Merancang memori percakapan AI");
+
+    const english = await app.request(
+      "/whitepaper",
+      {
+        headers: {
+          "accept-language": "id",
+          cookie: "__Host-mempersist_lang=en",
+        },
+      },
+      appEnv,
+    );
+    expect(english.headers.get("content-language")).toBe("en");
+  });
+
+  it("persists language switches and rejects external return targets", async () => {
+    const appEnv = env as AppEnv;
+    const switched = await app.request(
+      "/language/id?return_to=%2Farchitecture%3Fview%3Dfull",
+      {},
+      appEnv,
+    );
+    expect(switched.status).toBe(303);
+    expect(switched.headers.get("location")).toBe("/architecture?view=full");
+    expect(switched.headers.get("set-cookie")).toContain("__Host-mempersist_lang=id");
+    expect(switched.headers.get("set-cookie")).toContain("HttpOnly; Secure; SameSite=Lax");
+
+    const unsafe = await app.request(
+      "/language/id?return_to=https%3A%2F%2Fevil.example",
+      {},
+      appEnv,
+    );
+    expect(unsafe.headers.get("location")).toBe("/");
+    expect((await app.request("/language/fr", {}, appEnv)).status).toBe(404);
+  });
+
   it("leaves health public and requires bearer authentication for API routes", async () => {
     const appEnv = env as AppEnv;
     const health = await app.request("/healthz", {}, appEnv);

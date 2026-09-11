@@ -1,5 +1,5 @@
 import { env } from "cloudflare:workers";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { createMcpConversation } from "../src/chatgpt";
 import { EMBEDDING_DIMENSIONS } from "../src/domain";
 import { indexRevision, type IndexingEnv } from "../src/indexing";
@@ -9,6 +9,7 @@ import {
   appendConversation,
   listConversations,
   loadCanonicalRevision,
+  replaceConversation,
   updateConversationTags,
   writeCanonicalConversation,
 } from "../src/storage";
@@ -368,6 +369,77 @@ describe("recent unindexed canonical search", () => {
     expect(stale.results).toEqual([]);
     expect(latest.results[0]?.revisionId).toBe(latestRevision.stored.revisionId);
     expect(latest.results[0]?.revisionId).not.toBe(oldRevision.stored.revisionId);
+  });
+
+  it("replaces a conversation in place while preserving metadata and the old revision", async () => {
+    const initial = await storeMemory({
+      id: crypto.randomUUID(),
+      title: "Replacement target",
+      namespace: `replace-${crypto.randomUUID()}`,
+      tags: ["canon", "keep"],
+      messages: [{ role: "user", content: "Original transcript." }],
+    });
+    const replacement = await replaceConversation(
+      env,
+      initial.conversation.id,
+      initial.stored.revisionId,
+      [
+        { role: "user", content: "Corrected transcript." },
+        { role: "assistant", content: "Replacement remains canonical." },
+      ],
+    );
+
+    expect(replacement.conversationId).toBe(initial.conversation.id);
+    expect(replacement.revisionId).not.toBe(initial.stored.revisionId);
+    const current = await loadCanonicalRevision(env, replacement.revisionId);
+    expect(current.conversation.title).toBe(initial.conversation.title);
+    expect(current.conversation.namespace).toBe(initial.conversation.namespace);
+    expect(current.conversation.tags).toEqual(initial.conversation.tags);
+    expect(current.conversation.nodes.map((node) => node.text)).toEqual([
+      "Corrected transcript.",
+      "Replacement remains canonical.",
+    ]);
+
+    const old = await loadCanonicalRevision(env, initial.stored.revisionId);
+    expect(old.conversation.nodes.map((node) => node.text)).toEqual(["Original transcript."]);
+    const pointer = await env.MEMORY_DB.prepare(
+      "SELECT current_revision_id FROM conversations WHERE id = ?",
+    )
+      .bind(initial.conversation.id)
+      .first<{ current_revision_id: string }>();
+    expect(pointer?.current_revision_id).toBe(replacement.revisionId);
+  });
+
+  it("rejects stale replacement bases and keeps the replacement current after indexing fails", async () => {
+    const initial = await storeMemory({
+      id: crypto.randomUUID(),
+      title: "Replacement failure",
+      namespace: `replace-failure-${crypto.randomUUID()}`,
+      tags: ["canon"],
+      messages: [{ role: "user", content: "Original replacement failure transcript." }],
+    });
+    const replacement = await replaceConversation(
+      env,
+      initial.conversation.id,
+      initial.stored.revisionId,
+      [{ role: "user", content: "Current replacement transcript." }],
+    );
+
+    await expect(
+      replaceConversation(env, initial.conversation.id, initial.stored.revisionId, [
+        { role: "user", content: "Stale replacement must not win." },
+      ]),
+    ).rejects.toMatchObject({ code: "IMPORT_CONFLICT", status: 409 });
+    await expect(
+      indexRevision(indexingEnv(true), replacement.revisionId, env.ACTIVE_INDEX_GENERATION),
+    ).rejects.toMatchObject({ code: "DERIVED_INDEXING" });
+
+    const pointer = await env.MEMORY_DB.prepare(
+      "SELECT current_revision_id FROM conversations WHERE id = ?",
+    )
+      .bind(initial.conversation.id)
+      .first<{ current_revision_id: string }>();
+    expect(pointer?.current_revision_id).toBe(replacement.revisionId);
   });
 
   it("degrades to canonical search when semantic retrieval is unavailable", async () => {
@@ -1079,6 +1151,7 @@ describe("message-boundary semantic chunking", () => {
     const deviceChunk = await chunkId(device.stored.revisionId);
 
     let vectorCalls = 0;
+    let firstQueryObservedConcurrency = false;
     const seenFilters: Array<VectorizeVectorMetadataFilter | undefined> = [];
     const variantEnv = {
       ...searchEnv(),
@@ -1089,9 +1162,10 @@ describe("message-boundary semantic chunking", () => {
     };
     variantEnv.MEMORY_VECTOR.query = (_vector, options) => {
       vectorCalls += 1;
+      const call = vectorCalls;
       seenFilters.push(options?.filter);
       const matches =
-        vectorCalls === 1
+        call === 1
           ? [
               { id: wallpaperChunk, score: 0.7, metadata: { chunk_id: wallpaperChunk } },
               { id: deviceChunk, score: 0.55, metadata: { chunk_id: deviceChunk } },
@@ -1100,16 +1174,28 @@ describe("message-boundary semantic chunking", () => {
               { id: wallpaperChunk, score: 0.75, metadata: { chunk_id: wallpaperChunk } },
               { id: deviceChunk, score: 0.5, metadata: { chunk_id: deviceChunk } },
             ];
-      return Promise.resolve({ matches, count: matches.length });
+      return Promise.resolve().then(() => {
+        if (call === 1) firstQueryObservedConcurrency = vectorCalls === 2;
+        return { matches, count: matches.length };
+      });
     };
 
+    const info = vi.spyOn(console, "info").mockImplementation(() => undefined);
     const result = await searchMemory(variantEnv, {
       query: "photobox wallpaper phone",
       limit: 8,
       namespace,
       debug: true,
     });
+    expect(info).toHaveBeenCalledTimes(1);
+    const summaryText = String(info.mock.calls[0]?.[0]);
+    info.mockRestore();
+    const summary = JSON.parse(summaryText) as {
+      timings_ms: Record<string, number>;
+      semantic_variant_count: number;
+    };
     expect(vectorCalls).toBe(2);
+    expect(firstQueryObservedConcurrency).toBe(true);
     expect(seenFilters).toEqual([
       { generation: { $eq: env.ACTIVE_INDEX_GENERATION }, namespace: { $in: [namespace] } },
       { generation: { $eq: env.ACTIVE_INDEX_GENERATION }, namespace: { $in: [namespace] } },
@@ -1121,6 +1207,10 @@ describe("message-boundary semantic chunking", () => {
     expect(wallpaperHit?.debug?.semanticVariants[0]).toBe("photobox wallpaper phone");
     expect(wallpaperHit?.debug?.semanticVariants).toHaveLength(2);
     expect(result.results[0]?.chunkId).toBe(wallpaperChunk);
+    expect(summary.semantic_variant_count).toBe(2);
+    expect(Object.values(summary.timings_ms).every((duration) => duration >= 0)).toBe(true);
+    expect(summaryText).not.toContain("photobox wallpaper phone");
+    expect(summaryText).not.toContain("Wallpaper story");
   });
 });
 

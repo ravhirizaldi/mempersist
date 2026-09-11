@@ -14,11 +14,14 @@ and accidental deletion of canonical storage.
 - Both token values are SHA-256 hashed before a constant-time comparison.
 - ChatGPT uses OAuth 2.1 authorization code with PKCE S256. The official Cloudflare provider stores only hashes of codes and tokens in private KV and encrypts grant props.
 - OAuth consent uses a 256-bit double-submit CSRF value in an `HttpOnly`, `Secure`, `SameSite=Lax`, `__Host-` cookie. Client metadata is HTML-escaped and the page denies framing, external content, and referrers with response headers.
-- The consent page provisions an account from the entered email (normalized, idempotent) and
-  never stores or logs the raw form. Authorization is scoped to that account's namespace;
-  knowing an account email is sufficient to authorize a client for it, so the owner email
-  (`vhie1046@gmail.com`) is a high-value secret. OAuth access tokens last one hour and refresh
-  tokens use the provider's 30-day default.
+- The consent page sends a one-use, 15-minute magic link and never stores or logs the raw form.
+  Existing emails reconnect to their archive; unknown emails create an isolated account only
+  after the link is opened. OAuth access tokens last one hour and refresh tokens use the
+  provider's 30-day default.
+- Browser language selection uses a separate `__Host-mempersist_lang` cookie with `Secure`,
+  `HttpOnly`, and `SameSite=Lax`. Its redirect target is restricted to a same-origin relative path.
+  The validated `en` or `id` locale is copied to application-owned magic-link URLs only; it does
+  not enter OAuth protocol state, account storage, logs, or MCP/API contracts.
 - Authentication occurs before protected JSON bodies are parsed.
 - JSON writes are limited to 1 MiB, direct imports to 16 MiB, multipart parts to 16 MiB, one parsed conversation to 32 MiB, and MCP responses to 64 KiB.
 - Zod validates HTTP and MCP inputs. Import parsing rejects malformed/truncated top-level arrays and records per-conversation permanent failures.

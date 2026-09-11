@@ -5,7 +5,14 @@ import { verifySecret } from "./crypto";
 import type { AppEnv, JobMessage } from "./domain";
 import { processJobMessage } from "./jobs";
 import { createMemoryMcpServer } from "./mcp";
-import { handleAuthorization, MCP_ORIGIN, MCP_RESOURCE, MCP_SCOPE, type OAuthEnv } from "./oauth";
+import {
+  handleAuthorization,
+  handleMagicLink,
+  MCP_ORIGIN,
+  MCP_RESOURCE,
+  MCP_SCOPE,
+  type OAuthEnv,
+} from "./oauth";
 import { resolveTenant } from "./tenant";
 
 const mcpHandler = {
@@ -27,6 +34,9 @@ const defaultHandler = {
   async fetch(request: Request, env: AppEnv, ctx: ExecutionContext): Promise<Response> {
     if (new URL(request.url).pathname === "/authorize") {
       return handleAuthorization(request, env as OAuthEnv);
+    }
+    if (new URL(request.url).pathname === "/auth/magic-link") {
+      return handleMagicLink(request, env as OAuthEnv);
     }
     return app.fetch(request, env, ctx);
   },

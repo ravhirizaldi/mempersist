@@ -4,7 +4,10 @@ export const CHUNK_STRATEGY = "chat-turn-v2";
 export const EMBEDDING_MODEL = "@cf/baai/bge-m3";
 export const EMBEDDING_DIMENSIONS = 1024;
 
-export type AppEnv = Env & { MEMORY_API_TOKEN: string };
+export type AppEnv = Env & {
+  AUTH_EMAIL_FROM: string;
+  MEMORY_API_TOKEN: string;
+};
 
 export type JsonPrimitive = string | number | boolean | null;
 export type JsonValue = JsonPrimitive | JsonValue[] | { [key: string]: JsonValue };

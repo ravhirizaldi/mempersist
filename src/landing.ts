@@ -1,13 +1,9 @@
-const MCP_ENDPOINT = "https://mempersist.nextostaging.net/mcp";
+import { localeHeaders, messages, type Locale } from "./i18n";
+import { localizePageMarkup } from "./locales/pages-id";
+import { BASE_CSS, brand, FAVICON } from "./ui";
+import { SITE_CSS, SITE_SCRIPT } from "./site";
 
-const NAV_ITEMS: Array<{ href: string; label: string }> = [
-  { href: "/", label: "Home" },
-  { href: "/whitepaper", label: "Whitepaper" },
-  { href: "/architecture", label: "Architecture" },
-  { href: "/security", label: "Security" },
-  { href: "/adrs", label: "ADRs" },
-  { href: "/about", label: "About" },
-];
+const MCP_ENDPOINT = "https://mempersist.nextostaging.net/mcp";
 
 function escapeHtml(value: string): string {
   return value.replace(
@@ -17,128 +13,135 @@ function escapeHtml(value: string): string {
   );
 }
 
-const LANDING_CSS = `
-:root{color-scheme:dark;font-family:Outfit,Geist,"Segoe UI",system-ui,sans-serif;background:#061225;color:#eef4ff;font-synthesis:none;font-size:15.5px}
-*{box-sizing:border-box}
-html{scroll-behavior:smooth}
-body{margin:0;background:#061225;line-height:1.6;-webkit-font-smoothing:antialiased}
-body::before{content:"";position:fixed;inset:0;z-index:0;pointer-events:none;background:radial-gradient(52% 38% at 78% -6%,rgba(139,184,237,.14),transparent 62%),radial-gradient(40% 30% at 8% 110%,rgba(127,201,168,.07),transparent 60%)}
-main.wrap{position:relative;z-index:1}
-code,kbd{font-family:"JetBrains Mono","Geist Mono",ui-monospace,monospace}
-nav{position:sticky;top:0;z-index:10;border-bottom:1px solid #1d324e;background:rgba(6,18,37,.9);backdrop-filter:blur(10px)}
-.nav{max-width:900px;margin:0 auto;padding:12px 24px;display:flex;align-items:center;gap:18px;flex-wrap:wrap}
-.nav .brand{display:flex;align-items:center;gap:8px;margin-right:auto}
-.nav .mark{display:grid;place-items:center;width:22px;height:22px;border:1px solid #48688f;background:#102746;color:#dceaff;font-size:11px;font-weight:800}
-.nav .wordmark{font-size:13px;font-weight:700;letter-spacing:.02em}
-.nav a{color:#91a4bd;text-decoration:none;font-size:13px;font-weight:600;transition:color .18s}
-.nav a:hover{color:#dceaff}
-.nav a.active{color:#dceaff;text-decoration:underline;text-underline-offset:4px}
-.wrap{max-width:880px;margin:0 auto;padding:64px 24px 88px}
-.eyebrow{margin:0 0 10px;color:#91add2;font-family:"JetBrains Mono","Geist Mono",ui-monospace,monospace;font-size:11px;font-weight:700;letter-spacing:.2em}
-h1{margin:0;font-size:clamp(30px,6vw,46px);font-weight:750;letter-spacing:-.045em;line-height:1.03}
-.lead{margin:18px 0 0;color:#aebed4;font-size:16.5px;max-width:56ch}
-.endpoint{margin:30px 0 0;padding:15px 18px;border:1px solid #29415f;background:#0a1930;color:#b6d2f5;font-size:13px;word-break:break-all;box-shadow:inset 0 1px 0 rgba(255,255,255,.04)}
-h2{margin:56px 0 0;font-size:clamp(20px,3.4vw,27px);font-weight:700;letter-spacing:-.025em}
-h3{margin:30px 0 8px;font-size:15px;font-weight:700}
-p{color:#b6c6dc;font-size:14.5px}
-ul,ol{padding-left:20px;color:#b6c6dc;font-size:14.5px}
-li{margin:9px 0}
-.code{margin:14px 0 0;padding:15px 18px;border:1px solid #22395a;background:#081527;color:#dceaff;font-size:13px;overflow-x:auto;white-space:pre;border-radius:6px}
-.note{margin:20px 0 0;padding:14px 18px;border:1px solid #22395a;border-left:3px solid #7fc9a8;background:#0a1930;color:#aebed4;font-size:13px;border-radius:0 6px 6px 0}
-table{width:100%;border-collapse:collapse;margin-top:14px;font-size:13px}
-th,td{text-align:left;padding:11px 12px;border-bottom:1px solid #1d324e;color:#b6c6dc}
-th{color:#dce8f8;font-family:"JetBrains Mono","Geist Mono",ui-monospace,monospace;font-size:11px;letter-spacing:.1em}
-a{color:#8bb8ed}
-h2 i.ph{display:inline-block;margin-right:10px;color:#8bb8ed;font-size:.85em;vertical-align:1px}
-.diagram{margin:22px 0 0;padding:16px;border:1px solid #22395a;background:#081527;border-radius:8px;overflow-x:auto}
-.diagram svg{display:block;width:100%;height:auto;max-width:720px;margin:0 auto}
-.diagram text{font-family:"JetBrains Mono","Geist Mono",ui-monospace,monospace}
-::selection{background:rgba(139,184,237,.28)}
-footer{margin-top:72px;padding-top:22px;border-top:1px solid #1d324e;color:#7d92af;font-size:12px}
-.reveal{opacity:0;transform:translateY(16px);transition:opacity .5s cubic-bezier(.16,1,.3,1),transform .5s cubic-bezier(.16,1,.3,1)}
-.reveal.in{opacity:1;transform:none}
-@media(max-width:640px){.wrap{padding:36px 18px 60px}.nav{padding:10px 18px;gap:12px}}
-@media(prefers-reduced-motion:reduce){html{scroll-behavior:auto}.reveal{opacity:1;transform:none;transition:none}}
-`;
-
-function page(title: string, body: string, active: string): string {
-  const nav = `<nav><div class="nav"><div class="brand"><span class="mark">M</span><span class="wordmark">MemPersist</span></div>
-${NAV_ITEMS.map(
-  (item) =>
-    `<a href="${item.href}"${item.href === active ? ' class="active"' : ""}>${item.label}</a>`,
-).join("\n")}
+function page(title: string, body: string, active: string, locale: Locale, intro = ""): string {
+  const t = messages(locale);
+  const navItems = [
+    { href: "/", label: t.shared.home },
+    { href: "/whitepaper", label: t.shared.whitepaper },
+    { href: "/architecture", label: t.shared.architecture },
+    { href: "/security", label: t.shared.security },
+    { href: "/adrs", label: t.shared.adrs },
+    { href: "/about", label: t.shared.about },
+  ];
+  // The input is trusted template markup, never user content. Generate a static
+  // contents list so document navigation also works without JavaScript.
+  const sections: Array<{ id: string; label: string }> = [];
+  const content = body
+    .replace(/<h2>([\s\S]*?)<\/h2>/g, (_match: string, heading: string) => {
+      const label = heading.replace(/<[^>]*>/g, "").trim();
+      const id = `section-${sections.length + 1}`;
+      sections.push({ id, label });
+      return `<h2 id="${id}" tabindex="-1">${heading}</h2>`;
+    })
+    .replace(
+      /<table>/g,
+      `<div class="table-scroll" tabindex="0" role="region" aria-label="${t.shared.referenceTable}"><table>`,
+    )
+    .replace(/<\/table>/g, "</table></div>");
+  const toc = sections.length
+    ? `<nav class="toc" aria-label="${t.shared.onThisPage}"><p>${t.shared.onThisPageLabel}</p>${sections.map(({ id, label }) => `<a href="#${id}">${escapeHtml(label)}</a>`).join("")}</nav>`
+    : `<aside class="toc"><p>${t.shared.projectNotes}</p><a href="/architecture">${t.shared.readArchitecture}</a><a href="/whitepaper">${t.shared.readWhitepaper}</a></aside>`;
+  const language = `<nav class="language-switch" aria-label="${t.shared.language}"><a href="/language/en?return_to=${encodeURIComponent(active)}" lang="en"${locale === "en" ? ' aria-current="true"' : ""}>EN</a><span aria-hidden="true">/</span><a href="/language/id?return_to=${encodeURIComponent(active)}" lang="id"${locale === "id" ? ' aria-current="true"' : ""}>ID</a></nav>`;
+  const nav = `<nav class="site-nav" aria-label="${t.shared.mainNav}"><div class="nav">
+${brand(t.shared.homeLabel)}
+<button type="button" class="nav-toggle" aria-controls="nav-links" aria-expanded="false" hidden>${t.shared.menu}</button>
+<div class="nav-links" id="nav-links">${navItems
+    .map(
+      (item) =>
+        `<a href="${item.href}"${item.href === active ? ' aria-current="page"' : ""}>${item.label}</a>`,
+    )
+    .join("\n")}</div>
+${language}<a class="button nav-cta" href="/#connect">${t.shared.connect} <span aria-hidden="true">↗</span></a>
 </div></nav>`;
-  return `<!doctype html>
-<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<meta name="description" content="MemPersist — durable AI conversation memory for ChatGPT and coding agents.">
+  const html = `<!doctype html>
+<html lang="${locale}"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="description" content="${t.shared.description}">
 <title>${escapeHtml(title)} · MemPersist</title>
+${FAVICON}
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-<link href="https://fonts.googleapis.com/css2?family=Outfit:wght@400;500;600;700;750;800&family=JetBrains+Mono:wght@400;600;700&display=swap" rel="stylesheet">
-<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@phosphor-icons/web@2.1.1/src/regular/style.css">
-<style>${LANDING_CSS}</style></head>
-<body>${nav}<main class="wrap">${body}</main>
-<script>
-(function () {
-  var items = document.querySelectorAll("main.wrap > *");
-  if (!("IntersectionObserver" in window)) return;
-  items.forEach(function (el, index) {
-    el.classList.add("reveal");
-    el.style.transitionDelay = Math.min(index * 60, 300) + "ms";
-  });
-  var observer = new IntersectionObserver(function (entries) {
-    entries.forEach(function (entry) {
-      if (entry.isIntersecting) {
-        entry.target.classList.add("in");
-        observer.unobserve(entry.target);
-      }
-    });
-  }, { rootMargin: "0px 0px -8% 0px", threshold: 0.02 });
-  items.forEach(function (el) { observer.observe(el); });
-})();
-</script>
+<link href="https://fonts.googleapis.com/css2?family=Outfit:wght@400;500;600&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+<style>${BASE_CSS}${SITE_CSS}</style></head>
+<body data-copied="${t.runtime.copied}" data-copy-success="${t.runtime.copiedFeedback}" data-copy-failed="${t.runtime.copyFailed}" data-decision-count="${t.runtime.decisionCount}"><a class="skip-link" href="#main-content">${t.shared.skip}</a>${nav}
+<main id="main-content" class="wrap${active === "/" ? " home" : ""}" tabindex="-1">
+<div class="page-meta"><span>${t.shared.memoryContext}</span><span>${active === "/" ? t.shared.ownArchive : `<a href="/">${t.shared.home}</a> / ${escapeHtml(navItems.find((item) => item.href === active)?.label ?? title)}`}</span></div>
+${intro}<div class="reading-layout">${toc}<div class="document">${content}</div></div>
+<footer><span>MemPersist · ${t.shared.durable}</span><div class="footer-links"><a href="/security">${t.shared.privacy}</a><a href="/about">${t.shared.creator}</a><a href="#main-content">${t.shared.backTop} ↑</a></div></footer>
+</main><script>${SITE_SCRIPT}</script>
 </body></html>`;
+  return localizePageMarkup(locale, html);
 }
 
-export function landingPage(): Response {
-  const body = `
-  <header>
-    <p class="eyebrow">DURABLE AI MEMORY</p>
-    <h1>Conversation memory that survives the next session.</h1>
-    <p class="lead">MemPersist stores high-fidelity AI conversation history, retrieves compact original context, and accepts intentional MCP writes. It works with any MCP-compatible client — ChatGPT, Codex, Claude Code, Cursor, and IDE extensions. The archive is yours, per account.</p>
-    <div class="endpoint"><code>${escapeHtml(MCP_ENDPOINT)}</code></div>
-  </header>
+function codeBlock(id: string, label: string, code: string): string {
+  return `<div class="code-block"><div class="code-heading"><span>${escapeHtml(label)}</span><button class="copy-button" type="button" data-copy="${id}" aria-label="Copy ${escapeHtml(label)}" hidden>Copy</button></div><pre class="code" tabindex="0"><code id="${id}">${escapeHtml(code)}</code></pre></div>`;
+}
 
+export function landingPage(locale: Locale = "en"): Response {
+  const intro = `
+  <header class="hero">
+    <div>
+      <p class="eyebrow">DURABLE AI CONVERSATION MEMORY</p>
+      <h1>Keep the context.<span>Continue the thought.</span></h1>
+      <p class="lead">Your next session shouldn’t start from zero. Keep original conversations, recall what matters, and pick up where you left off.</p>
+      <div class="hero-actions"><a class="button" href="#connect">Connect your client <span aria-hidden="true">↗</span></a><a class="text-link" href="/whitepaper">Read the thinking behind it</a></div>
+      <p class="hero-caption">ChatGPT · Codex · Claude Code · Any MCP client</p>
+    </div>
+    <section class="archive-preview" data-demo aria-label="Interactive memory example">
+      <div class="preview-top"><span>project / field-notes</span><span>ILLUSTRATIVE EXAMPLE</span></div>
+      <div class="demo-controls" role="group" aria-label="Explore the memory lifecycle" hidden>
+        <button type="button" data-step aria-pressed="true" aria-controls="example-save">01 Save</button><button type="button" data-step aria-pressed="false" aria-controls="example-find">02 Find</button><button type="button" data-step aria-pressed="false" aria-controls="example-continue">03 Continue</button>
+      </div>
+      <div aria-live="polite" aria-atomic="true">
+        <article class="demo-panel" id="example-save" data-example><p class="eyebrow">MEMORY_STORE / INTENTIONAL WRITES</p><h2>“Keep the decision, not just the summary.”</h2><p>Save the original conversation with its context. A new revision preserves what was said.</p></article>
+        <article class="demo-panel" id="example-find" data-example><p class="eyebrow">MEMORY_SEARCH / HYBRID RETRIEVAL</p><h2>“Why did we choose object storage?”</h2><p>Search across words and meaning. Each result points back to a canonical conversation and source range.</p></article>
+        <article class="demo-panel" id="example-continue" data-example><p class="eyebrow">MEMORY_GET_CONTEXT / ORIGINAL WORDS</p><h2>“Right. Let’s build on that.”</h2><p>Bring the surrounding messages into the next session. Verify the source before continuing the work.</p></article>
+      </div>
+      <div class="preview-bottom"><span>Original context. Not invented history.</span><span>01 — 03</span></div>
+    </section>
+  </header>
+  <div class="endpoint" id="connect"><span class="endpoint-label">YOUR MCP ENDPOINT</span><code id="mcp-endpoint">${escapeHtml(MCP_ENDPOINT)}</code><button class="copy-button" type="button" data-copy="mcp-endpoint" aria-label="Copy MCP endpoint" hidden>Copy endpoint</button></div>
+  <p class="copy-feedback" id="copy-feedback" role="status" aria-live="polite"></p>
+  <section class="auth-panel">
+    <div>
+      <p class="eyebrow">EMAIL-ONLY ACCESS</p>
+      <h2>One email. No password.</h2>
+      <p>MemPersist sends a one-use magic link to your email. Existing archives reopen automatically, and a new archive is created after the first link is opened. The same email always reconnects you to the same private memory archive.</p>
+    </div>
+    <div class="auth-steps" aria-label="Passwordless access flow">
+      <span><b>01</b> Enter your email</span>
+      <span><b>02</b> Open the magic link</span>
+      <span><b>03</b> Return to your archive</span>
+    </div>
+  </section>`;
+  const body = `
   <section>
-    <h2><i class="ph ph-chat-circle-text" aria-hidden="true"></i> Connect ChatGPT (Developer mode)</h2>
+    <h2>Connect ChatGPT</h2>
     <p>MemPersist is not in the official ChatGPT plugin catalog. Connect it as a custom MCP app from Developer mode — the same endpoint works with every other MCP client too:</p>
     <ol>
       <li>Open ChatGPT and go to <strong>Settings → Developer</strong>.</li>
       <li>Select <strong>Custom MCP app</strong> (or enable Developer mode and add a custom app).</li>
       <li>Paste the endpoint: <code>${escapeHtml(MCP_ENDPOINT)}</code></li>
-      <li>Complete the OAuth prompt and enter the email tied to your archive.</li>
+      <li>Complete the OAuth prompt and enter your email. Existing archives reconnect automatically; a new archive is created after the first link is opened.</li>
     </ol>
-    <div class="note">The consent page asks for your email, not a token. The same email reconnects to the same archive on any client.</div>
+    <div class="note">A one-use magic link is sent to your email. No password is created or stored, and the same email reconnects you to the same archive on any client.</div>
   </section>
 
   <section>
-    <h2><i class="ph ph-terminal-window" aria-hidden="true"></i> Connect coding agents</h2>
+    <h2>Connect coding agents</h2>
     <h3>Codex CLI</h3>
     <p>Add to <code>~/.codex/config.toml</code> (or a project-scoped <code>.codex/config.toml</code>):</p>
-    <div class="code">[mcp_servers.mempersist]
-type = "remote"
-url = "${escapeHtml(MCP_ENDPOINT)}"</div>
-    <p>Then authorize once:</p>
-    <div class="code">codex mcp login mempersist</div>
+    ${codeBlock("codex-config", "Codex configuration · TOML", `[mcp_servers.mempersist]\ntype = "remote"\nurl = "${MCP_ENDPOINT}"`)}
+    <p>Then authorize with your email through the one-use magic-link flow:</p>
+    ${codeBlock("codex-login", "Codex authorization · Shell", "codex mcp login mempersist")}
     <h3>Claude Code</h3>
-    <div class="code">claude mcp add --transport http mempersist ${escapeHtml(MCP_ENDPOINT)}</div>
-    <p>Complete the OAuth prompt with your email. Codex CLI, ChatGPT desktop, and the IDE extension share the same Codex configuration.</p>
+    ${codeBlock("claude-config", "Claude Code · Shell", `claude mcp add --transport http mempersist ${MCP_ENDPOINT}`)}
+    <p>Complete the OAuth prompt with your email. If you reconnect later, request a fresh magic link; your archive remains tied to the same email. Codex CLI, ChatGPT desktop, and the IDE extension share the same Codex configuration.</p>
     <h3>Any other MCP client</h3>
-    <p>Point any client that supports remote Streamable HTTP MCP servers at the endpoint above and authorize with your email. Cursor, JetBrains, VS Code extensions, and custom tooling all work the same way.</p>
+    <p>Point any client that supports remote Streamable HTTP MCP servers at the endpoint above and authorize with your email through the magic-link flow. Cursor, JetBrains, VS Code extensions, and custom tooling all work the same way.</p>
   </section>
 
   <section>
-    <h2><i class="ph ph-book-open-text" aria-hidden="true"></i> Memory conventions</h2>
+    <h2>Memory conventions</h2>
     <p>For coding agents, keep memory organized and reviewable:</p>
     <ul>
       <li>Store into <code>project/&lt;slug&gt;</code> namespaces — the first write claims the name for your account.</li>
@@ -169,12 +172,10 @@ url = "${escapeHtml(MCP_ENDPOINT)}"</div>
   </section>
 
   <section>
-    <h2><i class="ph ph-shield-check" aria-hidden="true"></i> Privacy and isolation</h2>
+    <h2>Privacy and isolation</h2>
     <p>Namespaces are scoped per account: the same namespace name in another account is separate and invisible. Every tool only ever sees the namespaces your account owns. Raw and canonical conversation bodies live in private object storage; D1 holds only the catalog and disposable search data.</p>
-  </section>
-
-  <footer>MemPersist · OAuth 2.1 + PKCE · Streamable HTTP MCP · by <a href="https://github.com/ravhirizaldi">Ravhi Rizaldi</a></footer>`;
-  return respond(page("MemPersist — durable AI conversation memory", body, "/"));
+  </section>`;
+  return respond(page("Durable AI conversation memory", body, "/", locale, intro), locale);
 }
 
 function searchFlowDiagram(): string {
@@ -277,7 +278,7 @@ function architectureDiagram(): string {
   </svg></div>`;
 }
 
-function whitepaperPage(): Response {
+function whitepaperPage(locale: Locale = "en"): Response {
   const body = `
   <p class="eyebrow">WHITEPAPER</p>
   <h1>Designing durable AI conversation memory</h1>
@@ -323,7 +324,7 @@ function whitepaperPage(): Response {
   </section>
 
   <section>
-    <h2><i class="ph ph-magnifying-glass" aria-hidden="true"></i> How search works</h2>
+    <h2>How search works</h2>
     <p>A query flows through three independent retrieval channels that are fused and ranked in one pass:</p>
     <ol>
       <li><strong>Lexical (FTS).</strong> The query is tokenized and matched against chunked conversation text in the FTS index.</li>
@@ -337,17 +338,15 @@ function whitepaperPage(): Response {
   <section>
     <h2>Scope and limitations</h2>
     <ul>
-      <li>Authentication is email-only; there is no email verification, billing, or organization support.</li>
+        <li>Authentication is email-only and passwordless: registration and sign-in use one-use magic links sent to the account email; there is no billing or organization support.</li>
       <li>V1 targets single-operator deployments and coding-agent workflows, not enterprise multi-tenant SaaS.</li>
       <li>Official app-store publishing is pending; the endpoint works today as a custom MCP app in ChatGPT Developer mode and in any other MCP client.</li>
     </ul>
-  </section>
-
-  <footer>MemPersist · v0.1 · Whitepaper</footer>`;
-  return respond(page("Whitepaper", body, "/whitepaper"));
+  </section>`;
+  return respond(page("Whitepaper", body, "/whitepaper", locale), locale);
 }
 
-function architecturePage(): Response {
+function architecturePage(locale: Locale = "en"): Response {
   const body = `
   <p class="eyebrow">ARCHITECTURE</p>
   <h1>Cloudflare-native, clean-room</h1>
@@ -356,7 +355,7 @@ function architecturePage(): Response {
   ${architectureDiagram()}
 
   <section>
-    <h2><i class="ph ph-cloud-check" aria-hidden="true"></i> Cloudflare services</h2>
+    <h2>Cloudflare services</h2>
     <table>
       <thead><tr><th>Service</th><th>Role</th></tr></thead>
       <tbody>
@@ -372,7 +371,7 @@ function architecturePage(): Response {
   </section>
 
   <section>
-    <h2><i class="ph ph-stack" aria-hidden="true"></i> Module map</h2>
+    <h2>Module map</h2>
     <table>
       <thead><tr><th>Module</th><th>Responsibility</th></tr></thead>
       <tbody>
@@ -408,26 +407,24 @@ function architecturePage(): Response {
       <li>Bindings: D1, R2, Vectorize, Workers AI (embeddings), Queues, KV (OAuth state)</li>
       <li>Yarn only; Node APIs only behind <code>nodejs_compat</code> with a concrete need</li>
     </ul>
-  </section>
-
-  <footer>MemPersist · Architecture</footer>`;
-  return respond(page("Architecture", body, "/architecture"));
+  </section>`;
+  return respond(page("Architecture", body, "/architecture", locale), locale);
 }
 
-function securityPage(): Response {
+function securityPage(locale: Locale = "en"): Response {
   const body = `
   <p class="eyebrow">SECURITY</p>
   <h1>Threat model and controls</h1>
-  <p class="lead">MemPersist holds sensitive conversation history. The primary risks are unauthorized reads/writes, leaked tokens, email-guessing authorization, malicious imports, oversized input, log leakage, and accidental canonical deletion.</p>
+  <p class="lead">MemPersist holds sensitive conversation history. The primary risks are unauthorized reads/writes, leaked tokens or magic links, mailbox compromise, malicious imports, oversized input, log leakage, and accidental canonical deletion.</p>
 
   <section>
     <h2>Controls</h2>
     <ul>
       <li><code>/mcp</code> uses OAuth 2.1 authorization code with PKCE; operator APIs require an operator access credential that never reaches the browser.</li>
       <li>Access tokens are SHA-256 hashed before constant-time comparison; operator secrets are stored outside source control.</li>
-      <li>ChatGPT access uses OAuth 2.1 authorization code with PKCE S256; the provider stores only hashes and encrypts grant props.</li>
+      <li>ChatGPT access uses OAuth 2.1 authorization code with PKCE S256 and a one-use email magic link; the provider stores only hashes and encrypts grant props.</li>
       <li>The consent page uses a double-submit CSRF cookie, HTML-escapes client metadata, and denies framing, external content, and referrers.</li>
-      <li>Email is the only identity credential — anyone who knows an account email can authorize a client for it. No password or email verification exists.</li>
+      <li>Email is the only identity credential; authorization requires a one-use magic link sent to that address. No password or separate profile-verification flow exists.</li>
       <li>Authentication runs before protected bodies are parsed; Zod validates every external input.</li>
       <li>Size limits: JSON writes 1 MiB, direct imports 16 MiB, multipart parts 16 MiB, MCP responses 64 KiB.</li>
       <li>R2 is private; no public bucket, presigned anonymous upload, or wildcard CORS.</li>
@@ -438,13 +435,11 @@ function securityPage(): Response {
   <section>
     <h2>Isolation</h2>
     <p>Namespaces are per-account and the same name in another account is separate and invisible. Deletion is scoped by <code>(user_id, namespace)</code> and requires exact confirmations on destructive tools. Derived indexes are disposable; canonical data is never silently redacted or rewritten.</p>
-  </section>
-
-  <footer>MemPersist · Security</footer>`;
-  return respond(page("Security", body, "/security"));
+  </section>`;
+  return respond(page("Security", body, "/security", locale), locale);
 }
 
-function adrsPage(): Response {
+function adrsPage(locale: Locale = "en"): Response {
   const adrs: Array<[string, string]> = [
     ["0001", "Clean-room platform, no Engram reuse"],
     ["0002", "R2 canonical store"],
@@ -469,26 +464,31 @@ function adrsPage(): Response {
     ["0021", "Multi-namespace accounts"],
     ["0022", "User-scoped namespaces"],
     ["0023", "user_id in vectorize metadata"],
+    ["0024", "Magic-link MCP authentication"],
+    ["0025", "Unified email continuation"],
+    ["0026", "Browser interface localization"],
   ];
   const rows = adrs
     .map(
       ([number, title]) =>
-        `<tr><td><code>${number}</code></td><td>${escapeHtml(title)}</td><td>Accepted</td></tr>`,
+        `<tr data-decision><td><code>${number}</code></td><td>${escapeHtml(title)}</td><td><span class="accepted">Accepted</span></td></tr>`,
     )
     .join("\n");
   const body = `
   <p class="eyebrow">ARCHITECTURE DECISION RECORDS</p>
   <h1>Accepted decisions</h1>
   <p class="lead">Every significant architecture decision is recorded as an ADR with status and context. Accepted history is never rewritten; new decisions supersede old ones.</p>
+  <div class="filter-bar" hidden><div><label for="decision-search">Find a decision</label><input id="decision-search" type="search" placeholder="Search by topic or number…" aria-controls="decisions" aria-describedby="decision-count" autocomplete="off"></div><button type="button" class="button secondary" id="clear-search">Clear</button></div>
+  <div class="filter-meta"><span id="decision-count" role="status" aria-live="polite">${adrs.length} decisions</span><span>DESIGN LOG / V0.1</span></div>
   <table>
     <thead><tr><th>ADR</th><th>Decision</th><th>Status</th></tr></thead>
-    <tbody>${rows}</tbody>
+    <tbody id="decisions">${rows}</tbody>
   </table>
-  <footer>MemPersist · ADRs</footer>`;
-  return respond(page("Architecture decision records", body, "/adrs"));
+  <div class="empty-state" id="decision-empty" hidden><h3>No matching decisions</h3><p>Try “storage”, “OAuth”, or a decision number. Clear the search to see everything.</p></div>`;
+  return respond(page("Architecture decision records", body, "/adrs", locale), locale);
 }
 
-function aboutPage(): Response {
+function aboutPage(locale: Locale = "en"): Response {
   const body = `
   <p class="eyebrow">ABOUT</p>
   <h1>Ravhi Rizaldi</h1>
@@ -512,26 +512,25 @@ function aboutPage(): Response {
     <ul>
       <li>GitHub: <a href="https://github.com/ravhirizaldi">github.com/ravhirizaldi</a></li>
     </ul>
-  </section>
-
-  <footer>MemPersist · About</footer>`;
-  return respond(page("About", body, "/about"));
+  </section>`;
+  return respond(page("About", body, "/about", locale), locale);
 }
 
-function respond(html: string): Response {
+function respond(html: string, locale: Locale): Response {
   return new Response(html, {
     headers: {
       "content-type": "text/html; charset=UTF-8",
       "cache-control": "no-store",
       "x-content-type-options": "nosniff",
       "content-security-policy":
-        "default-src 'none'; script-src 'unsafe-inline' https://cdn.jsdelivr.net; style-src 'unsafe-inline' https://fonts.googleapis.com https://cdn.jsdelivr.net; font-src https://fonts.gstatic.com https://cdn.jsdelivr.net; img-src data: https:; base-uri 'none'; form-action 'self'; frame-ancestors 'none'",
+        "default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline' https://fonts.googleapis.com; font-src https://fonts.gstatic.com; img-src data:; base-uri 'none'; form-action 'self'; frame-ancestors 'none'",
       "referrer-policy": "no-referrer",
+      ...localeHeaders(locale),
     },
   });
 }
 
-export const landingRoutes: Record<string, () => Response> = {
+export const landingRoutes: Record<string, (locale?: Locale) => Response> = {
   "/": landingPage,
   "/whitepaper": whitepaperPage,
   "/architecture": architecturePage,

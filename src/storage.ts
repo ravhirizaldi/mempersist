@@ -520,3 +520,54 @@ export async function appendConversation(
   };
   return writeCanonicalConversation(env, updated, null, baseRevisionId, loaded.row.user_id);
 }
+
+export async function replaceConversation(
+  env: AppEnv,
+  conversationId: string,
+  baseRevisionId: string,
+  messages: Array<{ role: string; content: string; timestamp?: string | undefined }>,
+  expectedNamespaces?: string[],
+  expectedUserId?: string,
+): Promise<StoredRevision> {
+  const loaded = await loadCurrentConversation(
+    env,
+    conversationId,
+    expectedNamespaces,
+    expectedUserId,
+  );
+  if (loaded.row.current_revision_id !== baseRevisionId) {
+    throw new AppError("IMPORT_CONFLICT", "base_revision_id is stale", 409);
+  }
+  const now = new Date().toISOString();
+  const nodes: CanonicalNode[] = [];
+  let parent: string | null = null;
+  for (const [index, message] of messages.entries()) {
+    const sourceNodeId = `replace-${crypto.randomUUID()}`;
+    const node: CanonicalNode = {
+      id: await domainId("message-node", conversationId, sourceNodeId),
+      sourceNodeId,
+      parentSourceNodeId: parent,
+      childSourceNodeIds: [],
+      role: message.role,
+      text: message.content,
+      content: { content_type: "text", parts: [message.content] },
+      createdAt: message.timestamp ?? now,
+      updatedAt: null,
+      modelSlug: null,
+      metadata: { replace_ordinal: index },
+      raw: {},
+    };
+    nodes.at(-1)?.childSourceNodeIds.push(sourceNodeId);
+    nodes.push(node);
+    parent = sourceNodeId;
+  }
+  const updated: CanonicalConversation = {
+    ...loaded.conversation,
+    tags: loaded.row.tags,
+    nodes,
+    updatedAt: now,
+    currentSourceNodeId: parent,
+    activeSourceNodeIds: nodes.map((node) => node.sourceNodeId),
+  };
+  return writeCanonicalConversation(env, updated, null, baseRevisionId, loaded.row.user_id);
+}
