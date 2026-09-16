@@ -116,6 +116,7 @@ const replacements: ReadonlyArray<readonly [string, string]> = [
   ["find memories; tags + tag_mode filter", "temukan memori; filter tags + tag_mode"],
   ["original messages around a hit", "pesan asli di sekitar hasil"],
   ["page a full conversation", "tampilkan percakapan lengkap per halaman"],
+  ["batch up to 20 known conversations", "ambil hingga 20 percakapan dikenal sekaligus"],
   ["metadata and tags", "metadata dan tag"],
   ["namespaces your account owns", "namespace milik akun Anda"],
   ["counts and indexing health", "jumlah dan kesehatan pengindeksan"],

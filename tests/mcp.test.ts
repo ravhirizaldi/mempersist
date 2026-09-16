@@ -38,6 +38,7 @@ describe("MCP server", () => {
       "memory_empty_namespace",
       "memory_get_context",
       "memory_get_conversation",
+      "memory_get_conversations",
       "memory_import_status",
       "memory_list_conversations",
       "memory_list_namespaces",
@@ -47,6 +48,69 @@ describe("MCP server", () => {
       "memory_store",
       "memory_update_tags",
     ]);
+    const readOnlyAnnotations = {
+      readOnlyHint: true,
+      destructiveHint: false,
+      openWorldHint: false,
+      idempotentHint: true,
+    };
+    for (const name of [
+      "memory_search",
+      "memory_get_context",
+      "memory_get_conversation",
+      "memory_get_conversations",
+      "memory_list_conversations",
+      "memory_list_namespaces",
+      "memory_stats",
+      "memory_import_status",
+    ]) {
+      expect(result.tools.find((tool) => tool.name === name)?.annotations).toEqual(
+        readOnlyAnnotations,
+      );
+    }
+    expect(result.tools.find((tool) => tool.name === "memory_replace")?.annotations).toEqual({
+      readOnlyHint: false,
+      destructiveHint: true,
+      openWorldHint: false,
+      idempotentHint: true,
+    });
+    expect(result.tools.find((tool) => tool.name === "memory_update_tags")?.annotations).toEqual({
+      readOnlyHint: false,
+      destructiveHint: true,
+      openWorldHint: false,
+      idempotentHint: true,
+    });
+    expect(result.tools.find((tool) => tool.name === "memory_store")?.annotations).toEqual({
+      readOnlyHint: false,
+      destructiveHint: false,
+      openWorldHint: false,
+      idempotentHint: false,
+    });
+    expect(result.tools.find((tool) => tool.name === "memory_append")?.annotations).toEqual({
+      readOnlyHint: false,
+      destructiveHint: false,
+      openWorldHint: false,
+      idempotentHint: true,
+    });
+    expect(
+      result.tools.find((tool) => tool.name === "memory_delete_conversations")?.annotations,
+    ).toEqual({
+      readOnlyHint: false,
+      destructiveHint: true,
+      openWorldHint: false,
+      idempotentHint: true,
+    });
+    expect(
+      result.tools.find((tool) => tool.name === "memory_empty_namespace")?.annotations,
+    ).toEqual({
+      readOnlyHint: false,
+      destructiveHint: true,
+      openWorldHint: false,
+      idempotentHint: false,
+    });
+    for (const tool of result.tools) {
+      expect(tool.outputSchema, tool.name).toMatchObject({ type: "object" });
+    }
   });
 
   it("rejects malformed tool arguments before business logic", async () => {
@@ -56,6 +120,44 @@ describe("MCP server", () => {
       arguments: { query: "", limit: 999 },
     });
     expect(result.isError).toBe(true);
+  });
+
+  it("validates batch bounds, pagination, read formats, and verification flags", async () => {
+    const client = await connectedClient();
+    for (const requests of [
+      [],
+      Array.from({ length: 21 }, () => ({ conversation_id: crypto.randomUUID() })),
+      [{ conversation_id: "invalid" }],
+      [{ conversation_id: crypto.randomUUID(), offset: -1 }],
+      [{ conversation_id: crypto.randomUUID(), limit: 101 }],
+      [{ conversation_id: crypto.randomUUID(), branch: "unknown" }],
+      [{ conversation_id: crypto.randomUUID(), revision_id: "invalid" }],
+    ]) {
+      expect(
+        (await client.callTool({ name: "memory_get_conversations", arguments: { requests } }))
+          .isError,
+      ).toBe(true);
+    }
+    expect(
+      (
+        await client.callTool({
+          name: "memory_get_conversation",
+          arguments: { conversation_id: "id", format: "summary" },
+        })
+      ).isError,
+    ).toBe(true);
+    expect(
+      (
+        await client.callTool({
+          name: "memory_store",
+          arguments: {
+            title: "Test",
+            messages: [{ role: "user", content: "test" }],
+            verify: "true",
+          },
+        })
+      ).isError,
+    ).toBe(true);
   });
 
   it("requires exact destructive confirmations", async () => {

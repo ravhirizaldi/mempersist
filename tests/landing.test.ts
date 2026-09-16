@@ -53,7 +53,7 @@ describe("Minimalist public pages", () => {
 
   it("renders the complete decision log before progressive filtering", async () => {
     const html = await landingRoutes["/adrs"]!().text();
-    expect(html.match(/<tr data-decision>/g)).toHaveLength(26);
+    expect(html.match(/<tr data-decision>/g)).toHaveLength(29);
     expect(html).toContain('id="decision-search" type="search"');
     expect(html).toContain('id="decision-count" role="status"');
     expect(html).toContain('id="decision-empty" hidden');

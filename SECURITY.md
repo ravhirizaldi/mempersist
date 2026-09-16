@@ -22,6 +22,13 @@ and accidental deletion of canonical storage.
   `HttpOnly`, and `SameSite=Lax`. Its redirect target is restricted to a same-origin relative path.
   The validated `en` or `id` locale is copied to application-owned magic-link URLs only; it does
   not enter OAuth protocol state, account storage, logs, or MCP/API contracts.
+- Dashboard magic links and browser sessions are separate from OAuth state and stored only by
+  SHA-256 hash. The 30-day `__Host-mempersist_session` cookie is `Secure`, `HttpOnly`, and
+  `SameSite=Lax`; authenticated forms require same-origin requests and a session-derived CSRF
+  value. Dashboard HTML is non-cacheable, denies framing/referrers, and applies a restrictive CSP.
+- Scheduling account deletion immediately makes every API, MCP, import, and dashboard write return
+  `409 DELETION_PENDING`. Reads, JSON export, logout, and cancellation remain available during the
+  seven-day grace period. The due worker revokes every paginated OAuth grant before erasing data.
 - Authentication occurs before protected JSON bodies are parsed.
 - JSON writes are limited to 1 MiB, direct imports to 16 MiB, multipart parts to 16 MiB, one parsed conversation to 32 MiB, and MCP responses to 64 KiB.
 - Zod validates HTTP and MCP inputs. Import parsing rejects malformed/truncated top-level arrays and records per-conversation permanent failures.

@@ -10,7 +10,9 @@ describe("HTTP security boundary", () => {
     expect(response.status).toBe(200);
     const html = await response.text();
     expect(html).toContain("MemPersist");
-    expect(html).toContain("https://mempersist.nextostaging.net/mcp");
+    expect(html).toContain("https://mempersist.codifiedtech.id/mcp");
+    expect(html).not.toContain("https://mempersist.nextostaging.net/mcp");
+    expect(html).toContain("memory_get_conversations");
     expect(html).toContain("Custom MCP app");
     expect(html).toContain("codex mcp login");
     expect(response.headers.get("content-security-policy")).toContain("frame-ancestors 'none'");
@@ -38,6 +40,9 @@ describe("HTTP security boundary", () => {
 
   it("negotiates Indonesian and allows a cookie preference to override it", async () => {
     const appEnv = env as AppEnv;
+    const landing = await app.request("/", { headers: { "accept-language": "id-ID" } }, appEnv);
+    expect(await landing.text()).toContain("ambil hingga 20 percakapan dikenal sekaligus");
+
     const indonesian = await app.request(
       "/whitepaper",
       { headers: { "accept-language": "id-ID, en;q=0.5" } },

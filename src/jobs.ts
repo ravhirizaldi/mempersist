@@ -5,6 +5,7 @@ import { normalizeChatGptConversation } from "./chatgpt";
 import { streamJsonArray } from "./json-stream";
 import { writeCanonicalConversation } from "./storage";
 import { ensureGeneration, indexRevision } from "./indexing";
+import { assertAccountWritable, OWNER_DB_USER_ID } from "./tenant";
 
 interface ImportRow {
   id: string;
@@ -13,6 +14,7 @@ interface ImportRow {
   sha256: string | null;
   status: string;
   checkpoint_ordinal: number;
+  user_id: string;
 }
 
 interface JobRow {
@@ -113,19 +115,21 @@ async function finalizeUploadedImport(
   importId: string,
 ): Promise<{ duplicateOf: string | null; sha256: string }> {
   const row = await env.MEMORY_DB.prepare(
-    "SELECT id, filename, raw_object_key, sha256, status, checkpoint_ordinal FROM imports WHERE id = ?",
+    "SELECT id, filename, raw_object_key, sha256, status, checkpoint_ordinal, user_id FROM imports WHERE id = ?",
   )
     .bind(importId)
     .first<ImportRow>();
   if (!row) throw new Error("Import not found");
+  await assertAccountWritable(env, row.user_id);
   const object = await env.MEMORY_BUCKET.get(row.raw_object_key);
   if (!object) throw new Error("Uploaded R2 object is missing");
   const checksum = await digestStream(object.body);
   const duplicate = await env.MEMORY_DB.prepare(
     `SELECT id FROM imports WHERE source_type = 'chatgpt' AND sha256 = ? AND id <> ?
+     AND user_id = ?
      AND status IN ('uploaded', 'processing', 'complete') ORDER BY created_at LIMIT 1`,
   )
-    .bind(checksum, importId)
+    .bind(checksum, importId, row.user_id)
     .first<{ id: string }>();
   const now = new Date().toISOString();
   if (duplicate) {
@@ -155,16 +159,18 @@ export async function createDirectImport(
   stream: ReadableStream<Uint8Array>,
   filename: string,
   contentLength: number | null,
+  userId = OWNER_DB_USER_ID,
 ): Promise<{ importId: string; duplicateOf: string | null; sha256: string }> {
+  await assertAccountWritable(env, userId);
   const importId = crypto.randomUUID();
   const key = `raw/imports/${importId}/source/${safeFilename(filename)}`;
   const now = new Date().toISOString();
   await env.MEMORY_DB.batch([
     env.MEMORY_DB.prepare(
       `INSERT INTO imports
-       (id, source_type, filename, raw_object_key, status, created_at, updated_at)
-       VALUES (?, 'chatgpt', ?, ?, 'uploading', ?, ?)`,
-    ).bind(importId, filename, key, now, now),
+       (id, source_type, filename, raw_object_key, status, created_at, updated_at, user_id)
+       VALUES (?, 'chatgpt', ?, ?, 'uploading', ?, ?, ?)`,
+    ).bind(importId, filename, key, now, now, userId),
     env.MEMORY_DB.prepare(
       `INSERT INTO import_files (import_id, object_key, kind, size_bytes, created_at)
        VALUES (?, ?, 'original', ?, ?)`,
@@ -185,7 +191,9 @@ export async function createDirectImport(
 export async function createMultipartImport(
   env: AppEnv,
   filename: string,
+  userId = OWNER_DB_USER_ID,
 ): Promise<{ importId: string; uploadId: string; objectKey: string }> {
+  await assertAccountWritable(env, userId);
   const importId = crypto.randomUUID();
   const objectKey = `raw/imports/${importId}/source/${safeFilename(filename)}`;
   const upload = await env.MEMORY_BUCKET.createMultipartUpload(objectKey, {
@@ -200,9 +208,9 @@ export async function createMultipartImport(
   await env.MEMORY_DB.batch([
     env.MEMORY_DB.prepare(
       `INSERT INTO imports
-       (id, source_type, filename, raw_object_key, status, created_at, updated_at)
-       VALUES (?, 'chatgpt', ?, ?, 'uploading', ?, ?)`,
-    ).bind(importId, filename, objectKey, now, now),
+       (id, source_type, filename, raw_object_key, status, created_at, updated_at, user_id)
+       VALUES (?, 'chatgpt', ?, ?, 'uploading', ?, ?, ?)`,
+    ).bind(importId, filename, objectKey, now, now, userId),
     env.MEMORY_DB.prepare(
       `INSERT INTO import_files (import_id, object_key, kind, upload_id, created_at)
        VALUES (?, ?, 'original', ?, ?)`,
@@ -219,11 +227,14 @@ export async function uploadImportPart(
   contentLength: number | null,
 ): Promise<{ etag: string }> {
   const file = await env.MEMORY_DB.prepare(
-    "SELECT object_key, upload_id FROM import_files WHERE import_id = ? AND kind = 'original'",
+    `SELECT file.object_key, file.upload_id, imports.user_id
+     FROM import_files file JOIN imports ON imports.id = file.import_id
+     WHERE file.import_id = ? AND file.kind = 'original'`,
   )
     .bind(importId)
-    .first<{ object_key: string; upload_id: string | null }>();
+    .first<{ object_key: string; upload_id: string | null; user_id: string }>();
   if (!file?.upload_id) throw new Error("Multipart import not found");
+  await assertAccountWritable(env, file.user_id);
   const upload = env.MEMORY_BUCKET.resumeMultipartUpload(file.object_key, file.upload_id);
   const part = await upload.uploadPart(partNumber, stream);
   await env.MEMORY_DB.prepare(
@@ -241,11 +252,14 @@ export async function completeMultipartImport(
   importId: string,
 ): Promise<{ importId: string; duplicateOf: string | null; sha256: string }> {
   const file = await env.MEMORY_DB.prepare(
-    "SELECT object_key, upload_id FROM import_files WHERE import_id = ? AND kind = 'original'",
+    `SELECT file.object_key, file.upload_id, imports.user_id
+     FROM import_files file JOIN imports ON imports.id = file.import_id
+     WHERE file.import_id = ? AND file.kind = 'original'`,
   )
     .bind(importId)
-    .first<{ object_key: string; upload_id: string | null }>();
+    .first<{ object_key: string; upload_id: string | null; user_id: string }>();
   if (!file?.upload_id) throw new Error("Multipart import not found");
+  await assertAccountWritable(env, file.user_id);
   const parts = await env.MEMORY_DB.prepare(
     "SELECT part_number, etag FROM upload_parts WHERE import_id = ? ORDER BY part_number",
   )
@@ -262,7 +276,7 @@ export async function completeMultipartImport(
 
 async function processImportBatch(env: AppEnv, importId: string): Promise<boolean> {
   const row = await env.MEMORY_DB.prepare(
-    "SELECT id, filename, raw_object_key, sha256, status, checkpoint_ordinal FROM imports WHERE id = ?",
+    "SELECT id, filename, raw_object_key, sha256, status, checkpoint_ordinal, user_id FROM imports WHERE id = ?",
   )
     .bind(importId)
     .first<ImportRow>();
@@ -283,7 +297,7 @@ async function processImportBatch(env: AppEnv, importId: string): Promise<boolea
     if (ordinal <= row.checkpoint_ordinal) continue;
     try {
       const normalized = await normalizeChatGptConversation(rawConversation);
-      const stored = await writeCanonicalConversation(env, normalized, importId);
+      const stored = await writeCanonicalConversation(env, normalized, importId, null, row.user_id);
       await env.MEMORY_DB.prepare(
         `INSERT INTO import_items
          (import_id, ordinal, source_conversation_id, conversation_id, revision_id, status, updated_at)

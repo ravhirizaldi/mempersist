@@ -6,6 +6,7 @@ export const EMBEDDING_DIMENSIONS = 1024;
 
 export type AppEnv = Env & {
   AUTH_EMAIL_FROM: string;
+  LEGACY_AUTH_EMAIL_FROM: string;
   MEMORY_API_TOKEN: string;
 };
 

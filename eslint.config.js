@@ -9,6 +9,7 @@ export default tseslint.config(
       "dist/**",
       "coverage/**",
       "worker-configuration.d.ts",
+      "src/mindmap-bundle.ts",
     ],
   },
   eslint.configs.recommended,

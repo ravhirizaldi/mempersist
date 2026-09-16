@@ -16,8 +16,9 @@ migration 0005, so the archive you see in `yarn dev` is the same one the static
 complete registration through the emailed magic link before their isolated namespace is
 created.
 
-The Worker uses the `EMAIL` send binding and `AUTH_EMAIL_FROM` for magic links. The configured
-sender domain must be onboarded to Cloudflare Email Service before testing delivery.
+The Worker uses the `EMAIL` send binding and chooses `AUTH_EMAIL_FROM` or
+`LEGACY_AUTH_EMAIL_FROM` from the authorization request hostname. Both sender domains must be
+onboarded to Cloudflare Email Service before testing delivery.
 
 Preview the OAuth consent page without a registered client at
 `http://localhost:8787/authorize?client_id=DEVMODE` (GET only; submitting the form is not
@@ -58,6 +59,22 @@ Check all six public routes in English and Indonesian, `/authorize?client_id=DEV
 or send real email. Verify narrow viewports, keyboard navigation, copy success and
 failure, ADR filtering/clear, reduced motion, and disabled JavaScript. OAuth status
 variants and validation are also covered by the Workers integration suite.
+
+## Memory map client
+
+`/dashboard/mindmap` is the only page with a bundled browser dependency. Its sources live in
+`web/mindmap/` under their own strict `tsconfig.json` with the DOM library, so the Worker
+`tsconfig.json` stays free of DOM types. Cytoscape.js is bundled by `yarn build:mindmap` into the
+generated `src/mindmap-bundle.ts`, which `src/dashboard.ts` inlines inside the existing script
+nonce; the CSP keeps `default-src 'none'` and no CDN is used.
+
+1. Edit `web/mindmap/client.ts`, `graph.ts`, `tooltip.ts`, or `types.ts`.
+2. Run `yarn typecheck:web`.
+3. Run `yarn build:mindmap` and commit the regenerated `src/mindmap-bundle.ts`.
+4. `yarn check:mindmap` (also part of `yarn verify`) fails if the bundle is stale.
+
+`buildMindmapGraph` is pure and unit-tested in `tests/mindmap.test.ts`; the rendered page is covered
+by `tests/dashboard.integration.ts`. Prettier and ESLint ignore the generated bundle.
 
 ## Tests
 

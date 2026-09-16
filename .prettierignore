@@ -4,4 +4,5 @@ dist
 coverage
 worker-configuration.d.ts
 yarn.lock
+src/mindmap-bundle.ts
 

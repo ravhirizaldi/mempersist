@@ -1,5 +1,6 @@
 import type { AppEnv } from "./domain";
 import { errorDetails } from "./errors";
+import { assertAccountWritable } from "./tenant";
 
 export const MAX_CONVERSATION_DELETE_BATCH = 100;
 const SCOPE_PAGE_SIZE = 50;
@@ -206,6 +207,17 @@ export async function deleteConversations(
   expectedNamespaces?: string[],
   expectedUserId?: string,
 ): Promise<DeleteConversationsResult> {
+  if (expectedUserId && conversationIds.length) {
+    const rows = await env.MEMORY_DB.prepare(
+      `SELECT DISTINCT namespace FROM conversations
+       WHERE user_id = ? AND id IN (${placeholders(conversationIds)})`,
+    )
+      .bind(expectedUserId, ...conversationIds)
+      .all<{ namespace: string }>();
+    for (const row of rows.results) {
+      await assertAccountWritable(env, expectedUserId, row.namespace);
+    }
+  }
   const result: DeleteConversationsResult = {
     requested: conversationIds.length,
     deleted: [],

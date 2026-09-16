@@ -19,5 +19,12 @@
     "skipLibCheck": true,
     "noEmit": true
   },
-  "include": ["src/**/*.ts", "cli/**/*.ts", "tests/**/*.ts", "*.ts", "worker-configuration.d.ts"]
+  "include": [
+    "src/**/*.ts",
+    "cli/**/*.ts",
+    "scripts/**/*.ts",
+    "tests/**/*.ts",
+    "*.ts",
+    "worker-configuration.d.ts"
+  ]
 }

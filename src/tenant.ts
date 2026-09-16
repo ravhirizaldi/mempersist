@@ -21,6 +21,29 @@ export function isValidEmail(value: string): boolean {
   return /^[^\s@]+@[^\s@]+\.[^\s@]+$/u.test(value);
 }
 
+export async function assertAccountWritable(
+  env: Pick<AppEnv, "MEMORY_DB">,
+  userId: string,
+  namespace?: string,
+): Promise<void> {
+  const user = await env.MEMORY_DB.prepare("SELECT deletion_job_id FROM users WHERE id = ?")
+    .bind(userId)
+    .first<{ deletion_job_id: string | null }>();
+  if (!user) throw new AppError("AUTHENTICATION", "Unknown user", 401);
+  if (user.deletion_job_id) {
+    throw new AppError("DELETION_PENDING", "Account deletion is pending", 409);
+  }
+  if (!namespace) return;
+  const owned = await env.MEMORY_DB.prepare(
+    "SELECT deletion_job_id FROM user_namespaces WHERE user_id = ? AND namespace = ?",
+  )
+    .bind(userId, namespace)
+    .first<{ deletion_job_id: string | null }>();
+  if (owned?.deletion_job_id) {
+    throw new AppError("DELETION_PENDING", "Namespace deletion is pending", 409);
+  }
+}
+
 export async function userIdForEmail(email: string): Promise<string> {
   return domainId("user", normalizeEmail(email));
 }
@@ -30,6 +53,7 @@ export async function grantNamespace(
   userId: string,
   namespace: string,
 ): Promise<void> {
+  await assertAccountWritable(env, userId, namespace);
   await env.MEMORY_DB.prepare(
     "INSERT OR IGNORE INTO user_namespaces (user_id, namespace, created_at) VALUES (?, ?, ?)",
   )

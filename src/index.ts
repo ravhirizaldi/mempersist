@@ -1,6 +1,12 @@
-import { OAuthProvider } from "@cloudflare/workers-oauth-provider";
+import {
+  getOAuthApi,
+  OAuthProvider,
+  type OAuthProviderOptions,
+} from "@cloudflare/workers-oauth-provider";
 import { createMcpHandler } from "agents/mcp/server";
 import app from "./app";
+import { handleDashboardRequest } from "./dashboard";
+import { processDeletionJobMessage } from "./deletion-jobs";
 import { verifySecret } from "./crypto";
 import type { AppEnv, JobMessage } from "./domain";
 import { processJobMessage } from "./jobs";
@@ -8,9 +14,10 @@ import { createMemoryMcpServer } from "./mcp";
 import {
   handleAuthorization,
   handleMagicLink,
+  LEGACY_MCP_ORIGIN,
   MCP_ORIGIN,
-  MCP_RESOURCE,
   MCP_SCOPE,
+  mcpOriginForRequest,
   type OAuthEnv,
 } from "./oauth";
 import { resolveTenant } from "./tenant";
@@ -32,43 +39,65 @@ const mcpHandler = {
 
 const defaultHandler = {
   async fetch(request: Request, env: AppEnv, ctx: ExecutionContext): Promise<Response> {
-    if (new URL(request.url).pathname === "/authorize") {
+    const path = new URL(request.url).pathname;
+    if (path === "/authorize") {
       return handleAuthorization(request, env as OAuthEnv);
     }
-    if (new URL(request.url).pathname === "/auth/magic-link") {
+    if (path === "/auth/magic-link") {
       return handleMagicLink(request, env as OAuthEnv);
+    }
+    if (
+      path === "/login" ||
+      path === "/logout" ||
+      path === "/auth/dashboard" ||
+      path === "/dashboard" ||
+      path.startsWith("/dashboard/")
+    ) {
+      return handleDashboardRequest(request, env);
     }
     return app.fetch(request, env, ctx);
   },
 };
 
-const oauth = new OAuthProvider<AppEnv>({
-  apiRoute: "/mcp",
-  apiHandler: mcpHandler,
-  defaultHandler,
-  authorizeEndpoint: "/authorize",
-  tokenEndpoint: "/oauth/token",
-  clientRegistrationEndpoint: "/oauth/register",
-  clientIdMetadataDocumentEnabled: true,
-  scopesSupported: [MCP_SCOPE],
-  resourceMetadata: {
-    resource: MCP_RESOURCE,
-    authorization_servers: [MCP_ORIGIN],
-    scopes_supported: [MCP_SCOPE],
-    resource_name: "MemPersist conversation memory",
-  },
-  resolveExternalToken: async ({ token, env }) =>
-    (await verifySecret(token, env.MEMORY_API_TOKEN))
-      ? { props: { userId: "owner", authType: "static" }, audience: MCP_RESOURCE }
-      : null,
-});
+function oauthOptions(origin: string): OAuthProviderOptions<AppEnv> {
+  const resource = `${origin}/mcp`;
+  return {
+    apiRoute: "/mcp",
+    apiHandler: mcpHandler,
+    defaultHandler,
+    authorizeEndpoint: "/authorize",
+    tokenEndpoint: "/oauth/token",
+    clientRegistrationEndpoint: "/oauth/register",
+    clientIdMetadataDocumentEnabled: true,
+    scopesSupported: [MCP_SCOPE],
+    resourceMetadata: {
+      resource,
+      authorization_servers: [origin],
+      scopes_supported: [MCP_SCOPE],
+      resource_name: "MemPersist conversation memory",
+    },
+    resolveExternalToken: async ({ token, env }) =>
+      (await verifySecret(token, env.MEMORY_API_TOKEN))
+        ? { props: { userId: "owner", authType: "static" }, audience: resource }
+        : null,
+  };
+}
+
+function createOAuthProvider(origin: string): OAuthProvider<AppEnv> {
+  return new OAuthProvider<AppEnv>(oauthOptions(origin));
+}
+
+const oauth = createOAuthProvider(MCP_ORIGIN);
+const legacyOauth = createOAuthProvider(LEGACY_MCP_ORIGIN);
 
 export default {
   async fetch(request: Request, env: AppEnv, ctx: ExecutionContext): Promise<Response> {
-    return oauth.fetch(request, env, ctx);
+    const provider = mcpOriginForRequest(request) === LEGACY_MCP_ORIGIN ? legacyOauth : oauth;
+    return provider.fetch(request, { ...env }, ctx);
   },
 
   async queue(batch: MessageBatch<JobMessage>, env: AppEnv): Promise<void> {
+    const oauthApi = getOAuthApi(oauthOptions(MCP_ORIGIN), env);
     for (const message of batch.messages) {
       try {
         if (message.body.version !== 1 || typeof message.body.job_id !== "string") {
@@ -76,7 +105,9 @@ export default {
           message.ack();
           continue;
         }
-        await processJobMessage(env, message.body);
+        if (!(await processDeletionJobMessage(env, message.body, oauthApi))) {
+          await processJobMessage(env, message.body);
+        }
         message.ack();
       } catch (error) {
         console.error(

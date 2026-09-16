@@ -97,28 +97,43 @@ different accounts with fully separated data.
 Developer scripts and the CLI may keep sending `MEMORY_API_TOKEN` as a bearer token for the
 owner archive.
 
-Email authentication uses the `EMAIL` send binding and the onboarded sender configured by
-`AUTH_EMAIL_FROM` (`noreply@mempersist.nextostaging.net` in the main configuration).
+Email authentication uses the `EMAIL` send binding. The primary endpoint sends from
+`AUTH_EMAIL_FROM` (`noreply@mempersist.codifiedtech.id`); the legacy endpoint keeps using
+`LEGACY_AUTH_EMAIL_FROM` (`noreply@mempersist.nextostaging.net`).
 
 The public site, OAuth pages, and magic-link email support English and Bahasa Indonesia. Use the
 language switcher to persist a browser preference; otherwise MemPersist uses `Accept-Language` and
 falls back to English. API, MCP, and CLI contracts remain English.
 
-For the deployed Worker, add `https://mempersist.nextostaging.net/mcp` as a custom MCP app in
+## Dashboard
+
+Open `/login` for passwordless access to the server-rendered dashboard. It includes archive totals,
+a deterministic memory map, revision-pinned canonical conversation reading, display-name editing,
+and a streamed lossless export of current memory. Namespace emptying runs asynchronously. Account
+deletion has a seven-day cancelable grace period and makes writes read-only while pending.
+
+See [docs/dashboard.md](docs/dashboard.md) and ADR 0028. No frontend framework, extra dependency,
+or additional Cloudflare resource is required.
+
+For the deployed Worker, add `https://mempersist.codifiedtech.id/mcp` as a custom MCP app in
 ChatGPT Developer mode. ChatGPT discovers OAuth automatically, opens the consent page, and
 stores the issued access/refresh tokens. Existing connections keep working after upgrades
-without re-authorization. Do not paste `MEMORY_API_TOKEN` into ChatGPT's connector settings.
+without re-authorization. Clients already configured with
+`https://mempersist.nextostaging.net/mcp` remain supported; changing one to the primary endpoint
+requires one new authorization. Do not paste `MEMORY_API_TOKEN` into ChatGPT's connector settings.
 
 Available tools:
 
 - `memory_search`
 - `memory_get_context`
 - `memory_get_conversation`
+- `memory_get_conversations`
 - `memory_list_conversations`
 - `memory_list_namespaces`
 - `memory_stats`
 - `memory_store`
 - `memory_append`
+- `memory_replace`
 
 `memory_store` and `memory_append` accept optional tags (lowercased, deduplicated, up to 20);
 `memory_search` filters by tags with AND semantics and returns each conversation's tags. See
@@ -130,13 +145,21 @@ Available tools:
 
 Search returns compact references; call `memory_get_context` only for selected results. See [docs/mcp.md](docs/mcp.md).
 
+For known memories, `memory_get_conversations` returns up to 20 ordered compact pages within
+48 KiB, including explicit errors and continuations. Single reads accept `format: "compact"`;
+canonical output remains the default. Store/append/replace accept `verify: true` to reload the
+committed R2 revision and return compact readback with separate indexing/verification status.
+See the [RP workflow and reviewable runtime-rule amendment](docs/rp-workflow.md).
+
 ## Quality gate
 
 ```bash
 yarn verify
 ```
 
-This runs formatting, lint, strict TypeScript, unit/MCP/retrieval tests, Workers-runtime D1/R2 integration tests, and a Wrangler deploy dry run. No command deploys unless `yarn deploy` is invoked explicitly.
+This runs formatting, lint, strict TypeScript (Worker and the `web/mindmap/` browser project), the memory-map bundle freshness check, unit/MCP/retrieval tests, Workers-runtime D1/R2 integration tests, and a Wrangler deploy dry run. No command deploys unless `yarn deploy` is invoked explicitly.
+
+After changing anything under `web/mindmap/`, run `yarn build:mindmap` so the generated `src/mindmap-bundle.ts` matches its sources.
 
 ## Operations
 

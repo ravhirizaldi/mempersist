@@ -3,10 +3,16 @@ import { z } from "zod";
 import { createMcpConversation } from "./chatgpt";
 import { deleteConversations, deleteNamespace, MAX_CONVERSATION_DELETE_BATCH } from "./deletion";
 import type { AppEnv } from "./domain";
-import { enqueueIndex } from "./jobs";
-import { getChunkContext, getConversationPage } from "./retrieval";
+import { completeMemoryWrite } from "./writes";
+import {
+  boundCompactPage,
+  compactConversationPage,
+  getChunkContext,
+  getConversationPage,
+  getConversations,
+} from "./retrieval";
 import { searchMemory } from "./search";
-import { grantNamespace, scopeNamespaces, type Tenant } from "./tenant";
+import { assertAccountWritable, grantNamespace, scopeNamespaces, type Tenant } from "./tenant";
 import {
   appendConversation,
   listConversations,
@@ -40,7 +46,181 @@ const nonEmptyNamespaceSchema = z
 
 const tagsSchema = z.array(z.string().trim().min(1).max(64)).max(20).default([]);
 
-function toolResult(value: unknown) {
+const readFormatSchema = z.enum(["compact", "canonical"]).default("canonical");
+const conversationRequestSchema = z.object({
+  conversation_id: conversationIdSchema,
+  offset: z.number().int().min(0).max(Number.MAX_SAFE_INTEGER).default(0),
+  limit: z.number().int().min(1).max(100).default(20),
+  branch: z.enum(["active", "all"]).default("active"),
+  revision_id: z
+    .string()
+    .regex(/^[a-f0-9]{64}$/u)
+    .optional(),
+});
+const readOnlyAnnotations = {
+  readOnlyHint: true,
+  destructiveHint: false,
+  openWorldHint: false,
+  idempotentHint: true,
+} as const;
+
+const nullableStringSchema = z.string().nullable();
+const compactMessageOutputSchema = z.object({
+  sourceNodeId: z.string(),
+  role: nullableStringSchema,
+  createdAt: nullableStringSchema,
+  updatedAt: nullableStringSchema,
+  text: z.string(),
+});
+const canonicalMessageOutputSchema = compactMessageOutputSchema.extend({
+  id: z.string(),
+  parentSourceNodeId: nullableStringSchema,
+  childSourceNodeIds: z.array(z.string()),
+  content: z.json(),
+  modelSlug: nullableStringSchema,
+  metadata: z.json(),
+  raw: z.json(),
+});
+const compactConversationOutputSchema = z.object({
+  id: z.string(),
+  revisionId: z.string(),
+  title: z.string(),
+  namespace: z.string(),
+  tags: z.array(z.string()),
+});
+const canonicalConversationOutputSchema = compactConversationOutputSchema.extend({
+  sourceType: z.string(),
+  sourceId: nullableStringSchema,
+  currentSourceNodeId: nullableStringSchema,
+  anomalies: z.array(z.string()),
+});
+const oversizedMessageOutputSchema = z
+  .object({ offset: z.number(), sourceNodeId: z.string(), bytes: z.number() })
+  .nullable();
+const compactPageOutputSchema = z.object({
+  conversation: compactConversationOutputSchema,
+  messages: z.array(compactMessageOutputSchema),
+  offset: z.number(),
+  nextOffset: z.number().nullable(),
+  total: z.number(),
+  oversizedMessage: oversizedMessageOutputSchema,
+});
+const conversationPageOutputSchema = z.object({
+  conversation: z.union([compactConversationOutputSchema, canonicalConversationOutputSchema]),
+  messages: z.array(z.union([compactMessageOutputSchema, canonicalMessageOutputSchema])),
+  offset: z.number().optional(),
+  nextOffset: z.number().nullable(),
+  total: z.number(),
+  oversizedMessage: oversizedMessageOutputSchema.optional(),
+});
+const conversationRequestOutputSchema = z.object({
+  conversation_id: z.string(),
+  offset: z.number(),
+  limit: z.number(),
+  branch: z.enum(["active", "all"]),
+  revision_id: z.string().optional(),
+});
+const searchOutputSchema = z.object({
+  results: z.array(
+    z.object({
+      conversationId: z.string(),
+      revisionId: z.string(),
+      chunkId: z.string(),
+      title: z.string(),
+      snippet: z.string(),
+      timestamp: nullableStringSchema,
+      namespace: z.string(),
+      tags: z.array(z.string()),
+      score: z.number(),
+      sources: z.array(z.enum(["lexical", "semantic", "recent_canonical"])),
+    }),
+  ),
+  degraded: z.boolean(),
+  unavailable: z.array(z.enum(["fts", "semantic", "recent_canonical"])),
+});
+const contextOutputSchema = z.object({
+  chunkId: z.string(),
+  revisionId: z.string(),
+  conversation: compactConversationOutputSchema.optional(),
+  messages: z.array(z.union([compactMessageOutputSchema, canonicalMessageOutputSchema])),
+  matchedRanges: z.array(
+    z.object({ sourceNodeId: z.string(), charStart: z.number(), charEnd: z.number() }),
+  ),
+});
+const batchOutputSchema = z.object({
+  results: z.array(
+    z.object({
+      requestIndex: z.number(),
+      status: z.enum(["ok", "error", "deferred"]),
+      continuation: conversationRequestOutputSchema.nullable(),
+      page: compactPageOutputSchema.optional(),
+      error: z.object({ code: z.string(), message: z.string() }).optional(),
+    }),
+  ),
+});
+const listConversationsOutputSchema = z.object({
+  conversations: z.array(
+    z.object({
+      id: z.string(),
+      source_type: z.string(),
+      source_id: nullableStringSchema,
+      title: z.string(),
+      tags: z.array(z.string()),
+      current_revision_id: nullableStringSchema,
+      current_node_id: nullableStringSchema,
+      created_at: nullableStringSchema,
+      updated_at: nullableStringSchema,
+      namespace: z.string(),
+      user_id: z.string(),
+    }),
+  ),
+  nextCursor: nullableStringSchema,
+});
+const verificationOutputSchema = z.object({
+  status: z.enum(["passed", "failed"]),
+  revision_id: z.string(),
+  checked_messages: z.number().optional(),
+  error: z.object({ code: z.string(), message: z.string() }).optional(),
+  readback: compactPageOutputSchema.optional(),
+  readback_error: z
+    .object({ code: z.string(), message: z.string(), offset: z.number() })
+    .optional(),
+});
+const memoryWriteOutputSchema = z.object({
+  conversation_id: z.string(),
+  revision_id: z.string(),
+  durable: z.literal(true),
+  indexing: z.union([
+    z.object({ status: z.literal("queued"), job_id: z.string() }),
+    z.object({
+      status: z.literal("failed"),
+      error: z.object({ code: z.string(), message: z.string(), retryable: z.boolean() }),
+    }),
+  ]),
+  verification: verificationOutputSchema.optional(),
+});
+const deleteFailureOutputSchema = z.object({
+  conversation_id: z.string(),
+  stage: z.enum(["tombstone", "canonical", "vectorize", "catalog"]),
+  message: z.string(),
+});
+const deleteConversationsOutputSchema = z.object({
+  requested: z.number(),
+  deleted: z.array(z.string()),
+  missing: z.array(z.string()),
+  failed: z.array(deleteFailureOutputSchema),
+});
+const emptyNamespaceOutputSchema = z.object({
+  namespace: z.string(),
+  requested: z.number(),
+  processed: z.number(),
+  deleted: z.number(),
+  failed: z.array(deleteFailureOutputSchema),
+  remaining: z.number(),
+  complete: z.boolean(),
+});
+
+function toolResult<T extends object>(value: T) {
   const text = JSON.stringify(value);
   if (new TextEncoder().encode(text).byteLength > 64 * 1024) {
     return {
@@ -55,7 +235,7 @@ function toolResult(value: unknown) {
       ],
     };
   }
-  return { content: [{ type: "text" as const, text }] };
+  return { structuredContent: value, content: [{ type: "text" as const, text }] };
 }
 
 export function createMemoryMcpServer(env: AppEnv, tenant: Tenant): McpServer {
@@ -66,6 +246,8 @@ export function createMemoryMcpServer(env: AppEnv, tenant: Tenant): McpServer {
     {
       description:
         "Search durable conversation memory and return compact references. Scoped to your namespaces only; the same namespace name in another account is separate and invisible. Tags filter to conversations matching the given tags (tag_mode all = every tag, any = at least one).",
+      annotations: readOnlyAnnotations,
+      outputSchema: searchOutputSchema,
       inputSchema: z.object({
         query: z.string().min(1).max(2000),
         limit: z.number().int().min(1).max(20).default(8),
@@ -92,15 +274,26 @@ export function createMemoryMcpServer(env: AppEnv, tenant: Tenant): McpServer {
     "memory_get_context",
     {
       description: "Retrieve original messages around one search result chunk.",
+      annotations: readOnlyAnnotations,
+      outputSchema: contextOutputSchema,
       inputSchema: z.object({
         chunk_id: z.string().min(1),
         before: z.number().int().min(0).max(10).default(2),
         after: z.number().int().min(0).max(10).default(2),
+        format: readFormatSchema,
       }),
     },
-    async ({ chunk_id, before, after }) =>
+    async ({ chunk_id, before, after, format }) =>
       toolResult(
-        await getChunkContext(env, chunk_id, before, after, tenant.namespaces, tenant.userId),
+        await getChunkContext(
+          env,
+          chunk_id,
+          before,
+          after,
+          tenant.namespaces,
+          tenant.userId,
+          format,
+        ),
       ),
   );
 
@@ -108,25 +301,42 @@ export function createMemoryMcpServer(env: AppEnv, tenant: Tenant): McpServer {
     "memory_get_conversation",
     {
       description: "Page through an active timeline or every preserved graph node.",
-      inputSchema: z.object({
+      annotations: readOnlyAnnotations,
+      outputSchema: conversationPageOutputSchema,
+      inputSchema: conversationRequestSchema.extend({
+        // Preserve the existing single-read ID contract.
         conversation_id: z.string().min(1),
-        offset: z.number().int().min(0).default(0),
-        limit: z.number().int().min(1).max(100).default(20),
-        branch: z.enum(["active", "all"]).default("active"),
+        format: readFormatSchema,
       }),
     },
-    async ({ conversation_id, offset, limit, branch }) =>
-      toolResult(
-        await getConversationPage(
-          env,
-          conversation_id,
-          offset,
-          limit,
-          branch,
-          tenant.namespaces,
-          tenant.userId,
-        ),
-      ),
+    async ({ conversation_id, offset, limit, branch, revision_id, format }) => {
+      const page = await getConversationPage(
+        env,
+        conversation_id,
+        offset,
+        limit,
+        branch,
+        tenant.namespaces,
+        tenant.userId,
+        revision_id,
+      );
+      return toolResult(
+        format === "compact" ? boundCompactPage(compactConversationPage(page, offset)) : page,
+      );
+    },
+  );
+
+  server.registerTool(
+    "memory_get_conversations",
+    {
+      description:
+        "Read up to 20 known memories in request order as compact pages, with individual errors and explicit continuations. Combined output is at most 48 KiB; follow every continuation, including deferred requests. An oversizedMessage requires a separate read or canonical export; prose is never truncated.",
+      annotations: readOnlyAnnotations,
+      outputSchema: batchOutputSchema,
+      inputSchema: z.object({ requests: z.array(conversationRequestSchema).min(1).max(20) }),
+    },
+    async ({ requests }) =>
+      toolResult(await getConversations(env, requests, tenant.namespaces, tenant.userId)),
   );
 
   server.registerTool(
@@ -134,6 +344,8 @@ export function createMemoryMcpServer(env: AppEnv, tenant: Tenant): McpServer {
     {
       description:
         "List conversation metadata without transcript bodies. Scoped to your namespaces only. Tags filter to conversations matching the given tags (tag_mode all = every tag, any = at least one).",
+      annotations: readOnlyAnnotations,
+      outputSchema: listConversationsOutputSchema,
       inputSchema: z.object({
         limit: z.number().int().min(1).max(100).default(20),
         cursor: z.string().optional(),
@@ -160,12 +372,20 @@ export function createMemoryMcpServer(env: AppEnv, tenant: Tenant): McpServer {
     "memory_store",
     {
       description:
-        "Durably store a new intentional memory before asynchronous indexing. The first write to a new namespace name claims it for your account.",
+        "Durably store a new intentional memory before asynchronous indexing. The first write to a new namespace name claims it for your account. Optional verify reloads the committed R2 revision and returns checked compact readback.",
+      annotations: {
+        readOnlyHint: false,
+        destructiveHint: false,
+        openWorldHint: false,
+        idempotentHint: false,
+      },
+      outputSchema: memoryWriteOutputSchema,
       inputSchema: z.object({
         title: z.string().min(1).max(500),
         namespace: z.string().min(1).max(100).default("personal"),
         tags: tagsSchema,
         messages: z.array(messageSchema).min(1).max(1000),
+        verify: z.boolean().default(false),
       }),
     },
     async (input) => {
@@ -180,13 +400,7 @@ export function createMemoryMcpServer(env: AppEnv, tenant: Tenant): McpServer {
         messages: input.messages,
       });
       const stored = await writeCanonicalConversation(env, conversation, null, null, tenant.userId);
-      const jobId = await enqueueIndex(env, stored.revisionId);
-      return toolResult({
-        conversation_id: stored.conversationId,
-        revision_id: stored.revisionId,
-        durable: true,
-        indexing: { status: "queued", job_id: jobId },
-      });
+      return toolResult(await completeMemoryWrite(env, stored, input.messages, input.verify));
     },
   );
 
@@ -194,15 +408,23 @@ export function createMemoryMcpServer(env: AppEnv, tenant: Tenant): McpServer {
     "memory_append",
     {
       description:
-        "Append messages with optimistic revision checking; canonical success precedes indexing. Ownership-checked to your namespaces. Tags add to the conversation's existing tag set.",
+        "Append messages with optimistic revision checking; canonical success precedes indexing. Ownership-checked to your namespaces. Tags add to the conversation's existing tag set. Optional verify returns persisted appended messages and offsets.",
+      annotations: {
+        readOnlyHint: false,
+        destructiveHint: false,
+        openWorldHint: false,
+        idempotentHint: true,
+      },
+      outputSchema: memoryWriteOutputSchema,
       inputSchema: z.object({
         conversation_id: z.string().min(1),
         base_revision_id: z.string().min(1),
         tags: tagsSchema.optional(),
         messages: z.array(messageSchema).min(1).max(100),
+        verify: z.boolean().default(false),
       }),
     },
-    async ({ conversation_id, base_revision_id, tags, messages }) => {
+    async ({ conversation_id, base_revision_id, tags, messages, verify }) => {
       const stored = await appendConversation(
         env,
         conversation_id,
@@ -212,13 +434,7 @@ export function createMemoryMcpServer(env: AppEnv, tenant: Tenant): McpServer {
         tenant.namespaces,
         tenant.userId,
       );
-      const jobId = await enqueueIndex(env, stored.revisionId);
-      return toolResult({
-        conversation_id: conversation_id,
-        revision_id: stored.revisionId,
-        durable: true,
-        indexing: { status: "queued", job_id: jobId },
-      });
+      return toolResult(await completeMemoryWrite(env, stored, messages, verify));
     },
   );
 
@@ -226,14 +442,22 @@ export function createMemoryMcpServer(env: AppEnv, tenant: Tenant): McpServer {
     "memory_replace",
     {
       description:
-        "Replace a conversation with the complete message list using optimistic revision checking; identity, namespace, title, and tags are preserved. Canonical success precedes indexing.",
+        "Replace a conversation with the complete message list using optimistic revision checking; identity, namespace, title, and tags are preserved. Canonical success precedes indexing. Optional verify checks the committed R2 revision and returns paginated compact readback.",
+      annotations: {
+        readOnlyHint: false,
+        destructiveHint: true,
+        openWorldHint: false,
+        idempotentHint: true,
+      },
+      outputSchema: memoryWriteOutputSchema,
       inputSchema: z.object({
         conversation_id: conversationIdSchema,
         base_revision_id: z.string().min(1),
         messages: z.array(messageSchema).min(1).max(1000),
+        verify: z.boolean().default(false),
       }),
     },
-    async ({ conversation_id, base_revision_id, messages }) => {
+    async ({ conversation_id, base_revision_id, messages, verify }) => {
       const stored = await replaceConversation(
         env,
         conversation_id,
@@ -242,13 +466,7 @@ export function createMemoryMcpServer(env: AppEnv, tenant: Tenant): McpServer {
         tenant.namespaces,
         tenant.userId,
       );
-      const jobId = await enqueueIndex(env, stored.revisionId);
-      return toolResult({
-        conversation_id,
-        revision_id: stored.revisionId,
-        durable: true,
-        indexing: { status: "queued", job_id: jobId },
-      });
+      return toolResult(await completeMemoryWrite(env, stored, messages, verify));
     },
   );
 
@@ -257,6 +475,13 @@ export function createMemoryMcpServer(env: AppEnv, tenant: Tenant): McpServer {
     {
       description:
         "Add or remove conversation tags with optimistic revision checking; base_revision_id must be the current revision. Ownership-checked to your namespaces. Removals apply before additions.",
+      annotations: {
+        readOnlyHint: false,
+        destructiveHint: true,
+        openWorldHint: false,
+        idempotentHint: true,
+      },
+      outputSchema: z.object({ conversationId: z.string(), tags: z.array(z.string()) }),
       inputSchema: z
         .object({
           conversation_id: conversationIdSchema,
@@ -288,11 +513,21 @@ export function createMemoryMcpServer(env: AppEnv, tenant: Tenant): McpServer {
     {
       description:
         "Delete up to 100 conversations and their canonical and derived data. Only conversations in your namespaces can be deleted; others are reported as missing.",
+      annotations: {
+        readOnlyHint: false,
+        destructiveHint: true,
+        openWorldHint: false,
+        idempotentHint: true,
+      },
+      outputSchema: deleteConversationsOutputSchema,
       inputSchema: z.object({ conversation_ids: conversationIdsSchema }),
     },
     async ({ conversation_ids }) =>
       toolResult(
-        await deleteConversations(env, conversation_ids, tenant.namespaces, tenant.userId),
+        await (async () => {
+          await assertAccountWritable(env, tenant.userId);
+          return deleteConversations(env, conversation_ids, tenant.namespaces, tenant.userId);
+        })(),
       ),
   );
 
@@ -301,6 +536,13 @@ export function createMemoryMcpServer(env: AppEnv, tenant: Tenant): McpServer {
     {
       description:
         "Delete every conversation in one of your namespaces in bounded batches after an exact namespace confirmation. Ownership of the namespace is kept. Raw imports are retained.",
+      annotations: {
+        readOnlyHint: false,
+        destructiveHint: true,
+        openWorldHint: false,
+        idempotentHint: false,
+      },
+      outputSchema: emptyNamespaceOutputSchema,
       inputSchema: z
         .object({
           namespace: nonEmptyNamespaceSchema,
@@ -312,6 +554,7 @@ export function createMemoryMcpServer(env: AppEnv, tenant: Tenant): McpServer {
         }),
     },
     async ({ namespace }) => {
+      await assertAccountWritable(env, tenant.userId, namespace);
       return toolResult(
         await deleteNamespace(env, tenant.userId, scopeNamespaces(tenant, namespace)[0]!),
       );
@@ -322,6 +565,12 @@ export function createMemoryMcpServer(env: AppEnv, tenant: Tenant): McpServer {
     "memory_list_namespaces",
     {
       description: "List the namespaces your account owns with conversation counts.",
+      annotations: readOnlyAnnotations,
+      outputSchema: z.object({
+        namespaces: z.array(
+          z.object({ namespace: z.string(), conversations: z.number(), default: z.boolean() }),
+        ),
+      }),
       inputSchema: z.object({}),
     },
     async () => {
@@ -350,6 +599,19 @@ export function createMemoryMcpServer(env: AppEnv, tenant: Tenant): McpServer {
     {
       description:
         "Return conversation and message counts per namespace plus indexing health for your account.",
+      annotations: readOnlyAnnotations,
+      outputSchema: z.object({
+        namespaces: z.array(
+          z.object({
+            namespace: z.string(),
+            conversations: z.number(),
+            messages: z.number(),
+            default: z.boolean(),
+          }),
+        ),
+        totals: z.object({ conversations: z.number(), messages: z.number() }),
+        indexing: z.object({ pending: z.number(), indexed: z.number() }),
+      }),
       inputSchema: z.object({}),
     },
     async () => {
@@ -406,6 +668,25 @@ export function createMemoryMcpServer(env: AppEnv, tenant: Tenant): McpServer {
     "memory_import_status",
     {
       description: "Read progress and failures for a ChatGPT import.",
+      annotations: readOnlyAnnotations,
+      outputSchema: z.object({
+        id: z.string().optional(),
+        source_type: z.string().optional(),
+        filename: z.string().optional(),
+        sha256: nullableStringSchema.optional(),
+        status: z
+          .enum(["uploading", "uploaded", "processing", "complete", "failed", "duplicate"])
+          .optional(),
+        duplicate_of: nullableStringSchema.optional(),
+        checkpoint_ordinal: z.number().optional(),
+        total_items: z.number().nullable().optional(),
+        processed_items: z.number().optional(),
+        error_code: nullableStringSchema.optional(),
+        error_message: nullableStringSchema.optional(),
+        created_at: z.string().optional(),
+        updated_at: z.string().optional(),
+        error: z.string().optional(),
+      }),
       inputSchema: z.object({ import_id: z.string().uuid() }),
     },
     async ({ import_id }) => {

@@ -10,6 +10,7 @@
     "types:bindings": "wrangler types",
     "types:bindings:check": "wrangler types --check",
     "typecheck": "tsc --noEmit",
+    "typecheck:web": "tsc --noEmit -p web/mindmap/tsconfig.json",
     "lint": "eslint .",
     "format": "prettier --write .",
     "format:check": "prettier --check .",
@@ -22,6 +23,8 @@
     "deploy:dry-run": "wrangler deploy --dry-run",
     "deploy": "wrangler deploy",
     "admin": "tsx cli/mempersist.ts",
+    "build:mindmap": "tsx scripts/build-mindmap.ts",
+    "check:mindmap": "tsx scripts/check-mindmap.ts",
     "import:chatgpt": "tsx cli/mempersist.ts import",
     "import:status": "tsx cli/mempersist.ts status",
     "retry": "tsx cli/mempersist.ts retry",
@@ -46,6 +49,8 @@
     "@modelcontextprotocol/client": "^2.0.0",
     "@modelcontextprotocol/server": "^2.0.0",
     "agents": "^0.20.1",
+    "cytoscape": "3.33.0",
+    "esbuild": "0.28.2",
     "hono": "^4.13.2",
     "zod": "^4.4.3"
   }

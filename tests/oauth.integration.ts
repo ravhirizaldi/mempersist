@@ -6,6 +6,8 @@ import { consumeMagicLink, issueMagicLink } from "../src/auth";
 import {
   handleAuthorization,
   handleMagicLink,
+  LEGACY_MCP_ORIGIN,
+  LEGACY_MCP_RESOURCE,
   MCP_ORIGIN,
   MCP_RESOURCE,
   MCP_SCOPE,
@@ -40,7 +42,8 @@ function testEnv(redirectTo = "https://chatgpt.com/connector/oauth/callback?code
   } as unknown as OAuthHelpers;
   return {
     env: {
-      AUTH_EMAIL_FROM: "noreply@mempersist.nextostaging.net",
+      AUTH_EMAIL_FROM: "noreply@mempersist.codifiedtech.id",
+      LEGACY_AUTH_EMAIL_FROM: "noreply@mempersist.nextostaging.net",
       EMAIL: { send },
       MEMORY_API_TOKEN: "owner-secret",
       MEMORY_DB: env.MEMORY_DB,
@@ -51,9 +54,9 @@ function testEnv(redirectTo = "https://chatgpt.com/connector/oauth/callback?code
   };
 }
 
-async function consent(env: OAuthEnv) {
+async function consent(env: OAuthEnv, origin = MCP_ORIGIN) {
   return handleAuthorization(
-    new Request("https://mempersist.example/authorize?client_id=chatgpt-client", {
+    new Request(`${origin}/authorize?client_id=chatgpt-client`, {
       method: "GET",
     }),
     env,
@@ -80,6 +83,31 @@ function tokenFrom(send: { mock: { calls: unknown[][] } }): string {
 }
 
 describe("OAuth authorization consent", () => {
+  it.each([MCP_ORIGIN, LEGACY_MCP_ORIGIN])(
+    "keeps magic links on authorization origin %s",
+    async (origin) => {
+      const { env, send } = testEnv();
+      const getResponse = await consent(env, origin);
+      const { cookie, token } = csrfFrom(getResponse, await getResponse.text());
+      await handleAuthorization(
+        new Request(`${origin}/authorize?client_id=chatgpt-client`, {
+          method: "POST",
+          headers: { cookie, "content-type": "application/x-www-form-urlencoded" },
+          body: new URLSearchParams({ csrf: token, email: "vhie1046@gmail.com" }),
+        }),
+        env,
+      );
+      const message = send.mock.calls.at(-1)?.[0] as { from?: string; html?: string } | undefined;
+      expect(message?.html).toContain(`${origin}/auth/magic-link?token=`);
+      expect(message?.from).toBe(
+        origin === LEGACY_MCP_ORIGIN
+          ? "noreply@mempersist.nextostaging.net"
+          : "noreply@mempersist.codifiedtech.id",
+      );
+      await consumeMagicLink(env, tokenFrom(send));
+    },
+  );
+
   it("renders a minimalist, script-free consent page", async () => {
     const { env } = testEnv();
     const response = await consent(env);
@@ -365,28 +393,68 @@ describe("OAuth authorization consent", () => {
 });
 
 describe("OAuth provider", () => {
-  it("publishes discovery and completes a PKCE flow into an authenticated MCP request", async () => {
+  it.each([MCP_RESOURCE, LEGACY_MCP_RESOURCE])(
+    "accepts the developer bearer token at %s",
+    async (resource) => {
+      const response = await SELF.fetch(resource, {
+        method: "POST",
+        headers: {
+          authorization: "Bearer integration-test-token",
+          accept: "application/json, text/event-stream",
+          "content-type": "application/json",
+        },
+        body: JSON.stringify({
+          jsonrpc: "2.0",
+          id: 1,
+          method: "initialize",
+          params: {
+            protocolVersion: "2025-11-25",
+            capabilities: {},
+            clientInfo: { name: "static-token-integration", version: "1.0.0" },
+          },
+        }),
+      });
+      expect(response.status, await response.text()).toBe(200);
+    },
+  );
+
+  it.each([
+    {
+      origin: MCP_ORIGIN,
+      resource: MCP_RESOURCE,
+      email: "primary-user@example.com",
+      magicToken: "integration-primary-magic-token",
+    },
+    {
+      origin: LEGACY_MCP_ORIGIN,
+      resource: LEGACY_MCP_RESOURCE,
+      email: "legacy-user@example.com",
+      magicToken: "integration-legacy-magic-token",
+    },
+  ])("publishes discovery and completes a PKCE flow at $origin", async (testCase) => {
+    const { origin, resource, email, magicToken } = testCase;
     const protectedMetadata = await SELF.fetch(
-      `${MCP_ORIGIN}/.well-known/oauth-protected-resource/mcp`,
+      `${origin}/.well-known/oauth-protected-resource/mcp`,
     );
     expect(protectedMetadata.status).toBe(200);
     await expect(protectedMetadata.json()).resolves.toMatchObject({
-      resource: MCP_RESOURCE,
-      authorization_servers: [MCP_ORIGIN],
+      resource,
+      authorization_servers: [origin],
       scopes_supported: [MCP_SCOPE],
     });
 
-    const serverMetadata = await SELF.fetch(`${MCP_ORIGIN}/.well-known/oauth-authorization-server`);
+    const serverMetadata = await SELF.fetch(`${origin}/.well-known/oauth-authorization-server`);
     expect(serverMetadata.status).toBe(200);
     await expect(serverMetadata.json()).resolves.toMatchObject({
-      authorization_endpoint: `${MCP_ORIGIN}/authorize`,
-      token_endpoint: `${MCP_ORIGIN}/oauth/token`,
-      registration_endpoint: `${MCP_ORIGIN}/oauth/register`,
+      issuer: origin,
+      authorization_endpoint: `${origin}/authorize`,
+      token_endpoint: `${origin}/oauth/token`,
+      registration_endpoint: `${origin}/oauth/register`,
       code_challenge_methods_supported: ["S256"],
     });
 
     const redirectUri = "https://chatgpt.com/connector/oauth/callback";
-    const registration = await SELF.fetch(`${MCP_ORIGIN}/oauth/register`, {
+    const registration = await SELF.fetch(`${origin}/oauth/register`, {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify({
@@ -407,7 +475,7 @@ describe("OAuth provider", () => {
       .replaceAll("+", "-")
       .replaceAll("/", "_")
       .replaceAll("=", "");
-    const authorizeUrl = new URL(`${MCP_ORIGIN}/authorize`);
+    const authorizeUrl = new URL(`${origin}/authorize`);
     authorizeUrl.search = new URLSearchParams({
       response_type: "code",
       client_id: clientId,
@@ -416,13 +484,12 @@ describe("OAuth provider", () => {
       state: "integration-state",
       code_challenge: challenge,
       code_challenge_method: "S256",
-      resource: MCP_RESOURCE,
+      resource,
     }).toString();
 
     const consentResponse = await SELF.fetch(authorizeUrl);
     expect(consentResponse.status).toBe(200);
     await consentResponse.text();
-    const magicToken = "integration-magic-token";
     const oauthRequestForChallenge: AuthRequest = {
       responseType: "code",
       clientId,
@@ -431,7 +498,7 @@ describe("OAuth provider", () => {
       state: "integration-state",
       codeChallenge: challenge,
       codeChallengeMethod: "S256",
-      resource: MCP_RESOURCE,
+      resource,
     };
     const now = new Date();
     await env.MEMORY_DB.prepare(
@@ -441,13 +508,13 @@ describe("OAuth provider", () => {
     )
       .bind(
         await sha256(magicToken),
-        "second-user@example.com",
+        email,
         JSON.stringify(oauthRequestForChallenge),
         now.toISOString(),
         new Date(now.getTime() + 900_000).toISOString(),
       )
       .run();
-    const approval = await SELF.fetch(`${MCP_ORIGIN}/auth/magic-link?token=${magicToken}`, {
+    const approval = await SELF.fetch(`${origin}/auth/magic-link?token=${magicToken}`, {
       redirect: "manual",
     });
     expect(approval.status).toBe(302);
@@ -457,7 +524,7 @@ describe("OAuth provider", () => {
     expect(code).toBeTruthy();
     if (!code) throw new Error("OAuth callback did not include an authorization code");
 
-    const tokenResponse = await SELF.fetch(`${MCP_ORIGIN}/oauth/token`, {
+    const tokenResponse = await SELF.fetch(`${origin}/oauth/token`, {
       method: "POST",
       headers: { "content-type": "application/x-www-form-urlencoded" },
       body: new URLSearchParams({
@@ -466,20 +533,20 @@ describe("OAuth provider", () => {
         code,
         code_verifier: verifier,
         redirect_uri: redirectUri,
-        resource: MCP_RESOURCE,
+        resource,
       }),
     });
     expect(tokenResponse.status).toBe(200);
     const tokenJson: { access_token: string } = await tokenResponse.json();
     const accessToken = tokenJson.access_token;
 
-    const initialized = await SELF.fetch(MCP_RESOURCE, {
+    const initialized = await SELF.fetch(resource, {
       method: "POST",
       headers: {
         authorization: `Bearer ${accessToken}`,
         accept: "application/json, text/event-stream",
         "content-type": "application/json",
-        host: new URL(MCP_ORIGIN).host,
+        host: new URL(origin).host,
       },
       body: JSON.stringify({
         jsonrpc: "2.0",
@@ -496,13 +563,13 @@ describe("OAuth provider", () => {
     expect(initialized.status, initializedBody).toBe(200);
 
     async function mcpCall(id: number, method: string, params: unknown) {
-      const response = await SELF.fetch(MCP_RESOURCE, {
+      const response = await SELF.fetch(resource, {
         method: "POST",
         headers: {
           authorization: `Bearer ${accessToken}`,
           accept: "application/json, text/event-stream",
           "content-type": "application/json",
-          host: new URL(MCP_ORIGIN).host,
+          host: new URL(origin).host,
         },
         body: JSON.stringify({ jsonrpc: "2.0", id, method, params }),
       });
@@ -543,5 +610,26 @@ describe("OAuth provider", () => {
     expect(JSON.parse(ownText ?? "{}")).toMatchObject({
       conversations: [{ title: "second-user personal" }],
     });
+
+    const otherResource = resource === MCP_RESOURCE ? LEGACY_MCP_RESOURCE : MCP_RESOURCE;
+    const wrongOrigin = await SELF.fetch(otherResource, {
+      method: "POST",
+      headers: {
+        authorization: `Bearer ${accessToken}`,
+        accept: "application/json, text/event-stream",
+        "content-type": "application/json",
+      },
+      body: JSON.stringify({
+        jsonrpc: "2.0",
+        id: 5,
+        method: "initialize",
+        params: {
+          protocolVersion: "2025-11-25",
+          capabilities: {},
+          clientInfo: { name: "oauth-cross-origin", version: "1.0.0" },
+        },
+      }),
+    });
+    expect(wrongOrigin.status).toBe(401);
   });
 });

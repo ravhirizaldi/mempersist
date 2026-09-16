@@ -744,6 +744,12 @@ describe("recent unindexed canonical search", () => {
       ["alpha"],
     );
     expect(removed.tags).toEqual(["old-tag"]);
+
+    const appended = await appendConversation(env, conversation.id, stored.revisionId, [
+      { role: "assistant", content: "Tag-preserving append." },
+    ]);
+    const canonical = await loadCanonicalRevision(env, appended.revisionId);
+    expect(canonical.conversation.tags).toEqual(["old-tag"]);
   });
 
   it("semantically retrieves a newly stored memory after indexing completes", async () => {
@@ -1216,6 +1222,21 @@ describe("message-boundary semantic chunking", () => {
 
 describe("per-user search isolation in same-named namespaces", () => {
   it("never returns another user's conversations in the same-named namespace", async () => {
+    const now = new Date().toISOString();
+    await env.MEMORY_DB.batch([
+      env.MEMORY_DB.prepare(
+        "INSERT INTO users (id, email, namespace, created_at) VALUES (?, ?, ?, ?)",
+      ).bind("user-owner", "search-owner@example.com", "shared-ns", now),
+      env.MEMORY_DB.prepare(
+        "INSERT INTO users (id, email, namespace, created_at) VALUES (?, ?, ?, ?)",
+      ).bind("user-other", "search-other@example.com", "shared-ns-other", now),
+      env.MEMORY_DB.prepare(
+        "INSERT INTO user_namespaces (user_id, namespace, created_at) VALUES (?, ?, ?)",
+      ).bind("user-owner", "shared-ns", now),
+      env.MEMORY_DB.prepare(
+        "INSERT INTO user_namespaces (user_id, namespace, created_at) VALUES (?, ?, ?)",
+      ).bind("user-other", "shared-ns", now),
+    ]);
     const owner = await createMcpConversation({
       title: "owner shared",
       namespace: "shared-ns",

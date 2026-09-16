@@ -7,6 +7,7 @@ export const id = {
     mainNav: "Navigasi utama",
     menu: "Menu",
     connect: "Hubungkan klien Anda",
+    signIn: "Masuk",
     home: "Beranda",
     whitepaper: "Makalah",
     architecture: "Arsitektur",

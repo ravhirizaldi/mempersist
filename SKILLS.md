@@ -43,6 +43,15 @@ Do not store routine commits, "I did X" churn, or facts you can read from the re
 6. **Never invent memory.** Cite the conversation ids and revision ids returned by the
    tools; if search returns nothing, say memory is empty for that project.
 
+For known owners, use `memory_get_conversations` and follow every `continuation`, including
+deferred requests. Single conversation/context reads support `format: "compact"` without
+changing original text. For intentional saves, request `verify: true`: the server reloads
+the exact committed R2 revision and returns persisted compact readback. Check its semantics
+and finish any readback pages using the returned `revision_id` before relying on it. Treat
+durability, verification, and indexing as separate outcomes; do not duplicate a committed
+write because a later verification/indexing step failed. See [the RP workflow](docs/rp-workflow.md)
+for explicit `simpan state` and existing owner boundaries.
+
 ## Discovery
 
 - `memory_list_namespaces` shows which namespaces your account owns.
@@ -56,6 +65,7 @@ Do not store routine commits, "I did X" churn, or facts you can read from the re
 | `memory_search`               | find memories; tags + `tag_mode` filter                     |
 | `memory_get_context`          | original messages around a search hit                       |
 | `memory_get_conversation`     | page a full conversation                                    |
+| `memory_get_conversations`    | batch up to 20 known memories with compact continuations    |
 | `memory_list_conversations`   | metadata + tags per conversation                            |
 | `memory_list_namespaces`      | namespaces you own                                          |
 | `memory_stats`                | counts + indexing health                                    |

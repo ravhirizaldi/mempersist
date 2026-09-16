@@ -5,6 +5,7 @@ export const en = {
     mainNav: "Main navigation",
     menu: "Menu",
     connect: "Connect your client",
+    signIn: "Sign in",
     home: "Home",
     whitepaper: "Whitepaper",
     architecture: "Architecture",

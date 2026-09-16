@@ -18,8 +18,10 @@ import {
 import { getOrCreateUser, isValidEmail } from "./tenant";
 import { BASE_CSS, brand, FAVICON } from "./ui";
 
-export const MCP_ORIGIN = "https://mempersist.nextostaging.net";
+export const MCP_ORIGIN = "https://mempersist.codifiedtech.id";
 export const MCP_RESOURCE = `${MCP_ORIGIN}/mcp`;
+export const LEGACY_MCP_ORIGIN = "https://mempersist.nextostaging.net";
+export const LEGACY_MCP_RESOURCE = `${LEGACY_MCP_ORIGIN}/mcp`;
 export const MCP_SCOPE = "memory";
 
 export type OAuthEnv = AppEnv & { OAUTH_PROVIDER: OAuthHelpers };
@@ -34,6 +36,10 @@ const SECURITY_HEADERS = {
   "X-Content-Type-Options": "nosniff",
   "X-Frame-Options": "DENY",
 } as const;
+
+export function mcpOriginForRequest(request: Request): string {
+  return new URL(request.url).origin === LEGACY_MCP_ORIGIN ? LEGACY_MCP_ORIGIN : MCP_ORIGIN;
+}
 
 function escapeHtml(value: string): string {
   return value.replace(
@@ -255,12 +261,13 @@ export async function handleAuthorization(request: Request, env: OAuthEnv): Prom
     return statusPage(t.checkEmailTitle, t.checkEmailGeneric, 200, locale);
   }
 
-  const magicUrl = `${MCP_ORIGIN}/auth/magic-link?token=${encodeURIComponent(issue.token)}&lang=${locale}`;
+  const origin = mcpOriginForRequest(request);
+  const magicUrl = `${origin}/auth/magic-link?token=${encodeURIComponent(issue.token)}&lang=${locale}`;
   const action = issue.mode === "register" ? t.emailActionRegister : t.emailActionLogin;
   try {
     await env.EMAIL.send({
       to: issue.email,
-      from: env.AUTH_EMAIL_FROM,
+      from: origin === LEGACY_MCP_ORIGIN ? env.LEGACY_AUTH_EMAIL_FROM : env.AUTH_EMAIL_FROM,
       subject: t.emailSubject,
       html: `<h1>${t.emailHeading}</h1><p>${interpolate(t.emailInstruction, { action })}</p><p><a href="${escapeHtml(magicUrl)}">${t.emailContinue}</a></p><p>${t.emailExpiry}</p>`,
       text: `${t.emailHeading}\n\n${interpolate(t.emailInstruction, { action })} ${magicUrl}\n\n${t.emailExpiry}`,

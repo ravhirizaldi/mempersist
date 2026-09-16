@@ -3,7 +3,7 @@ import { localizePageMarkup } from "./locales/pages-id";
 import { BASE_CSS, brand, FAVICON } from "./ui";
 import { SITE_CSS, SITE_SCRIPT } from "./site";
 
-const MCP_ENDPOINT = "https://mempersist.nextostaging.net/mcp";
+const MCP_ENDPOINT = "https://mempersist.codifiedtech.id/mcp";
 
 function escapeHtml(value: string): string {
   return value.replace(
@@ -51,7 +51,7 @@ ${brand(t.shared.homeLabel)}
         `<a href="${item.href}"${item.href === active ? ' aria-current="page"' : ""}>${item.label}</a>`,
     )
     .join("\n")}</div>
-${language}<a class="button nav-cta" href="/#connect">${t.shared.connect} <span aria-hidden="true">↗</span></a>
+${language}<a class="nav-sign-in" href="/login">${t.shared.signIn}</a><a class="button nav-cta" href="/#connect">${t.shared.connect} <span aria-hidden="true">↗</span></a>
 </div></nav>`;
   const html = `<!doctype html>
 <html lang="${locale}"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
@@ -159,6 +159,7 @@ export function landingPage(locale: Locale = "en"): Response {
         <tr><td><code>memory_search</code></td><td>find memories; tags + tag_mode filter</td></tr>
         <tr><td><code>memory_get_context</code></td><td>original messages around a hit</td></tr>
         <tr><td><code>memory_get_conversation</code></td><td>page a full conversation</td></tr>
+        <tr><td><code>memory_get_conversations</code></td><td>batch up to 20 known conversations</td></tr>
         <tr><td><code>memory_list_conversations</code></td><td>metadata and tags</td></tr>
         <tr><td><code>memory_list_namespaces</code></td><td>namespaces your account owns</td></tr>
         <tr><td><code>memory_stats</code></td><td>counts and indexing health</td></tr>
@@ -425,6 +426,8 @@ function securityPage(locale: Locale = "en"): Response {
       <li>ChatGPT access uses OAuth 2.1 authorization code with PKCE S256 and a one-use email magic link; the provider stores only hashes and encrypts grant props.</li>
       <li>The consent page uses a double-submit CSRF cookie, HTML-escapes client metadata, and denies framing, external content, and referrers.</li>
       <li>Email is the only identity credential; authorization requires a one-use magic link sent to that address. No password or separate profile-verification flow exists.</li>
+      <li>Dashboard sessions are hash-only, expire after 30 days, use a secure host-only cookie, and protect mutations with same-origin and session-derived CSRF checks.</li>
+      <li>A pending account deletion keeps reading, export, logout, and cancellation available while every write returns <code>409 DELETION_PENDING</code>.</li>
       <li>Authentication runs before protected bodies are parsed; Zod validates every external input.</li>
       <li>Size limits: JSON writes 1 MiB, direct imports 16 MiB, multipart parts 16 MiB, MCP responses 64 KiB.</li>
       <li>R2 is private; no public bucket, presigned anonymous upload, or wildcard CORS.</li>
@@ -467,6 +470,9 @@ function adrsPage(locale: Locale = "en"): Response {
     ["0024", "Magic-link MCP authentication"],
     ["0025", "Unified email continuation"],
     ["0026", "Browser interface localization"],
+    ["0027", "Compact readback and verified writes"],
+    ["0028", "Passwordless dashboard, export, and deletion jobs"],
+    ["0029", "Bundled graph library for the memory map"],
   ];
   const rows = adrs
     .map(

@@ -7,7 +7,7 @@ import {
   type CanonicalRevisionManifest,
 } from "./domain";
 import { AppError } from "./errors";
-import { OWNER_DB_USER_ID } from "./tenant";
+import { assertAccountWritable, OWNER_DB_USER_ID } from "./tenant";
 
 const encoder = new TextEncoder();
 
@@ -40,6 +40,7 @@ export interface StoredRevision {
   segmentKey: string;
   contentHash: string;
   created: boolean;
+  writeOffset?: number;
 }
 
 function chunked<T>(values: T[], size: number): T[][] {
@@ -70,6 +71,7 @@ export async function writeCanonicalConversation(
   expectedRevisionId: string | null = null,
   userId: string = OWNER_DB_USER_ID,
 ): Promise<StoredRevision> {
+  await assertAccountWritable(env, userId, conversation.namespace);
   const header = { ...conversation, nodes: undefined };
   const lines = [
     stableJson({ format: "mempersist.conversation-segment.v1", conversation: header }),
@@ -317,6 +319,7 @@ async function withTags(
 export async function loadCanonicalRevision(
   env: CanonicalReadEnv,
   revisionId: string,
+  expected?: StoredRevision,
 ): Promise<{ manifest: CanonicalRevisionManifest; conversation: CanonicalConversation }> {
   const row = await env.MEMORY_DB.prepare(
     "SELECT id, conversation_id, manifest_object_key FROM conversation_revisions WHERE id = ?",
@@ -333,7 +336,30 @@ export async function loadCanonicalRevision(
   const segmentObject = await env.MEMORY_BUCKET.get(segment.key);
   if (!segmentObject)
     throw new AppError("CANONICAL_STORAGE", "Canonical segment missing from R2", 500);
-  return { manifest, conversation: parseSegment(await segmentObject.text()) };
+  const body = await segmentObject.text();
+  const conversation = parseSegment(body);
+  if (expected) {
+    const segmentHash = await sha256(body);
+    const contentHash = await domainId(
+      "revision-content",
+      segmentHash,
+      conversation.currentSourceNodeId,
+      stableJson(conversation.metadata),
+    );
+    if (
+      manifest.revisionId !== expected.revisionId ||
+      manifest.conversationId !== expected.conversationId ||
+      conversation.id !== expected.conversationId ||
+      row.manifest_object_key !== expected.manifestKey ||
+      segment.key !== expected.segmentKey ||
+      segment.sha256 !== segmentHash ||
+      manifest.contentHash !== expected.contentHash ||
+      contentHash !== expected.contentHash
+    ) {
+      throw new AppError("CANONICAL_STORAGE", "Committed revision integrity mismatch", 500);
+    }
+  }
+  return { manifest, conversation };
 }
 
 export async function loadCurrentConversation(
@@ -357,9 +383,11 @@ export async function loadCurrentConversation(
     throw new AppError("NOT_FOUND", "Conversation not found", 404);
   }
   const tags = (await loadConversationTags(env, [row.id])).get(row.id) ?? [];
+  const loaded = await loadCanonicalRevision(env, row.current_revision_id);
   return {
     row: { ...row, tags },
-    ...(await loadCanonicalRevision(env, row.current_revision_id)),
+    ...loaded,
+    conversation: { ...loaded.conversation, tags },
   };
 }
 
@@ -440,6 +468,7 @@ export async function updateConversationTags(
     expectedNamespaces,
     expectedUserId,
   );
+  await assertAccountWritable(env, loaded.row.user_id, loaded.row.namespace);
   if (loaded.row.current_revision_id !== baseRevisionId) {
     throw new AppError("IMPORT_CONFLICT", "base_revision_id is stale", 409);
   }
@@ -518,7 +547,14 @@ export async function appendConversation(
       ...nodes.slice(-messages.length).map((node) => node.sourceNodeId),
     ],
   };
-  return writeCanonicalConversation(env, updated, null, baseRevisionId, loaded.row.user_id);
+  const stored = await writeCanonicalConversation(
+    env,
+    updated,
+    null,
+    baseRevisionId,
+    loaded.row.user_id,
+  );
+  return { ...stored, writeOffset: loaded.conversation.activeSourceNodeIds.length };
 }
 
 export async function replaceConversation(

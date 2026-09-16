@@ -17,15 +17,22 @@ import {
   createDirectImport,
   createMultipartImport,
   enqueueAllCurrentRevisions,
-  enqueueIndex,
   retryJob,
   uploadImportPart,
 } from "./jobs";
-import { getChunkContext, getConversationPage, verifyIntegrity } from "./retrieval";
+import {
+  boundCompactPage,
+  compactConversationPage,
+  getChunkContext,
+  getConversationPage,
+  verifyIntegrity,
+} from "./retrieval";
+import { completeMemoryWrite } from "./writes";
 import { searchMemory } from "./search";
 import { landingRoutes } from "./landing";
 import { appendConversation, listConversations, writeCanonicalConversation } from "./storage";
 import {
+  assertAccountWritable,
   grantNamespace,
   OWNER_USER_ID,
   resolveTenant,
@@ -49,10 +56,12 @@ const storeSchema = z.object({
   title: z.string().min(1).max(500),
   namespace: z.string().min(1).max(100).default("personal"),
   messages: z.array(messageSchema).min(1).max(1000),
+  verify: z.boolean().default(false),
 });
 const appendSchema = z.object({
   base_revision_id: z.string().min(1),
   messages: z.array(messageSchema).min(1).max(100),
+  verify: z.boolean().default(false),
 });
 
 app.use("*", async (c, next) => {
@@ -66,6 +75,9 @@ app.use("*", async (c, next) => {
 
 app.use("/api/*", async (c, next) => {
   if (!(await isAuthorized(c.req.raw, c.env))) return unauthorized();
+  if (c.req.method !== "GET" && c.req.method !== "HEAD") {
+    await assertAccountWritable(c.env, (await ownerTenant(c.env)).userId);
+  }
   await next();
 });
 
@@ -122,22 +134,31 @@ app.get("/api/conversations/:id", async (c) => {
   const limit = z.coerce.number().int().min(1).max(100).default(20).parse(c.req.query("limit"));
   const branch = z.enum(["active", "all"]).default("active").parse(c.req.query("branch"));
   const tenant = await ownerTenant(c.env);
+  const format = z.enum(["compact", "canonical"]).default("canonical").parse(c.req.query("format"));
+  const revisionId = z
+    .string()
+    .regex(/^[a-f0-9]{64}$/u)
+    .optional()
+    .parse(c.req.query("revision_id"));
+  const page = await getConversationPage(
+    c.env,
+    c.req.param("id"),
+    offset,
+    limit,
+    branch,
+    tenant.namespaces,
+    tenant.userId,
+    revisionId,
+  );
   return c.json(
-    await getConversationPage(
-      c.env,
-      c.req.param("id"),
-      offset,
-      limit,
-      branch,
-      tenant.namespaces,
-      tenant.userId,
-    ),
+    format === "compact" ? boundCompactPage(compactConversationPage(page, offset)) : page,
   );
 });
 
 app.get("/api/chunks/:id/context", async (c) => {
   const before = z.coerce.number().int().min(0).max(10).default(2).parse(c.req.query("before"));
   const after = z.coerce.number().int().min(0).max(10).default(2).parse(c.req.query("after"));
+  const format = z.enum(["compact", "canonical"]).default("canonical").parse(c.req.query("format"));
   const tenant = await ownerTenant(c.env);
   return c.json(
     await getChunkContext(
@@ -147,6 +168,7 @@ app.get("/api/chunks/:id/context", async (c) => {
       after,
       tenant.namespaces,
       tenant.userId,
+      format,
     ),
   );
 });
@@ -162,16 +184,7 @@ app.post("/api/memories", async (c) => {
   }
   const conversation = await createMcpConversation({ ...input, namespace });
   const stored = await writeCanonicalConversation(c.env, conversation, null, null, tenant.userId);
-  const jobId = await enqueueIndex(c.env, stored.revisionId);
-  return c.json(
-    {
-      conversation_id: stored.conversationId,
-      revision_id: stored.revisionId,
-      durable: true,
-      indexing: { status: "queued", job_id: jobId },
-    },
-    201,
-  );
+  return c.json(await completeMemoryWrite(c.env, stored, input.messages, input.verify), 201);
 });
 
 app.post("/api/conversations/:id/append", async (c) => {
@@ -186,11 +199,12 @@ app.post("/api/conversations/:id/append", async (c) => {
     tenant.namespaces,
     tenant.userId,
   );
-  const jobId = await enqueueIndex(c.env, stored.revisionId);
+  const result = await completeMemoryWrite(c.env, stored, input.messages, input.verify);
   return c.json({
-    revision_id: stored.revisionId,
-    durable: true,
-    indexing: { status: "queued", job_id: jobId },
+    revision_id: result.revision_id,
+    durable: result.durable,
+    indexing: result.indexing,
+    ...(result.verification ? { verification: result.verification } : {}),
   });
 });
 
