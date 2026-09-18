@@ -95,6 +95,32 @@ same concept; repeating the same broad word does not create extra evidence. Sear
 only the existing query embedding for the semantic channel and never embeds recent canonical
 candidate bodies synchronously.
 
+## Revision history
+
+`memory_list_revisions` reads `conversation_revisions` only; it never loads a manifest or segment
+from R2 and never reconstructs transcripts from D1. Paging is `(created_at DESC, id DESC)` keyset
+with a snapshot anchor revision ID and pinned current revision ID in the opaque cursor:
+
+- one first-page D1 statement pins the current head and the latest inserted revision to the same
+  database snapshot;
+- the ordering key makes pages exact when several revisions share a millisecond timestamp;
+- the anchor resolves to its catalog `rowid` inside the requested conversation, and later pages
+  filter `rowid <= anchor`, so a revision committed mid-walk is never injected into a page it does
+  not belong to;
+- continuation pages validate the anchor, pinned head, boundary revision, and boundary timestamp;
+  forged or stale cursors fail instead of silently dropping the snapshot bound.
+
+The cursor exposes only values already returned to the caller (revision IDs and a timestamp), never
+catalog rowids, object keys, user IDs, or global counts. `current_revision_id` remains pinned across
+the walk; only the page containing that revision has a `current: true` row.
+
+Query-plan evidence (D1 `EXPLAIN QUERY PLAN`): the first-page scope uses primary-key lookups for the
+conversation and current revision, `revisions_conversation_idx (conversation_id=?)` for the
+max-rowid anchor, and a rowid lookup for that anchor. Cursor anchor and membership validation use
+the revision primary-key index. The page query uses `revisions_conversation_idx` and a temp b-tree
+only for the final `id DESC` tie-break. No additional index is required, so no migration was added
+for this tool.
+
 ## Deletion consistency
 
 Conversation deletion first sets the existing D1 `deleted_at` tombstone, immediately excluding the

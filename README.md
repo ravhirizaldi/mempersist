@@ -129,6 +129,7 @@ Available tools:
 - `memory_get_conversation`
 - `memory_get_conversations`
 - `memory_list_conversations`
+- `memory_list_revisions`
 - `memory_list_namespaces`
 - `memory_stats`
 - `memory_store`
@@ -147,7 +148,10 @@ Search returns compact references; call `memory_get_context` only for selected r
 
 For known memories, `memory_get_conversations` returns up to 20 ordered compact pages within
 48 KiB, including explicit errors and continuations. Single reads accept `format: "compact"`;
-canonical output remains the default. Store/append/replace accept `verify: true` to reload the
+canonical output remains the default. `memory_list_revisions` returns the immutable revision
+history of one owned conversation (metadata only, newest first, cursor-paged), so a client can
+pin and read any earlier revision with `memory_get_conversation` instead of relying on a
+retained write receipt. Store/append/replace accept `verify: true` to reload the
 committed R2 revision and return compact readback with separate indexing/verification status.
 See the [RP workflow and reviewable runtime-rule amendment](docs/rp-workflow.md).
 

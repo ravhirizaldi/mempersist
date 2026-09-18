@@ -453,6 +453,204 @@ export async function listConversations(
   };
 }
 
+interface RevisionCatalogRow {
+  id: string;
+  content_hash: string;
+  node_count: number;
+  created_at: string;
+}
+
+export interface ConversationRevisionSummary {
+  revisionId: string;
+  createdAt: string;
+  nodeCount: number;
+  contentHash: string;
+}
+
+interface RevisionCursorState {
+  anchorRevisionId: string;
+  currentRevisionId: string;
+  createdAt: string;
+  revisionId: string;
+}
+
+interface RevisionAnchor {
+  revisionId: string;
+  rowId: number;
+}
+
+const REVISION_CURSOR_SEPARATOR = "\u001f";
+
+function invalidRevisionCursor(): never {
+  throw new AppError("VALIDATION", "Invalid cursor", 400);
+}
+
+function encodeRevisionCursor(state: RevisionCursorState): string {
+  return btoa(
+    [state.anchorRevisionId, state.currentRevisionId, state.createdAt, state.revisionId].join(
+      REVISION_CURSOR_SEPARATOR,
+    ),
+  );
+}
+
+// The cursor carries the exact (created_at, id) ordering key of the last returned row,
+// the snapshot anchor, and the head that was current when the walk started. Every value
+// is already returned to the caller; internal catalog rowids never leave the server.
+function decodeRevisionCursor(cursor: string): RevisionCursorState {
+  let decoded: string;
+  try {
+    decoded = atob(cursor);
+  } catch {
+    return invalidRevisionCursor();
+  }
+  const parts = decoded.split(REVISION_CURSOR_SEPARATOR);
+  if (parts.length !== 4 || parts.some((part) => !part)) return invalidRevisionCursor();
+  const [anchorRevisionId, currentRevisionId, createdAt, revisionId] = parts as [
+    string,
+    string,
+    string,
+    string,
+  ];
+  return { anchorRevisionId, currentRevisionId, createdAt, revisionId };
+}
+
+// Resolves a cursor anchor inside this conversation only. Its rowid is the private
+// snapshot bound: later inserts have greater rowids and cannot enter continuation pages.
+async function resolveRevisionAnchor(
+  env: Pick<AppEnv, "MEMORY_DB">,
+  conversationId: string,
+  revisionId: string,
+): Promise<RevisionAnchor | null> {
+  const row = await env.MEMORY_DB.prepare(
+    `SELECT id, rowid AS row_id FROM conversation_revisions
+     WHERE conversation_id = ? AND id = ?`,
+  )
+    .bind(conversationId, revisionId)
+    .first<{ id: string; row_id: number }>();
+  return row ? { revisionId: row.id, rowId: row.row_id } : null;
+}
+
+// Metadata only: transcript bodies stay in R2 behind the revision-pinned read path.
+export async function listConversationRevisions(
+  env: Pick<AppEnv, "MEMORY_DB">,
+  input: {
+    conversationId: string;
+    limit: number;
+    cursor?: string;
+    namespaces?: string[];
+    userId?: string;
+  },
+): Promise<{
+  conversationId: string;
+  currentRevisionId: string;
+  revisions: ConversationRevisionSummary[];
+  nextCursor: string | null;
+}> {
+  const limit = Math.min(100, Math.max(1, input.limit));
+  // One statement pins the live head and latest inserted revision to the same D1
+  // snapshot. A live row without a valid current revision is not readable history.
+  const scope = await env.MEMORY_DB.prepare(
+    `WITH target AS (
+       SELECT id, current_revision_id, namespace FROM conversations
+       WHERE id = ? AND deleted_at IS NULL${input.userId ? " AND user_id = ?" : ""}
+     )
+     SELECT current.id AS current_revision_id,
+            target.namespace,
+            anchor.id AS anchor_revision_id,
+            anchor.rowid AS anchor_row_id
+     FROM target
+     JOIN conversation_revisions current
+       ON current.conversation_id = target.id AND current.id = target.current_revision_id
+     LEFT JOIN conversation_revisions anchor
+       ON anchor.conversation_id = target.id
+      AND anchor.rowid = (
+        SELECT MAX(revision.rowid) FROM conversation_revisions revision
+        WHERE revision.conversation_id = target.id
+      )`,
+  )
+    .bind(input.conversationId, ...(input.userId ? [input.userId] : []))
+    .first<{
+      current_revision_id: string;
+      namespace: string;
+      anchor_revision_id: string | null;
+      anchor_row_id: number | null;
+    }>();
+  // Missing, deleted, foreign, empty-history, and unreadable conversations share one not-found.
+  if (!scope?.anchor_revision_id || scope.anchor_row_id === null) {
+    throw new AppError("NOT_FOUND", "Conversation not found", 404);
+  }
+  if (input.namespaces?.length && !input.namespaces.includes(scope.namespace)) {
+    throw new AppError("NOT_FOUND", "Conversation not found", 404);
+  }
+
+  const cursor = input.cursor ? decodeRevisionCursor(input.cursor) : null;
+  let anchor: RevisionAnchor = {
+    revisionId: scope.anchor_revision_id,
+    rowId: scope.anchor_row_id,
+  };
+  let currentRevisionId = scope.current_revision_id;
+  if (cursor) {
+    const resolved = await resolveRevisionAnchor(
+      env,
+      input.conversationId,
+      cursor.anchorRevisionId,
+    );
+    if (!resolved) return invalidRevisionCursor();
+    anchor = resolved;
+
+    // Validate both cursor revision IDs against the owned snapshot. The boundary's
+    // timestamp must match so a forged cursor cannot silently skip history.
+    const pinned = await env.MEMORY_DB.prepare(
+      `SELECT id, created_at FROM conversation_revisions
+       WHERE conversation_id = ? AND rowid <= ? AND id IN (?, ?)`,
+    )
+      .bind(input.conversationId, anchor.rowId, cursor.currentRevisionId, cursor.revisionId)
+      .all<{ id: string; created_at: string }>();
+    const byId = new Map(pinned.results.map((revision) => [revision.id, revision.created_at]));
+    if (!byId.has(cursor.currentRevisionId) || byId.get(cursor.revisionId) !== cursor.createdAt) {
+      return invalidRevisionCursor();
+    }
+    currentRevisionId = cursor.currentRevisionId;
+  }
+
+  const where = ["conversation_id = ?", "rowid <= ?"];
+  const params: Array<string | number> = [input.conversationId, anchor.rowId];
+  if (cursor) {
+    where.push("(created_at < ? OR (created_at = ? AND id < ?))");
+    params.push(cursor.createdAt, cursor.createdAt, cursor.revisionId);
+  }
+  params.push(limit + 1);
+  const result = await env.MEMORY_DB.prepare(
+    `SELECT id, content_hash, node_count, created_at FROM conversation_revisions
+     WHERE ${where.join(" AND ")} ORDER BY created_at DESC, id DESC LIMIT ?`,
+  )
+    .bind(...params)
+    .all<RevisionCatalogRow>();
+  const rows = result.results;
+  const hasMore = rows.length > limit;
+  if (hasMore) rows.pop();
+  const last = rows.at(-1);
+  return {
+    conversationId: input.conversationId,
+    currentRevisionId,
+    revisions: rows.map((revision) => ({
+      revisionId: revision.id,
+      createdAt: revision.created_at,
+      nodeCount: revision.node_count,
+      contentHash: revision.content_hash,
+    })),
+    nextCursor:
+      hasMore && last
+        ? encodeRevisionCursor({
+            anchorRevisionId: anchor.revisionId,
+            currentRevisionId,
+            createdAt: last.created_at,
+            revisionId: last.id,
+          })
+        : null,
+  };
+}
+
 export async function updateConversationTags(
   env: AppEnv,
   conversationId: string,

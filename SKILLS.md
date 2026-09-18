@@ -43,6 +43,13 @@ Do not store routine commits, "I did X" churn, or facts you can read from the re
 6. **Never invent memory.** Cite the conversation ids and revision ids returned by the
    tools; if search returns nothing, say memory is empty for that project.
 
+Call `memory_list_revisions` when you need a revision id you did not retain, or when
+reviewing what an earlier `memory_append` or `memory_replace` committed. It returns metadata
+only — newest first, with the snapshot head identified — and each returned `revision_id`
+pins that historical revision for `memory_get_conversation`. Follow `next_cursor` for older
+history; `current_revision_id` stays pinned, and only the page containing it has
+`current: true`.
+
 For known owners, use `memory_get_conversations` and follow every `continuation`, including
 deferred requests. Single conversation/context reads support `format: "compact"` without
 changing original text. For intentional saves, request `verify: true`: the server reloads
@@ -67,6 +74,7 @@ for explicit `simpan state` and existing owner boundaries.
 | `memory_get_conversation`     | page a full conversation                                    |
 | `memory_get_conversations`    | batch up to 20 known memories with compact continuations    |
 | `memory_list_conversations`   | metadata + tags per conversation                            |
+| `memory_list_revisions`       | immutable revision history of one owned conversation        |
 | `memory_list_namespaces`      | namespaces you own                                          |
 | `memory_stats`                | counts + indexing health                                    |
 | `memory_store`                | durable new memory (claims `project/<slug>` on first write) |

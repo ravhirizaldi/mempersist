@@ -42,6 +42,7 @@ describe("MCP server", () => {
       "memory_import_status",
       "memory_list_conversations",
       "memory_list_namespaces",
+      "memory_list_revisions",
       "memory_replace",
       "memory_search",
       "memory_stats",
@@ -61,6 +62,7 @@ describe("MCP server", () => {
       "memory_get_conversations",
       "memory_list_conversations",
       "memory_list_namespaces",
+      "memory_list_revisions",
       "memory_stats",
       "memory_import_status",
     ]) {
@@ -194,6 +196,23 @@ describe("MCP server", () => {
     expect(tooMany.isError).toBe(true);
     expect(duplicates.isError).toBe(true);
     expect(malformed.isError).toBe(true);
+  });
+
+  it("validates revision history inputs", async () => {
+    const client = await connectedClient();
+    const cases: Array<Record<string, unknown>> = [
+      {},
+      { conversation_id: "not-a-memory-id" },
+      { conversation_id: crypto.randomUUID(), limit: 0 },
+      { conversation_id: crypto.randomUUID(), limit: 101 },
+      { conversation_id: crypto.randomUUID(), limit: "20" },
+      { conversation_id: crypto.randomUUID(), cursor: "" },
+      { conversation_id: crypto.randomUUID(), cursor: null },
+    ];
+    for (const args of cases) {
+      const result = await client.callTool({ name: "memory_list_revisions", arguments: args });
+      expect(result.isError, JSON.stringify(args)).toBe(true);
+    }
   });
 
   it("validates tag inputs on store, append, and search", async () => {

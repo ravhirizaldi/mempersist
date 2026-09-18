@@ -74,6 +74,7 @@ See [SKILLS.md](../SKILLS.md) for the memory conventions coding agents should fo
 | `memory_get_conversation`     | conversation ID, branch, offset, limit         | paginated active timeline or all graph nodes          |
 | `memory_get_conversations`    | 1–20 conversation requests                     | ordered compact pages, errors, and continuations      |
 | `memory_list_conversations`   | cursor, limit, tags, tag_mode                  | metadata and tags only                                |
+| `memory_list_revisions`       | conversation ID, cursor, limit 1–100           | revision metadata newest first, current head marked   |
 | `memory_list_namespaces`      | —                                              | namespaces you own with conversation counts           |
 | `memory_stats`                | —                                              | per-namespace counts plus indexing health             |
 | `memory_store`                | title, tags, 1–1000 messages                   | durable revision plus queued index job                |
@@ -138,6 +139,48 @@ Context responses retain the existing 64 KiB tool guard; narrow before/after whe
 
 HTTP conversation/context reads support the same `format` query parameter; the conversation
 endpoint also accepts `revision_id`. HTTP canonical reads keep their existing behavior.
+
+## Revision history
+
+`memory_list_revisions` exposes the immutable revision history of one owned conversation as
+metadata, newest first. Input: `conversation_id` (memory UUID or 64-character hexadecimal ID),
+`limit` (1–100, default 20), and an opaque `cursor`.
+
+```json
+{
+  "conversation_id": "<conversation ID>",
+  "current_revision_id": "<the current revision ID>",
+  "revisions": [
+    {
+      "revision_id": "<revision ID>",
+      "created_at": "2026-09-17T00:00:00.000Z",
+      "node_count": 42,
+      "content_hash": "<content hash>",
+      "current": true
+    }
+  ],
+  "next_cursor": null
+}
+```
+
+Rows are ordered by `(created_at DESC, revision_id DESC)`, and `next_cursor` carries that
+whole key, so following it neither skips nor repeats rows when revisions share a timestamp.
+The cursor also pins the first page's snapshot anchor and current head. Revisions committed
+while a client walks the history appear only in a fresh walk; every continuation keeps the
+same `current_revision_id` even if the live head changes concurrently.
+
+Exactly one revision in the pinned history is current. The page containing that revision marks
+it `current: true`; older pages legitimately contain no `current: true` row while retaining the
+same top-level `current_revision_id`.
+
+Metadata only: transcript bodies are never reconstructed from D1. Pass a returned `revision_id`
+to `memory_get_conversation` to read that exact revision, which is how an earlier state is
+reviewed or recovered without a retained write receipt. The tool is read-only; it never
+mutates, deletes, or reindexes history, and it stays inside the 64 KiB tool guard.
+
+Missing, deleted, foreign, empty-history, and not-owned-namespace conversations produce the same
+not-found error, so a revision ID or conversation ID from another account reveals nothing.
+Malformed, forged, and stale continuation cursors return `Invalid cursor`.
 
 ## Verified writes
 

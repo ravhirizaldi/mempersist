@@ -15,6 +15,7 @@ import { searchMemory } from "./search";
 import { assertAccountWritable, grantNamespace, scopeNamespaces, type Tenant } from "./tenant";
 import {
   appendConversation,
+  listConversationRevisions,
   listConversations,
   replaceConversation,
   updateConversationTags,
@@ -175,6 +176,19 @@ const listConversationsOutputSchema = z.object({
     }),
   ),
   nextCursor: nullableStringSchema,
+});
+const revisionSummaryOutputSchema = z.object({
+  revision_id: z.string(),
+  created_at: z.string(),
+  node_count: z.number(),
+  content_hash: z.string(),
+  current: z.boolean(),
+});
+const revisionHistoryOutputSchema = z.object({
+  conversation_id: z.string(),
+  current_revision_id: z.string(),
+  revisions: z.array(revisionSummaryOutputSchema),
+  next_cursor: nullableStringSchema,
 });
 const verificationOutputSchema = z.object({
   status: z.enum(["passed", "failed"]),
@@ -365,6 +379,42 @@ export function createMemoryMcpServer(env: AppEnv, tenant: Tenant): McpServer {
           tagMode: input.tag_mode,
         }),
       );
+    },
+  );
+
+  server.registerTool(
+    "memory_list_revisions",
+    {
+      description:
+        "List the immutable revision history of one owned conversation, newest first, as metadata only. Missing, deleted, and foreign conversations are reported as not found. Pass a returned revision_id to memory_get_conversation to read that revision, and follow next_cursor for older pages.",
+      annotations: readOnlyAnnotations,
+      outputSchema: revisionHistoryOutputSchema,
+      inputSchema: z.object({
+        conversation_id: conversationIdSchema,
+        limit: z.number().int().min(1).max(100).default(20),
+        cursor: z.string().min(1).optional(),
+      }),
+    },
+    async (input) => {
+      const history = await listConversationRevisions(env, {
+        conversationId: input.conversation_id,
+        limit: input.limit,
+        ...(input.cursor ? { cursor: input.cursor } : {}),
+        namespaces: tenant.namespaces,
+        userId: tenant.userId,
+      });
+      return toolResult({
+        conversation_id: history.conversationId,
+        current_revision_id: history.currentRevisionId,
+        revisions: history.revisions.map((revision) => ({
+          revision_id: revision.revisionId,
+          created_at: revision.createdAt,
+          node_count: revision.nodeCount,
+          content_hash: revision.contentHash,
+          current: revision.revisionId === history.currentRevisionId,
+        })),
+        next_cursor: history.nextCursor,
+      });
     },
   );
 
