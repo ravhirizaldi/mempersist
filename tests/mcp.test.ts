@@ -44,6 +44,7 @@ describe("MCP server", () => {
       "memory_list_namespaces",
       "memory_list_revisions",
       "memory_replace",
+      "memory_resolve_conversations",
       "memory_search",
       "memory_stats",
       "memory_store",
@@ -63,6 +64,7 @@ describe("MCP server", () => {
       "memory_list_conversations",
       "memory_list_namespaces",
       "memory_list_revisions",
+      "memory_resolve_conversations",
       "memory_stats",
       "memory_import_status",
     ]) {
@@ -298,5 +300,31 @@ describe("MCP server", () => {
     });
     expect(empty.isError).toBe(true);
     expect(invalid.isError).toBe(true);
+  });
+
+  it("validates conversation resolve request inputs", async () => {
+    const client = await connectedClient();
+    const emptyRequests = await client.callTool({
+      name: "memory_resolve_conversations",
+      arguments: { requests: [] },
+    });
+    const emptyTitle = await client.callTool({
+      name: "memory_resolve_conversations",
+      arguments: { requests: [{ title: "" }] },
+    });
+    const whitespaceTitle = await client.callTool({
+      name: "memory_resolve_conversations",
+      arguments: { requests: [{ title: "   " }] },
+    });
+    const tooManyRequests = await client.callTool({
+      name: "memory_resolve_conversations",
+      arguments: {
+        requests: Array.from({ length: 21 }, (_, index) => ({ title: `Title ${index}` })),
+      },
+    });
+    expect(emptyRequests.isError).toBe(true);
+    expect(emptyTitle.isError).toBe(true);
+    expect(whitespaceTitle.isError).toBe(true);
+    expect(tooManyRequests.isError).toBe(true);
   });
 });

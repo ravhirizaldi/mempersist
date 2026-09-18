@@ -121,6 +121,18 @@ the revision primary-key index. The page query uses `revisions_conversation_idx`
 only for the final `id DESC` tie-break. No additional index is required, so no migration was added
 for this tool.
 
+## Exact-title conversation resolution
+
+`memory_resolve_conversations` executes deterministic catalog-only lookups against `conversations`
+and `conversation_tags` without touching R2, FTS, Vectorize, or Workers AI. Matching is
+exact and case-sensitive (`title = ?`), excludes tombstones (`deleted_at IS NULL`), and requires
+a valid current revision head (`current_revision_id IS NOT NULL`).
+
+Query-plan evidence (D1 `EXPLAIN QUERY PLAN`): title resolution queries use the existing index
+`conversations_user_idx (user_id=?)` to scan only the requesting tenant's live conversations,
+filtering by namespace and title. In single-user and bounded-tenant workloads, this index scan is
+bounded to the caller's active conversations. No additional migration or index was added.
+
 ## Deletion consistency
 
 Conversation deletion first sets the existing D1 `deleted_at` tombstone, immediately excluding the

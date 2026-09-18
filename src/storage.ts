@@ -453,6 +453,127 @@ export async function listConversations(
   };
 }
 
+export const RESOLVE_MATCH_CAP = 50;
+
+export interface ConversationResolveRequest {
+  title: string;
+  namespaces: string[];
+  tags?: string[];
+  tagMode?: "any" | "all";
+}
+
+export interface ConversationResolveMatch {
+  conversationId: string;
+  revisionId: string;
+  title: string;
+  namespace: string;
+  tags: string[];
+  updatedAt: string | null;
+}
+
+export interface ConversationResolveResultItem {
+  requestIndex: number;
+  status: "ok" | "not_found" | "ambiguous";
+  matches: ConversationResolveMatch[];
+  hasMore: boolean;
+}
+
+interface ResolveRow {
+  id: string;
+  title: string;
+  namespace: string;
+  current_revision_id: string;
+  updated_at: string | null;
+}
+
+export async function resolveConversations(
+  env: CanonicalReadEnv,
+  userId: string,
+  requests: ConversationResolveRequest[],
+): Promise<ConversationResolveResultItem[]> {
+  if (requests.length === 0) return [];
+
+  const statements: D1PreparedStatement[] = [];
+  for (const req of requests) {
+    const where = [
+      "user_id = ?",
+      "deleted_at IS NULL",
+      "current_revision_id IS NOT NULL",
+      "title = ?",
+    ];
+    const params: Array<string | number> = [userId, req.title];
+
+    if (req.namespaces.length === 0) {
+      where.push("1 = 0");
+    } else {
+      where.push(`namespace IN (${req.namespaces.map(() => "?").join(",")})`);
+      params.push(...req.namespaces);
+    }
+
+    const tags = normalizeTags(req.tags ?? []);
+    if (tags.length) {
+      where.push(
+        req.tagMode === "any"
+          ? `id IN (SELECT DISTINCT conversation_id FROM conversation_tags WHERE tag IN (${tags
+              .map(() => "?")
+              .join(",")}))`
+          : `id IN (SELECT conversation_id FROM conversation_tags WHERE tag IN (${tags
+              .map(() => "?")
+              .join(",")}) GROUP BY conversation_id HAVING COUNT(*) = ?)`,
+      );
+      params.push(...tags);
+      if (req.tagMode !== "any") params.push(tags.length);
+    }
+
+    statements.push(
+      env.MEMORY_DB.prepare(
+        `SELECT id, title, namespace, current_revision_id, updated_at
+         FROM conversations
+         WHERE ${where.join(" AND ")}
+         ORDER BY id
+         LIMIT ?`,
+      ).bind(...params, RESOLVE_MATCH_CAP + 1),
+    );
+  }
+
+  const batchResults = await env.MEMORY_DB.batch<ResolveRow>(statements);
+  const allConversationIds = Array.from(
+    new Set(batchResults.flatMap((r) => r.results.map((row) => row.id))),
+  );
+  const tagsMap = await loadConversationTags(env, allConversationIds);
+
+  return batchResults.map((result, index) => {
+    const rows = [...result.results];
+    const hasMore = rows.length > RESOLVE_MATCH_CAP;
+    if (hasMore) rows.pop();
+
+    const matches: ConversationResolveMatch[] = rows.map((row) => ({
+      conversationId: row.id,
+      revisionId: row.current_revision_id,
+      title: row.title,
+      namespace: row.namespace,
+      tags: tagsMap.get(row.id) ?? [],
+      updatedAt: row.updated_at,
+    }));
+
+    let status: "ok" | "not_found" | "ambiguous";
+    if (matches.length === 0) {
+      status = "not_found";
+    } else if (matches.length === 1 && !hasMore) {
+      status = "ok";
+    } else {
+      status = "ambiguous";
+    }
+
+    return {
+      requestIndex: index,
+      status,
+      matches,
+      hasMore,
+    };
+  });
+}
+
 interface RevisionCatalogRow {
   id: string;
   content_hash: string;

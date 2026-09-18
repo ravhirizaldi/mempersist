@@ -7,8 +7,10 @@ across owners.
 
 ## Continue a scene
 
-1. Batch the known CURRENT, CURRENT_SCENE, EVENTS_INDEX, and runtime-rule conversation IDs
-   with `memory_get_conversations`. Use actual IDs discovered in your archive.
+1. When conversation IDs are not yet known, resolve canonical owners (CURRENT, CURRENT_SCENE,
+   EVENTS_INDEX) by exact title using `memory_resolve_conversations` (scoped to your project or
+   active namespace) without semantic search. Then batch the resolved conversation IDs with
+   `memory_get_conversations`. Use actual IDs discovered in your archive.
 2. Consume results in order, including later correction messages. Follow **every** non-null
    `continuation` by placing that object in the next call's `requests` array. A deferred entry
    has not delivered its prose. Keep `revision_id` when following a continuation.

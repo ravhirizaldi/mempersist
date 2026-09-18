@@ -18,6 +18,7 @@ import {
   listConversationRevisions,
   listConversations,
   replaceConversation,
+  resolveConversations,
   updateConversationTags,
   writeCanonicalConversation,
 } from "./storage";
@@ -189,6 +190,36 @@ const revisionHistoryOutputSchema = z.object({
   current_revision_id: z.string(),
   revisions: z.array(revisionSummaryOutputSchema),
   next_cursor: nullableStringSchema,
+});
+const conversationResolveMatchSchema = z.object({
+  conversation_id: z.string(),
+  revision_id: z.string(),
+  title: z.string(),
+  namespace: z.string(),
+  tags: z.array(z.string()),
+  updated_at: nullableStringSchema,
+});
+const conversationResolveResultItemSchema = z.object({
+  request_index: z.number().int().min(0),
+  status: z.enum(["ok", "not_found", "ambiguous"]),
+  matches: z.array(conversationResolveMatchSchema),
+  has_more: z.boolean().default(false),
+});
+const conversationResolveOutputSchema = z.object({
+  results: z.array(conversationResolveResultItemSchema),
+});
+const conversationResolveRequestSchema = z.object({
+  title: z
+    .string()
+    .min(1)
+    .max(500)
+    .refine((value) => value.trim().length > 0, "Title must not be empty or whitespace-only"),
+  namespace: z.string().min(1).max(100).optional(),
+  tags: tagsSchema.optional(),
+  tag_mode: z.enum(["any", "all"]).default("all"),
+});
+const conversationResolveInputSchema = z.object({
+  requests: z.array(conversationResolveRequestSchema).min(1).max(20),
 });
 const verificationOutputSchema = z.object({
   status: z.enum(["passed", "failed"]),
@@ -414,6 +445,43 @@ export function createMemoryMcpServer(env: AppEnv, tenant: Tenant): McpServer {
           current: revision.revisionId === history.currentRevisionId,
         })),
         next_cursor: history.nextCursor,
+      });
+    },
+  );
+  server.registerTool(
+    "memory_resolve_conversations",
+    {
+      description:
+        "Resolve known conversation owners by exact title without semantic search, returning conversation IDs, current revision IDs, and live tags. Exact match is case-sensitive and scoped to owned namespaces.",
+      annotations: readOnlyAnnotations,
+      outputSchema: conversationResolveOutputSchema,
+      inputSchema: conversationResolveInputSchema,
+    },
+    async (input) => {
+      const results = await resolveConversations(
+        env,
+        tenant.userId,
+        input.requests.map((req) => ({
+          title: req.title,
+          namespaces: scopeNamespaces(tenant, req.namespace),
+          ...(req.tags ? { tags: req.tags } : {}),
+          tagMode: req.tag_mode,
+        })),
+      );
+      return toolResult({
+        results: results.map((item) => ({
+          request_index: item.requestIndex,
+          status: item.status,
+          matches: item.matches.map((match) => ({
+            conversation_id: match.conversationId,
+            revision_id: match.revisionId,
+            title: match.title,
+            namespace: match.namespace,
+            tags: match.tags,
+            updated_at: match.updatedAt,
+          })),
+          has_more: item.hasMore,
+        })),
       });
     },
   );

@@ -50,7 +50,9 @@ pins that historical revision for `memory_get_conversation`. Follow `next_cursor
 history; `current_revision_id` stays pinned, and only the page containing it has
 `current: true`.
 
-For known owners, use `memory_get_conversations` and follow every `continuation`, including
+For known owners whose conversation IDs are not yet known, call `memory_resolve_conversations`
+to resolve up to 20 exact titles into conversation IDs and current revision IDs without semantic
+search. For known owners, use `memory_get_conversations` and follow every `continuation`, including
 deferred requests. Single conversation/context reads support `format: "compact"` without
 changing original text. For intentional saves, request `verify: true`: the server reloads
 the exact committed R2 revision and returns persisted compact readback. Check its semantics
@@ -67,23 +69,24 @@ for explicit `simpan state` and existing owner boundaries.
 
 ## Tool reference
 
-| Tool                          | Use                                                         |
-| ----------------------------- | ----------------------------------------------------------- |
-| `memory_search`               | find memories; tags + `tag_mode` filter                     |
-| `memory_get_context`          | original messages around a search hit                       |
-| `memory_get_conversation`     | page a full conversation                                    |
-| `memory_get_conversations`    | batch up to 20 known memories with compact continuations    |
-| `memory_list_conversations`   | metadata + tags per conversation                            |
-| `memory_list_revisions`       | immutable revision history of one owned conversation        |
-| `memory_list_namespaces`      | namespaces you own                                          |
-| `memory_stats`                | counts + indexing health                                    |
-| `memory_store`                | durable new memory (claims `project/<slug>` on first write) |
-| `memory_append`               | extend an existing conversation, optimistic revision check  |
-| `memory_replace`              | replace its transcript, optimistic revision check           |
-| `memory_update_tags`          | change tags on an existing conversation                     |
-| `memory_delete_conversations` | delete specific memories (user-confirmed)                   |
-| `memory_empty_namespace`      | empty one of your namespaces (exact confirmation)           |
-| `memory_import_status`        | ChatGPT import progress (owner only)                        |
+| Tool                           | Use                                                         |
+| ------------------------------ | ----------------------------------------------------------- |
+| `memory_search`                | find memories; tags + `tag_mode` filter                     |
+| `memory_get_context`           | original messages around a search hit                       |
+| `memory_get_conversation`      | page a full conversation                                    |
+| `memory_get_conversations`     | batch up to 20 known memories with compact continuations    |
+| `memory_list_conversations`    | metadata + tags per conversation                            |
+| `memory_list_revisions`        | immutable revision history of one owned conversation        |
+| `memory_resolve_conversations` | resolve up to 20 exact titles without semantic search       |
+| `memory_list_namespaces`       | namespaces you own                                          |
+| `memory_stats`                 | counts + indexing health                                    |
+| `memory_store`                 | durable new memory (claims `project/<slug>` on first write) |
+| `memory_append`                | extend an existing conversation, optimistic revision check  |
+| `memory_replace`               | replace its transcript, optimistic revision check           |
+| `memory_update_tags`           | change tags on an existing conversation                     |
+| `memory_delete_conversations`  | delete specific memories (user-confirmed)                   |
+| `memory_empty_namespace`       | empty one of your namespaces (exact confirmation)           |
+| `memory_import_status`         | ChatGPT import progress (owner only)                        |
 
 ## Pair with git
 

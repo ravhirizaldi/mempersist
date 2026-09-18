@@ -162,6 +162,7 @@ export function landingPage(locale: Locale = "en"): Response {
         <tr><td><code>memory_get_conversations</code></td><td>batch up to 20 known conversations</td></tr>
         <tr><td><code>memory_list_conversations</code></td><td>metadata and tags</td></tr>
         <tr><td><code>memory_list_revisions</code></td><td>immutable revision history of one conversation</td></tr>
+        <tr><td><code>memory_resolve_conversations</code></td><td>resolve up to 20 exact titles without semantic search</td></tr>
         <tr><td><code>memory_list_namespaces</code></td><td>namespaces your account owns</td></tr>
         <tr><td><code>memory_stats</code></td><td>counts and indexing health</td></tr>
         <tr><td><code>memory_store</code></td><td>durable new memory</td></tr>

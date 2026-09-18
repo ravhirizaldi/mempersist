@@ -67,23 +67,24 @@ complete the email prompt).
 See [SKILLS.md](../SKILLS.md) for the memory conventions coding agents should follow
 (`project/<slug>` namespaces, search-first workflow, event records).
 
-| Tool                          | Important inputs                               | Result                                                |
-| ----------------------------- | ---------------------------------------------- | ----------------------------------------------------- |
-| `memory_search`               | query, limit 1–20, tags, tag_mode              | compact ranked chunk references and degradation state |
-| `memory_get_context`          | chunk ID, before/after 0–10                    | canonical matched ranges and surrounding messages     |
-| `memory_get_conversation`     | conversation ID, branch, offset, limit         | paginated active timeline or all graph nodes          |
-| `memory_get_conversations`    | 1–20 conversation requests                     | ordered compact pages, errors, and continuations      |
-| `memory_list_conversations`   | cursor, limit, tags, tag_mode                  | metadata and tags only                                |
-| `memory_list_revisions`       | conversation ID, cursor, limit 1–100           | revision metadata newest first, current head marked   |
-| `memory_list_namespaces`      | —                                              | namespaces you own with conversation counts           |
-| `memory_stats`                | —                                              | per-namespace counts plus indexing health             |
-| `memory_store`                | title, tags, 1–1000 messages                   | durable revision plus queued index job                |
-| `memory_append`               | conversation ID, base revision, tags, messages | optimistic durable revision plus queued index job     |
-| `memory_replace`              | conversation ID, base revision, messages       | replacement revision plus queued index job            |
-| `memory_update_tags`          | conversation ID, base revision, add/remove     | live tag list after revision-safe mutation            |
-| `memory_delete_conversations` | 1–100 unique conversation IDs                  | deleted, missing, and per-ID failures                 |
-| `memory_empty_namespace`      | matching namespace confirmation pair           | deletes one of your namespaces; bounded, resumable    |
-| `memory_import_status`        | import UUID                                    | progress, duplicate, or failure metadata              |
+| Tool                           | Important inputs                               | Result                                                |
+| ------------------------------ | ---------------------------------------------- | ----------------------------------------------------- |
+| `memory_search`                | query, limit 1–20, tags, tag_mode              | compact ranked chunk references and degradation state |
+| `memory_get_context`           | chunk ID, before/after 0–10                    | canonical matched ranges and surrounding messages     |
+| `memory_get_conversation`      | conversation ID, branch, offset, limit         | paginated active timeline or all graph nodes          |
+| `memory_get_conversations`     | 1–20 conversation requests                     | ordered compact pages, errors, and continuations      |
+| `memory_list_conversations`    | cursor, limit, tags, tag_mode                  | metadata and tags only                                |
+| `memory_list_revisions`        | conversation ID, cursor, limit 1–100           | revision metadata newest first, current head marked   |
+| `memory_resolve_conversations` | 1–20 exact titles, optional namespace and tags | conversation IDs, current revision IDs, and live tags |
+| `memory_list_namespaces`       | —                                              | namespaces you own with conversation counts           |
+| `memory_stats`                 | —                                              | per-namespace counts plus indexing health             |
+| `memory_store`                 | title, tags, 1–1000 messages                   | durable revision plus queued index job                |
+| `memory_append`                | conversation ID, base revision, tags, messages | optimistic durable revision plus queued index job     |
+| `memory_replace`               | conversation ID, base revision, messages       | replacement revision plus queued index job            |
+| `memory_update_tags`           | conversation ID, base revision, add/remove     | live tag list after revision-safe mutation            |
+| `memory_delete_conversations`  | 1–100 unique conversation IDs                  | deleted, missing, and per-ID failures                 |
+| `memory_empty_namespace`       | matching namespace confirmation pair           | deletes one of your namespaces; bounded, resumable    |
+| `memory_import_status`         | import UUID                                    | progress, duplicate, or failure metadata              |
 
 Every tool advertises an output schema and returns successful structured data in both
 `structuredContent` and JSON text content for client compatibility.
@@ -181,6 +182,61 @@ mutates, deletes, or reindexes history, and it stays inside the 64 KiB tool guar
 Missing, deleted, foreign, empty-history, and not-owned-namespace conversations produce the same
 not-found error, so a revision ID or conversation ID from another account reveals nothing.
 Malformed, forged, and stale continuation cursors return `Invalid cursor`.
+
+## Exact-title conversation resolution
+
+`memory_resolve_conversations` resolves known conversation owners by exact title without semantic
+search. It returns conversation IDs, current revision IDs, and live catalog tags so callers can
+immediately batch canonical reads with `memory_get_conversations`.
+
+Input: `requests` (array of 1–20 objects):
+
+```json
+{
+  "requests": [
+    {
+      "title": "CURRENT",
+      "namespace": "astara_alt_v2",
+      "tags": ["state"],
+      "tag_mode": "all"
+    }
+  ]
+}
+```
+
+- `title`: exact, case-sensitive binary string comparison against stored canonical titles. Lookup does not trim whitespace.
+- `namespace`: optional; when omitted, searches across all namespaces owned by the authenticated tenant. Unowned namespaces return an authentication error.
+- `tags`: optional tag filter (up to 20 normalized tags).
+- `tag_mode`: `"all"` (must match every tag) or `"any"` (must match at least one tag). Default is `"all"`.
+
+Output:
+
+```json
+{
+  "results": [
+    {
+      "request_index": 0,
+      "status": "ok",
+      "matches": [
+        {
+          "conversation_id": "<conversation-id>",
+          "revision_id": "<current-revision-id>",
+          "title": "CURRENT",
+          "namespace": "astara_alt_v2",
+          "tags": ["state"],
+          "updated_at": "2026-09-17T00:00:00.000Z"
+        }
+      ],
+      "has_more": false
+    }
+  ]
+}
+```
+
+- `status`: `"ok"` (exactly one match), `"not_found"` (no matches), or `"ambiguous"` (multiple matches).
+- `matches`: array of matched conversation metadata, bounded to a maximum of 50 matches per request. Ambiguous results are never resolved by an implicit heuristic such as recency.
+- `has_more`: `true` when more matches exist beyond the 50-match cap.
+- Deterministic and read-only: excludes tombstones (`deleted_at IS NULL`), requires a valid current revision head (`current_revision_id IS NOT NULL`), and never accesses R2, Vectorize, or Workers AI.
 
 ## Verified writes
 
