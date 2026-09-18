@@ -44,7 +44,7 @@ function page(title: string, body: string, active: string, locale: Locale, intro
   const language = `<nav class="language-switch" aria-label="${t.shared.language}"><a href="/language/en?return_to=${encodeURIComponent(active)}" lang="en"${locale === "en" ? ' aria-current="true"' : ""}>EN</a><span aria-hidden="true">/</span><a href="/language/id?return_to=${encodeURIComponent(active)}" lang="id"${locale === "id" ? ' aria-current="true"' : ""}>ID</a></nav>`;
   const nav = `<nav class="site-nav" aria-label="${t.shared.mainNav}"><div class="nav">
 ${brand(t.shared.homeLabel)}
-<button type="button" class="nav-toggle" aria-controls="nav-links" aria-expanded="false" hidden>${t.shared.menu}</button>
+<button type="button" class="nav-toggle" aria-controls="nav-links" aria-expanded="false" aria-label="${t.shared.menu}" hidden><span class="hamburger" aria-hidden="true"></span><span class="sr-only">${t.shared.menu}</span></button>
 <div class="nav-links" id="nav-links">${navItems
     .map(
       (item) =>
@@ -161,6 +161,7 @@ export function landingPage(locale: Locale = "en"): Response {
         <tr><td><code>memory_get_conversation</code></td><td>page a full conversation</td></tr>
         <tr><td><code>memory_get_conversations</code></td><td>batch up to 20 known conversations</td></tr>
         <tr><td><code>memory_list_conversations</code></td><td>metadata and tags</td></tr>
+        <tr><td><code>memory_list_revisions</code></td><td>immutable revision history of one conversation</td></tr>
         <tr><td><code>memory_list_namespaces</code></td><td>namespaces your account owns</td></tr>
         <tr><td><code>memory_stats</code></td><td>counts and indexing health</td></tr>
         <tr><td><code>memory_store</code></td><td>durable new memory</td></tr>

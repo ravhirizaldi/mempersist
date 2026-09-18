@@ -228,8 +228,14 @@ function page(
   const n = nonce();
   const t = copy[locale];
   const language = `<nav class="language" aria-label="${messages(locale).shared.language}"><a href="/language/en?return_to=${encodeURIComponent(requestPath)}" lang="en"${locale === "en" ? ' aria-current="true"' : ""}>EN</a><span>/</span><a href="/language/id?return_to=${encodeURIComponent(requestPath)}" lang="id"${locale === "id" ? ' aria-current="true"' : ""}>ID</a></nav>`;
+  const pathname = requestPath.split("?")[0] ?? requestPath;
+  const dashboardCurrent =
+    pathname === "/dashboard" ||
+    pathname.startsWith("/dashboard/namespaces/") ||
+    pathname.startsWith("/dashboard/conversations/");
+  const mapCurrent = pathname === "/dashboard/mindmap";
   const nav = options.session
-    ? `<nav class="dashboard-nav" aria-label="${messages(locale).shared.mainNav}">${brand(messages(locale).shared.homeLabel)}<div><a href="/dashboard">${t.dashboard}</a><a href="/dashboard/mindmap">${t.memoryMap}</a><a href="/dashboard/export">${t.export}</a>${language}<form method="post" action="/logout"><input type="hidden" name="csrf" value="${options.session.csrf}"><button class="link-button" type="submit">${t.logout}</button></form></div></nav>`
+    ? `<nav class="dashboard-nav" aria-label="${messages(locale).shared.mainNav}">${brand(messages(locale).shared.homeLabel)}<details class="dashboard-menu"><summary class="nav-toggle"><span class="hamburger" aria-hidden="true"></span><span class="sr-only">${messages(locale).shared.menu}</span></summary><div class="nav-panel"><a href="/dashboard"${dashboardCurrent ? ' aria-current="page"' : ""}>${t.dashboard}</a><a href="/dashboard/mindmap"${mapCurrent ? ' aria-current="page"' : ""}>${t.memoryMap}</a><a href="/dashboard/export">${t.export}</a>${language}<form method="post" action="/logout"><input type="hidden" name="csrf" value="${options.session.csrf}"><button class="link-button" type="submit">${t.logout}</button></form></div></details></nav>`
     : `<nav class="dashboard-nav">${brand(messages(locale).shared.homeLabel)}<div>${language}</div></nav>`;
   return new Response(
     `<!doctype html><html lang="${locale}"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>${escapeHtml(title)} · MemPersist</title>${FAVICON}<link rel="preconnect" href="https://fonts.googleapis.com"><link rel="preconnect" href="https://fonts.gstatic.com" crossorigin><link href="https://fonts.googleapis.com/css2?family=Outfit:wght@400;500;600&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet"><style nonce="${n}">${BASE_CSS}${DASHBOARD_CSS}</style></head><body><a class="skip-link" href="#main">${messages(locale).shared.skip}</a>${nav}<main id="main" class="dashboard-shell" tabindex="-1">${body}</main>${options.script ? `<script nonce="${n}">${options.script}</script>` : ""}</body></html>`,
@@ -387,6 +393,7 @@ async function login(request: Request, env: AppEnv, locale: Locale): Promise<Res
   const t = copy[locale];
   const returnTo = safeReturnPath(new URL(request.url).searchParams.get("return_to"), "/dashboard");
   if (request.method === "GET") {
+    if (await readSession(request, env)) return redirect(returnTo);
     return page(
       t.loginTitle,
       `<section class="auth-card"><p class="eyebrow">PASSWORDLESS</p><h1>${t.loginTitle}</h1><p>${t.loginBody}</p><form method="post" action="/login"><input type="hidden" name="return_to" value="${escapeHtml(returnTo)}"><label for="email">${t.email}</label><input id="email" name="email" type="email" required maxlength="320" autocomplete="email"><button class="button" type="submit">${t.sendLink} <span aria-hidden="true">↗</span></button></form></section>`,
@@ -482,6 +489,76 @@ async function dashboardData(env: AppEnv, userId: string) {
     .first<{ id: string; due_at: string }>();
   return { namespaces: namespaces.results, recent: recent.results, deletion };
 }
+async function listNamespaceConversations(
+  env: AppEnv,
+  userId: string,
+  namespace: string,
+  offset: number,
+): Promise<{
+  conversations: Array<{ id: string; title: string; updated_at: string | null }>;
+  total: number;
+}> {
+  const countRow = await env.MEMORY_DB.prepare(
+    `SELECT COUNT(*) AS total FROM conversations
+     WHERE user_id = ? AND namespace = ? AND deleted_at IS NULL`,
+  )
+    .bind(userId, namespace)
+    .first<{ total: number }>();
+  const rows = await env.MEMORY_DB.prepare(
+    `SELECT id, title, updated_at FROM conversations
+     WHERE user_id = ? AND namespace = ? AND deleted_at IS NULL
+     ORDER BY COALESCE(updated_at, created_at) DESC, id DESC
+     LIMIT 20 OFFSET ?`,
+  )
+    .bind(userId, namespace, offset)
+    .all<{ id: string; title: string; updated_at: string | null }>();
+  return {
+    conversations: rows.results,
+    total: countRow?.total ?? 0,
+  };
+}
+
+async function namespacePage(
+  request: Request,
+  env: AppEnv,
+  locale: Locale,
+  session: DashboardSession,
+  namespace: string,
+): Promise<Response> {
+  const t = copy[locale];
+  const url = new URL(request.url);
+  const offset = z.coerce.number().int().min(0).catch(0).parse(url.searchParams.get("offset"));
+  const nsRow = await env.MEMORY_DB.prepare(
+    "SELECT namespace, deletion_job_id FROM user_namespaces WHERE user_id = ? AND namespace = ?",
+  )
+    .bind(session.user.id, namespace)
+    .first<{ namespace: string; deletion_job_id: string | null }>();
+  if (!nsRow) {
+    throw new AppError("NOT_FOUND", "Namespace not found", 404);
+  }
+  const data = await listNamespaceConversations(env, session.user.id, namespace, offset);
+  const rows = data.conversations.length
+    ? data.conversations
+        .map(
+          (item) =>
+            `<li><a href="/dashboard/conversations/${encodeURIComponent(item.id)}"><strong>${escapeHtml(item.title)}</strong><span>${item.updated_at ? escapeHtml(item.updated_at) : ""}</span></a></li>`,
+        )
+        .join("")
+    : `<li>${t.noMemories}</li>`;
+  const previous = offset > 0 ? Math.max(0, offset - 20) : null;
+  const next = offset + 20 < data.total ? offset + 20 : null;
+  const emptyForm = nsRow.deletion_job_id
+    ? `<p class="ns-meta"><span>${t.pending}</span></p>`
+    : `<details class="ns-empty"><summary>${t.empty}</summary><form method="post" action="/dashboard/namespaces/empty"><input type="hidden" name="csrf" value="${session.csrf}"><input type="hidden" name="namespace" value="${escapeHtml(namespace)}"><label><span>${t.emptyHelp}</span><input name="confirm_namespace" required autocomplete="off"></label><button class="button danger" type="submit">${t.empty}</button></form></details>`;
+
+  return page(
+    namespace,
+    `<p class="dash-back"><a href="/dashboard">← ${t.back}</a></p><header class="dash-head"><div><p class="eyebrow">${t.namespaces}</p><h1>${escapeHtml(namespace)}</h1></div><p>${data.total} ${t.conversations.toLowerCase()}</p></header><section class="card"><ul class="recent-list">${rows}</ul></section>${emptyForm}<nav class="pagination" aria-label="Pagination">${previous === null ? "" : `<a class="button secondary" href="?offset=${previous}">${t.previous}</a>`}${next === null ? "" : `<a class="button secondary" href="?offset=${next}">${t.next}</a>`}</nav>`,
+    locale,
+    url.pathname + url.search,
+    { session },
+  );
+}
 
 async function overview(
   request: Request,
@@ -501,7 +578,7 @@ async function overview(
   const namespaceRows = data.namespaces
     .map(
       (row) =>
-        `<li><div class="ns-meta"><strong>${escapeHtml(row.namespace)}</strong><span>${row.conversations} ${t.conversations.toLowerCase()} · ${row.messages} ${t.messages.toLowerCase()}${row.deletion_job_id ? ` · ${t.pending}` : ""}</span></div>${row.deletion_job_id ? "" : `<details class="ns-empty"><summary>${t.empty}</summary><form method="post" action="/dashboard/namespaces/empty"><input type="hidden" name="csrf" value="${session.csrf}"><input type="hidden" name="namespace" value="${escapeHtml(row.namespace)}"><label><span>${t.emptyHelp}</span><input name="confirm_namespace" required autocomplete="off"></label><button class="button danger" type="submit">${t.empty}</button></form></details>`}</li>`,
+        `<li><a class="ns-link" href="/dashboard/namespaces/${encodeURIComponent(row.namespace)}"><strong>${escapeHtml(row.namespace)}</strong><span>${row.conversations} ${t.conversations.toLowerCase()} · ${row.messages} ${t.messages.toLowerCase()}${row.deletion_job_id ? ` · ${t.pending}` : ""}</span></a>${row.deletion_job_id ? "" : `<details class="ns-empty"><summary>${t.empty}</summary><form method="post" action="/dashboard/namespaces/empty"><input type="hidden" name="csrf" value="${session.csrf}"><input type="hidden" name="namespace" value="${escapeHtml(row.namespace)}"><label><span>${t.emptyHelp}</span><input name="confirm_namespace" required autocomplete="off"></label><button class="button danger" type="submit">${t.empty}</button></form></details>`}</li>`,
     )
     .join("");
   const recent = data.recent.length
@@ -658,7 +735,7 @@ async function conversation(
   const previous = offset > 0 ? Math.max(0, offset - 20) : null;
   return page(
     result.conversation.title,
-    `<a href="/dashboard">← ${t.back}</a><header class="hero compact"><p class="eyebrow">${t.conversation}</p><h1>${escapeHtml(result.conversation.title)}</h1><p>${escapeHtml(result.conversation.namespace)} · ${result.total} ${t.messages.toLowerCase()}</p><div class="tags">${result.conversation.tags.map((tag) => `<span>${escapeHtml(tag)}</span>`).join("")}</div></header><section>${items || `<p>${t.noMemories}</p>`}</section><nav class="pagination" aria-label="Pagination">${previous === null ? "" : `<a class="button secondary" href="?offset=${previous}&revision_id=${pinned}">${t.previous}</a>`}${result.nextOffset === null ? "" : `<a class="button secondary" href="?offset=${result.nextOffset}&revision_id=${pinned}">${t.next}</a>`}</nav>`,
+    `<p class="dash-back"><a href="/dashboard">← ${t.back}</a><a href="/dashboard/namespaces/${encodeURIComponent(result.conversation.namespace)}">${escapeHtml(result.conversation.namespace)}</a></p><header class="hero compact"><p class="eyebrow">${t.conversation}</p><h1>${escapeHtml(result.conversation.title)}</h1><p>${escapeHtml(result.conversation.namespace)} · ${result.total} ${t.messages.toLowerCase()}</p><div class="tags">${result.conversation.tags.map((tag) => `<span>${escapeHtml(tag)}</span>`).join("")}</div></header><section>${items || `<p>${t.noMemories}</p>`}</section><nav class="pagination" aria-label="Pagination">${previous === null ? "" : `<a class="button secondary" href="?offset=${previous}&revision_id=${pinned}">${t.previous}</a>`}${result.nextOffset === null ? "" : `<a class="button secondary" href="?offset=${result.nextOffset}&revision_id=${pinned}">${t.next}</a>`}</nav>`,
     locale,
     url.pathname + url.search,
     { session },
@@ -780,6 +857,20 @@ export async function handleDashboardRequest(request: Request, env: AppEnv): Pro
       }
       return await conversation(request, env, locale, session, id);
     }
+    if (url.pathname.startsWith("/dashboard/namespaces/") && request.method === "GET") {
+      const encoded = url.pathname.slice("/dashboard/namespaces/".length);
+      if (!encoded) throw new AppError("NOT_FOUND", "Route not found", 404);
+      let namespace: string;
+      try {
+        namespace = decodeURIComponent(encoded);
+      } catch {
+        throw new AppError("NOT_FOUND", "Route not found", 404);
+      }
+      if (namespace.length < 1 || namespace.length > 100) {
+        throw new AppError("NOT_FOUND", "Route not found", 404);
+      }
+      return await namespacePage(request, env, locale, session, namespace);
+    }
     if (url.pathname === "/dashboard" && request.method === "GET") {
       return await overview(request, env, locale, session);
     }
@@ -835,4 +926,4 @@ export async function handleDashboardRequest(request: Request, env: AppEnv): Pro
 }
 
 const DASHBOARD_CSS = `
-.dashboard-nav{min-height:76px;border-bottom:1px solid var(--line);display:flex;align-items:center;justify-content:space-between;gap:24px;padding:14px max(20px,calc((100vw - 1160px)/2))}.dashboard-nav>div{display:flex;align-items:center;gap:18px;flex-wrap:wrap}.dashboard-nav a,.link-button{font-size:13px;text-decoration:none}.dashboard-nav form{margin:0}.link-button{border:0;background:none;color:inherit;padding:8px}.language{display:flex;gap:6px;font:10px var(--mono)}.language a[aria-current]{color:var(--accent);font-weight:600}.dashboard-shell{width:min(1160px,calc(100% - 40px));margin:0 auto;padding:28px 0 48px}.dash-head{display:flex;align-items:baseline;justify-content:space-between;gap:4px 16px;flex-wrap:wrap;margin-bottom:16px}.dash-head h1{font-size:clamp(24px,3.4vw,32px);margin:0}.dash-head p{margin:4px 0 0;font-size:13px}.dash-head .eyebrow{margin:0 0 6px}.hero{max-width:760px;margin-bottom:40px}.hero.compact{margin-top:34px}.hero h1{font-size:clamp(38px,7vw,68px);margin:0}.hero p{font-size:17px}.auth-card{width:min(100%,520px);margin:8vh auto 0;padding:36px;border:1px solid var(--line);background:var(--surface);border-radius:8px}.auth-card h1{font-size:clamp(30px,7vw,48px);margin:0}.auth-card form,.card form{display:grid;gap:14px;margin-top:28px}label{display:grid;gap:8px;font-size:13px}input{min-width:0;width:100%;min-height:46px;padding:10px 12px;border:1px solid #a8ada0;border-radius:5px;background:var(--surface);color:var(--ink)}.stats{display:grid;grid-template-columns:repeat(3,1fr);gap:1px;background:var(--line);border:1px solid var(--line);margin-bottom:16px}.stats article{display:grid;gap:2px;padding:12px 16px;background:var(--surface)}.stats span{font:10px var(--mono);color:var(--muted);text-transform:uppercase}.stats strong{font-size:22px;font-weight:500}.dashboard-grid{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1.4fr);gap:28px;margin-bottom:28px}.dash-main{display:grid;grid-template-columns:300px minmax(0,1fr);gap:16px;margin-bottom:16px}.dash-side,.dash-content{display:grid;gap:16px;align-content:start;min-width:0}.dash-main .card{padding:16px 18px}.dash-main .card h2{margin:0 0 10px;font-size:15px}.dash-main .card form{gap:10px;margin-top:12px}.dash-main input{min-height:38px;padding:8px 10px}.dash-main .section-heading{gap:12px}.dash-main .section-heading h2{margin:0}.card,.map-panel{padding:28px;border:1px solid var(--line);background:var(--surface);border-radius:7px}.card h2{margin-top:0}.section-heading{display:flex;align-items:center;justify-content:space-between;gap:20px}.recent-list,.namespace-list,.tree-list{list-style:none;padding:0;margin:0}.recent-list li+li,.namespace-list>li+li{border-top:1px solid var(--line)}.recent-list a{display:flex;align-items:baseline;justify-content:space-between;gap:10px;padding:8px 0;text-decoration:none;font-size:13px}.recent-list a strong{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;min-width:0}.recent-list a span{flex-shrink:0}.recent-list span,.namespace-list span,.tree-list span{font-size:12px;color:var(--muted)}.namespace-list>li{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:10px 0}.namespace-list>li>div{display:grid;align-content:start;min-width:0}.namespace-list>li strong{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.ns-meta{min-width:0}.ns-meta span{display:block;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.ns-empty{flex-shrink:0}.ns-empty summary{cursor:pointer;font-size:12px;text-decoration:underline;text-underline-offset:3px}.ns-empty form{display:grid;gap:10px;margin-top:10px;min-width:min(260px,60vw)}.namespace-list form{margin:0}.namespace-list label span{font-size:11px}.button.danger{background:#8d322f;border-color:#8d322f}.danger-zone{margin-top:0;border-color:#d7b4b2}.danger-zone details summary{cursor:pointer;font-size:13px}.danger-zone form{display:grid;gap:10px;margin-top:12px}.notice{display:grid;gap:12px;padding:16px 18px;margin-bottom:16px;border:1px solid #c9a95c;background:#fff7dc}.notice form{margin:0}.search-form{display:grid;gap:10px;margin-bottom:20px}.search-form>div{display:flex;gap:10px}.map-panel{overflow:hidden;margin-bottom:28px}.map-toolbar{display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap;margin:0 0 12px}.map-actions{display:flex;align-items:center;gap:8px;flex-wrap:wrap}.chip-button{min-height:32px;padding:6px 12px;border:1px solid var(--line);border-radius:999px;background:var(--surface);color:var(--ink);font:11px var(--mono);transition:background .2s,color .2s}.chip-button:hover{background:var(--tint);border-color:var(--accent);color:var(--accent)}.map-viewport{position:relative}.map-viewport>p{font:11px var(--mono);margin:0 0 10px}.mindmap-canvas{display:block;width:100%;height:620px;background:radial-gradient(circle at 20% 10%,#fbfaf6,var(--canvas) 62%);border:1px solid var(--line);border-radius:6px;outline-offset:2px;touch-action:none}.mindmap-canvas canvas{cursor:grab}.map-tooltip{position:absolute;z-index:2;display:grid;gap:2px;max-width:248px;padding:10px 12px;border:1px solid var(--line);border-radius:6px;background:var(--surface);box-shadow:0 12px 28px -18px rgba(40,42,37,.55);pointer-events:none;font:11px/1.5 var(--mono);color:var(--muted)}.map-tooltip strong{font:500 12px/1.4 Outfit,sans-serif;color:var(--ink)}.tree-list ul{margin:8px 0 16px}.tree-list summary{cursor:pointer;font-weight:500}.tree-list a{display:inline-block;margin-right:12px}.message{padding:24px 0;border-top:1px solid var(--line)}.message header{display:flex;justify-content:space-between;gap:20px;font:11px var(--mono);color:var(--muted)}.message p{white-space:pre-wrap;color:var(--ink)}pre{overflow:auto;padding:16px;background:var(--canvas);font:11px/1.6 var(--mono)}.tags{display:flex;gap:8px;flex-wrap:wrap}.tags span{padding:4px 8px;background:var(--tint);font:10px var(--mono)}.pagination{display:flex;justify-content:space-between;gap:20px;margin-top:32px}@media(max-width:720px){.dashboard-nav{align-items:flex-start;flex-wrap:wrap}.dashboard-nav>div{width:100%;justify-content:flex-start}.dashboard-shell{width:min(100% - 24px,1160px);padding-top:24px}.stats{grid-template-columns:repeat(3,1fr)}.stats article{padding:10px 12px}.dash-head h1{font-size:26px}.dash-main{grid-template-columns:1fr}.dashboard-grid{grid-template-columns:1fr}.namespace-list>li{flex-wrap:wrap}.search-form>div{display:grid}.card,.map-panel{padding:18px}.mindmap-canvas{height:460px}.map-tooltip{max-width:none}.message header{display:grid;gap:4px}}`;
+.dashboard-nav{position:sticky;top:0;z-index:12;background:var(--canvas);min-height:76px;border-bottom:1px solid var(--line);display:flex;align-items:center;justify-content:space-between;gap:24px;padding:14px max(20px,calc((100vw - 1160px)/2))}.dashboard-nav>div,.nav-panel{display:flex;align-items:center;gap:18px;flex-wrap:wrap}.dashboard-nav a,.link-button{font-size:13px;text-decoration:none}.dashboard-nav form,.dashboard-menu form{margin:0}.dashboard-menu{display:contents;margin:0}summary.nav-toggle{display:none}.link-button{border:0;background:none;color:inherit;padding:8px;cursor:pointer}.hamburger{display:block;width:18px;height:12px;position:relative;background:linear-gradient(var(--ink),var(--ink)) 0 5px/18px 2px no-repeat}.hamburger::before,.hamburger::after{content:"";position:absolute;left:0;width:18px;height:2px;background:var(--ink)}.hamburger::before{top:0}.hamburger::after{top:10px}.language{display:flex;gap:6px;font:10px var(--mono)}.language a[aria-current]{color:var(--accent);font-weight:600}.dashboard-shell{width:min(1160px,calc(100% - 40px));margin:0 auto;padding:28px 0 48px}.dash-head{display:flex;align-items:baseline;justify-content:space-between;gap:4px 16px;flex-wrap:wrap;margin-bottom:16px}.dash-head h1{font-size:clamp(24px,3.4vw,32px);margin:0}.dash-head p{margin:4px 0 0;font-size:13px}.dash-head .eyebrow{margin:0 0 6px}.hero{max-width:760px;margin-bottom:40px}.hero.compact{margin-top:34px}.hero h1{font-size:clamp(38px,7vw,68px);margin:0}.hero p{font-size:17px}.auth-card{width:min(100%,520px);margin:8vh auto 0;padding:36px;border:1px solid var(--line);background:var(--surface);border-radius:8px}.auth-card h1{font-size:clamp(30px,7vw,48px);margin:0}.auth-card form,.card form{display:grid;gap:14px;margin-top:28px}label{display:grid;gap:8px;font-size:13px}input{min-width:0;width:100%;min-height:46px;padding:10px 12px;border:1px solid #a8ada0;border-radius:5px;background:var(--surface);color:var(--ink)}.stats{display:grid;grid-template-columns:repeat(3,1fr);gap:1px;background:var(--line);border:1px solid var(--line);margin-bottom:16px}.stats article{display:grid;gap:2px;padding:12px 16px;background:var(--surface)}.stats span{font:10px var(--mono);color:var(--muted);text-transform:uppercase}.stats strong{font-size:22px;font-weight:500}.dashboard-grid{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1.4fr);gap:28px;margin-bottom:28px}.dash-main{display:grid;grid-template-columns:300px minmax(0,1fr);gap:16px;margin-bottom:16px}.dash-side,.dash-content{display:grid;gap:16px;align-content:start;min-width:0}.dash-main .card{padding:16px 18px}.dash-main .card h2{margin:0 0 10px;font-size:15px}.dash-main .card form{gap:10px;margin-top:12px}.dash-main input{min-height:38px;padding:8px 10px}.dash-main .section-heading{gap:12px}.dash-main .section-heading h2{margin:0}.card,.map-panel{padding:28px;border:1px solid var(--line);background:var(--surface);border-radius:7px;min-width:0}.card h2{margin-top:0}.section-heading{display:flex;align-items:center;justify-content:space-between;gap:20px;min-width:0}.section-heading h2{min-width:0}.recent-list,.namespace-list,.tree-list{list-style:none;padding:0;margin:0;min-width:0}.recent-list li,.namespace-list>li{min-width:0}.recent-list li+li,.namespace-list>li+li{border-top:1px solid var(--line)}.recent-list a{display:flex;align-items:baseline;justify-content:space-between;gap:10px;padding:8px 0;text-decoration:none;font-size:13px}.recent-list a strong{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;min-width:0}.recent-list a span{flex-shrink:0}.recent-list span,.namespace-list span,.tree-list span{font-size:12px;color:var(--muted)}.namespace-list>li{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:10px 0}.namespace-list>li>div{display:grid;align-content:start;min-width:0}.namespace-list>li strong{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.ns-meta{min-width:0}.ns-meta span{display:block;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.ns-link{display:grid;min-width:0;min-height:44px;align-content:center;text-decoration:none;color:inherit}.ns-link strong{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.ns-link span{display:block;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:12px;color:var(--muted)}.dash-back{display:flex;flex-wrap:wrap;gap:12px 20px;margin-bottom:8px;font-size:13px}.dash-back a{text-decoration:none;font-size:13px}.ns-empty{flex-shrink:0}.ns-empty summary{cursor:pointer;font-size:12px;text-decoration:underline;text-underline-offset:3px}.ns-empty form{display:grid;gap:10px;margin-top:10px;min-width:min(260px,60vw)}.namespace-list form{margin:0}.namespace-list label span{font-size:11px}.button.danger{background:#8d322f;border-color:#8d322f}.danger-zone{margin-top:0;border-color:#d7b4b2}.danger-zone details summary{cursor:pointer;font-size:13px}.danger-zone form{display:grid;gap:10px;margin-top:12px}.notice{display:grid;gap:12px;padding:16px 18px;margin-bottom:16px;border:1px solid #c9a95c;background:#fff7dc}.notice form{margin:0}.search-form{display:grid;gap:10px;margin-bottom:20px}.search-form>div{display:flex;gap:10px}.map-panel{overflow:hidden;margin-bottom:28px}.map-toolbar{display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap;margin:0 0 12px}.map-actions{display:flex;align-items:center;gap:8px;flex-wrap:wrap}.chip-button{min-height:32px;padding:6px 12px;border:1px solid var(--line);border-radius:999px;background:var(--surface);color:var(--ink);font:11px var(--mono);transition:background .2s,color .2s}.chip-button:hover{background:var(--tint);border-color:var(--accent);color:var(--accent)}.map-viewport{position:relative}.map-viewport>p{font:11px var(--mono);margin:0 0 10px}.mindmap-canvas{display:block;width:100%;height:620px;background:radial-gradient(circle at 20% 10%,#fbfaf6,var(--canvas) 62%);border:1px solid var(--line);border-radius:6px;outline-offset:2px;touch-action:none}.mindmap-canvas canvas{cursor:grab}.map-tooltip{position:absolute;z-index:2;display:grid;gap:2px;max-width:248px;padding:10px 12px;border:1px solid var(--line);border-radius:6px;background:var(--surface);box-shadow:0 12px 28px -18px rgba(40,42,37,.55);pointer-events:none;font:11px/1.5 var(--mono);color:var(--muted)}.map-tooltip strong{font:500 12px/1.4 Outfit,sans-serif;color:var(--ink)}.tree-list ul{margin:8px 0 16px}.tree-list summary{cursor:pointer;font-weight:500}.tree-list a{display:inline-block;margin-right:12px}.message{padding:24px 0;border-top:1px solid var(--line)}.message header{display:flex;justify-content:space-between;gap:20px;font:11px var(--mono);color:var(--muted)}.message p{white-space:pre-wrap;color:var(--ink)}pre{overflow:auto;padding:16px;background:var(--canvas);font:11px/1.6 var(--mono)}.tags{display:flex;gap:8px;flex-wrap:wrap}.tags span{padding:4px 8px;background:var(--tint);font:10px var(--mono)}.pagination{display:flex;justify-content:space-between;gap:20px;margin-top:32px}@media(max-width:720px){.dashboard-menu{display:block}summary.nav-toggle{display:grid;place-items:center;margin-left:auto;min-width:44px;min-height:44px;border:1px solid var(--line);border-radius:5px;background:var(--surface);list-style:none;cursor:pointer;position:relative;z-index:13}summary.nav-toggle::-webkit-details-marker{display:none}.nav-panel{display:none}.dashboard-menu[open] .nav-panel{position:fixed;top:0;right:0;bottom:0;width:min(320px,86vw);z-index:11;display:flex;flex-direction:column;align-items:stretch;gap:4px;padding:76px 20px 24px;background:var(--surface);border-left:1px solid var(--line);box-shadow:-4px 0 24px rgba(40,42,37,.06);animation:drawerSlide .25s var(--ease) forwards}@keyframes drawerSlide{from{transform:translateX(100%)}to{transform:translateX(0)}}.dashboard-menu[open]::before{content:"";position:fixed;inset:0;z-index:10;background:rgba(40,42,37,.4);animation:overlayFade .25s var(--ease) forwards}@keyframes overlayFade{from{opacity:0}to{opacity:1}}.dashboard-menu[open] .nav-panel a,.dashboard-menu[open] .nav-panel .link-button{min-height:44px;display:flex;align-items:center;font-size:16px;padding:8px 12px;border-radius:4px}.dashboard-menu[open] .nav-panel .language{padding:8px 12px;font-size:12px}.recent-list a{display:grid;gap:4px;padding:10px 0;min-width:0;min-height:44px}.recent-list a strong{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;min-width:0}.recent-list a span{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:12px;color:var(--muted);min-width:0}.namespace-list>li{display:flex;flex-wrap:wrap;align-items:center;justify-content:space-between;gap:8px 12px;min-width:0}.ns-link{flex:1 1 180px;min-width:0}.ns-empty{min-width:0}.ns-empty[open]{width:100%}.ns-empty form{width:100%;min-width:0}.dash-head{flex-direction:column;align-items:flex-start}.dashboard-shell{width:min(100% - 24px,1160px);padding-top:24px}.stats{grid-template-columns:repeat(3,1fr)}.stats article{padding:10px 12px}.dash-head h1{font-size:26px}.dash-main{grid-template-columns:minmax(0,1fr)}.dashboard-grid{grid-template-columns:minmax(0,1fr)}.search-form>div{display:grid}.card,.map-panel{padding:18px}.mindmap-canvas{height:460px}.map-tooltip{max-width:none}.message header{display:grid;gap:4px}}`;

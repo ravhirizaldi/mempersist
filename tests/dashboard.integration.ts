@@ -507,3 +507,276 @@ describe("asynchronous destructive jobs", () => {
     expect(await test.env.MEMORY_BUCKET.head(rawKey)).toBeNull();
   });
 });
+
+describe("dashboard namespace browse and mobile nav", () => {
+  it("renders hamburger chrome for signed-in session and omits it on login", async () => {
+    const test = dashboardEnv();
+    const { cookie } = await signIn(test.env, test.sent, "nav-user@example.com");
+
+    const signedIn = await handleDashboardRequest(
+      new Request("https://mempersist.codifiedtech.id/dashboard", {
+        headers: { cookie },
+      }),
+      test.env,
+    );
+    expect(signedIn.status).toBe(200);
+    const signedInHtml = await signedIn.text();
+    expect(signedInHtml).toContain('class="dashboard-menu"');
+    expect(signedInHtml).toContain('class="nav-toggle"');
+    expect(signedInHtml).toContain('class="hamburger"');
+    expect(signedInHtml).toContain(">Menu<");
+
+    const login = await handleDashboardRequest(
+      new Request("https://mempersist.codifiedtech.id/login"),
+      test.env,
+    );
+    expect(login.status).toBe(200);
+    const loginHtml = await login.text();
+    expect(loginHtml).not.toContain('class="dashboard-menu"');
+    expect(loginHtml).not.toContain('class="nav-toggle"');
+  });
+
+  it("links namespaces on overview without putting hrefs on empty form", async () => {
+    const test = dashboardEnv();
+    const user = await getOrCreateUser(test.env, "overview-links@example.com");
+    const { cookie } = await signIn(test.env, test.sent, user.email);
+    await grantNamespace(test.env, user.id, "personal");
+    await grantNamespace(test.env, user.id, "work");
+
+    const c1 = await createMcpConversation({
+      title: "personal 1",
+      namespace: "personal",
+      messages: [{ role: "user", content: "hello 1" }],
+    });
+    const c2 = await createMcpConversation({
+      title: "personal 2",
+      namespace: "personal",
+      messages: [{ role: "user", content: "hello 2" }],
+    });
+    const c3 = await createMcpConversation({
+      title: "work 1",
+      namespace: "work",
+      messages: [{ role: "user", content: "work task" }],
+    });
+    await writeCanonicalConversation(test.env, c1, null, null, user.id);
+    await writeCanonicalConversation(test.env, c2, null, null, user.id);
+    await writeCanonicalConversation(test.env, c3, null, null, user.id);
+
+    const overview = await handleDashboardRequest(
+      new Request("https://mempersist.codifiedtech.id/dashboard", {
+        headers: { cookie },
+      }),
+      test.env,
+    );
+    expect(overview.status).toBe(200);
+    const html = await overview.text();
+    expect(html).toContain('href="/dashboard/namespaces/personal"');
+    expect(html).toContain('href="/dashboard/namespaces/work"');
+    expect(html).toContain('action="/dashboard/namespaces/empty"');
+    expect(html).not.toMatch(/<form[^>]+href="/);
+  });
+
+  it("lists only owned conversations in a namespace", async () => {
+    const test = dashboardEnv();
+    const userA = await getOrCreateUser(test.env, "user-a@example.com");
+    const userB = await getOrCreateUser(test.env, "user-b@example.com");
+    const { cookie: cookieA } = await signIn(test.env, test.sent, userA.email);
+    await grantNamespace(test.env, userA.id, "shared-ns");
+    await grantNamespace(test.env, userB.id, "shared-ns");
+
+    const own = await createMcpConversation({
+      title: "own memory title",
+      namespace: "shared-ns",
+      messages: [{ role: "user", content: "secret A" }],
+    });
+    const foreign = await createMcpConversation({
+      title: "foreign memory title",
+      namespace: "shared-ns",
+      messages: [{ role: "user", content: "secret B" }],
+    });
+    await writeCanonicalConversation(test.env, own, null, null, userA.id);
+    await writeCanonicalConversation(test.env, foreign, null, null, userB.id);
+
+    const res = await handleDashboardRequest(
+      new Request("https://mempersist.codifiedtech.id/dashboard/namespaces/shared-ns", {
+        headers: { cookie: cookieA },
+      }),
+      test.env,
+    );
+    expect(res.status).toBe(200);
+    const html = await res.text();
+    expect(html).toContain("own memory title");
+    expect(html).not.toContain("foreign memory title");
+    expect(html).not.toContain(foreign.id);
+  });
+
+  it("returns 404 for missing or foreign namespace", async () => {
+    const test = dashboardEnv();
+    const userA = await getOrCreateUser(test.env, "user-a404@example.com");
+    const userB = await getOrCreateUser(test.env, "user-b404@example.com");
+    const { cookie: cookieA } = await signIn(test.env, test.sent, userA.email);
+
+    await grantNamespace(test.env, userB.id, "b-private-ns");
+
+    const missing = await handleDashboardRequest(
+      new Request("https://mempersist.codifiedtech.id/dashboard/namespaces/not-a-namespace", {
+        headers: { cookie: cookieA },
+      }),
+      test.env,
+    );
+    expect(missing.status).toBe(404);
+
+    const foreign = await handleDashboardRequest(
+      new Request(
+        `https://mempersist.codifiedtech.id/dashboard/namespaces/${encodeURIComponent("b-private-ns")}`,
+        {
+          headers: { cookie: cookieA },
+        },
+      ),
+      test.env,
+    );
+    expect(foreign.status).toBe(404);
+  });
+
+  it("supports namespaces with slashes and encodes overview hrefs", async () => {
+    const test = dashboardEnv();
+    const user = await getOrCreateUser(test.env, "slash-ns@example.com");
+    const { cookie } = await signIn(test.env, test.sent, user.email);
+
+    await grantNamespace(test.env, user.id, "project/mempersist");
+    const conv = await createMcpConversation({
+      title: "project memory",
+      namespace: "project/mempersist",
+      messages: [{ role: "user", content: "nested slash content" }],
+    });
+    await writeCanonicalConversation(test.env, conv, null, null, user.id);
+
+    const overview = await handleDashboardRequest(
+      new Request("https://mempersist.codifiedtech.id/dashboard", {
+        headers: { cookie },
+      }),
+      test.env,
+    );
+    const overviewHtml = await overview.text();
+    expect(overviewHtml).toContain('href="/dashboard/namespaces/project%2Fmempersist"');
+
+    const nsPage = await handleDashboardRequest(
+      new Request(
+        `https://mempersist.codifiedtech.id/dashboard/namespaces/${encodeURIComponent("project/mempersist")}`,
+        {
+          headers: { cookie },
+        },
+      ),
+      test.env,
+    );
+    expect(nsPage.status).toBe(200);
+    const nsHtml = await nsPage.text();
+    expect(nsHtml).toContain("project memory");
+  });
+
+  it("renders empty owned namespace with empty state and empty-namespace form", async () => {
+    const test = dashboardEnv();
+    const user = await getOrCreateUser(test.env, "empty-ns@example.com");
+    const { cookie } = await signIn(test.env, test.sent, user.email);
+
+    await grantNamespace(test.env, user.id, "empty-target");
+
+    const res = await handleDashboardRequest(
+      new Request("https://mempersist.codifiedtech.id/dashboard/namespaces/empty-target", {
+        headers: { cookie },
+      }),
+      test.env,
+    );
+    expect(res.status).toBe(200);
+    const html = await res.text();
+    expect(html).toContain("No memories found.");
+    expect(html).toContain('action="/dashboard/namespaces/empty"');
+    expect(html).toContain('name="confirm_namespace"');
+  });
+
+  it("paginates namespace conversations correctly", async () => {
+    const test = dashboardEnv();
+    const user = await getOrCreateUser(test.env, "paginate-ns@example.com");
+    const { cookie } = await signIn(test.env, test.sent, user.email);
+
+    await grantNamespace(test.env, user.id, "bulk-ns");
+    for (let i = 1; i <= 21; i += 1) {
+      const conv = await createMcpConversation({
+        title: `item ${String(i).padStart(2, "0")}`,
+        namespace: "bulk-ns",
+        messages: [{ role: "user", content: `content ${i}` }],
+      });
+      await writeCanonicalConversation(test.env, conv, null, null, user.id);
+    }
+
+    const page1 = await handleDashboardRequest(
+      new Request("https://mempersist.codifiedtech.id/dashboard/namespaces/bulk-ns?offset=0", {
+        headers: { cookie },
+      }),
+      test.env,
+    );
+    expect(page1.status).toBe(200);
+    const html1 = await page1.text();
+    expect(html1).toContain("Next");
+    expect(html1).not.toContain("Previous");
+
+    const page2 = await handleDashboardRequest(
+      new Request("https://mempersist.codifiedtech.id/dashboard/namespaces/bulk-ns?offset=20", {
+        headers: { cookie },
+      }),
+      test.env,
+    );
+    expect(page2.status).toBe(200);
+    const html2 = await page2.text();
+    expect(html2).toContain("Previous");
+  });
+
+  it("includes back links to dashboard and namespace on conversation page", async () => {
+    const test = dashboardEnv();
+    const user = await getOrCreateUser(test.env, "back-links@example.com");
+    const { cookie } = await signIn(test.env, test.sent, user.email);
+
+    const conv = await createMcpConversation({
+      title: "my conversation",
+      namespace: "docs-ns",
+      messages: [{ role: "user", content: "check back link" }],
+    });
+    await writeCanonicalConversation(test.env, conv, null, null, user.id);
+
+    const res = await handleDashboardRequest(
+      new Request(`https://mempersist.codifiedtech.id/dashboard/conversations/${conv.id}`, {
+        headers: { cookie },
+      }),
+      test.env,
+    );
+    expect(res.status).toBe(200);
+    const html = await res.text();
+    expect(html).toContain('href="/dashboard"');
+    expect(html).toContain('href="/dashboard/namespaces/docs-ns"');
+  });
+
+  it("escapes malicious script tags in titles on namespace page", async () => {
+    const test = dashboardEnv();
+    const user = await getOrCreateUser(test.env, "xss-ns@example.com");
+    const { cookie } = await signIn(test.env, test.sent, user.email);
+    await grantNamespace(test.env, user.id, "safe-ns");
+
+    const conv = await createMcpConversation({
+      title: "<script>alert('pwned')</script>",
+      namespace: "safe-ns",
+      messages: [{ role: "user", content: "safe content" }],
+    });
+    await writeCanonicalConversation(test.env, conv, null, null, user.id);
+
+    const res = await handleDashboardRequest(
+      new Request("https://mempersist.codifiedtech.id/dashboard/namespaces/safe-ns", {
+        headers: { cookie },
+      }),
+      test.env,
+    );
+    expect(res.status).toBe(200);
+    const html = await res.text();
+    expect(html).toContain("&lt;script&gt;alert(&#39;pwned&#39;)&lt;/script&gt;");
+    expect(html).not.toContain("<script>alert('pwned')</script>");
+  });
+});

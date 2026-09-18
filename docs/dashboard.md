@@ -7,8 +7,12 @@ only in the `Secure`, `HttpOnly`, `SameSite=Lax`, host-only cookie.
 
 The server-rendered `/dashboard` shows profile and archive totals in a compact two-column
 layout: profile and the collapsed danger zone on the side, namespaces and recent
-conversations in the main column. Per-namespace emptying and account deletion stay behind
-collapsed native disclosures so the overview fits roughly one viewport. `/dashboard/mindmap` is an
+conversations in the main column. Namespaces link to `/dashboard/namespaces/:namespace`
+to browse all conversations within that namespace ordered by recency, with pagination and
+namespace emptying controls. Conversation pages include back links to both the overview
+and their parent namespace. Per-namespace emptying and account deletion stay behind
+collapsed native disclosures so the overview fits roughly one viewport. Session pages include
+a responsive CSS-only hamburger menu under 720px. `/dashboard/mindmap` is an
 organizational account → namespace → conversation → tag view, not a semantic or AI-generated map.
 Its interactive view is Cytoscape.js, bundled locally and inlined behind the existing script nonce,
 with an accessible nested-list equivalent that carries the same content. Conversation pages pin

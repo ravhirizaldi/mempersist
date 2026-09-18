@@ -64,8 +64,10 @@ describe("session survives landing page visit (repro)", () => {
     // And the login page the homepage nav points at.
     const loginPage = await SELF.fetch("https://mempersist.codifiedtech.id/login", {
       headers: { cookie },
+      redirect: "manual",
     });
     console.log("login page status while signed in:", loginPage.status);
-    expect(loginPage.status).toBe(200);
+    expect(loginPage.status).toBe(303);
+    expect(loginPage.headers.get("location")).toBe("/dashboard");
   });
 });
