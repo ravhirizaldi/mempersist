@@ -151,6 +151,14 @@ function escapeHtml(value: string): string {
       ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[character]!,
   );
 }
+function renderTagLinks(tags: string[]): string {
+  return tags
+    .map(
+      (tag) =>
+        `<a href="/dashboard/mindmap?q=${encodeURIComponent(tag)}"><span class="truncate">${escapeHtml(tag)}</span></a>`,
+    )
+    .join("");
+}
 
 function randomToken(): string {
   const bytes = crypto.getRandomValues(new Uint8Array(TOKEN_BYTES));
@@ -217,6 +225,7 @@ function htmlHeaders(locale: Locale, value: string): HeadersInit {
     Vary: "Accept-Language, Cookie",
   };
 }
+const DASHBOARD_MENU_SCRIPT = `(()=>{const n=document.querySelector('.dashboard-nav');if(!n)return;const m=n.querySelector('.dashboard-menu'),t=m?.querySelector('.nav-toggle'),p=m?.querySelector('.nav-panel');if(!m||!t||!p)return;const s=document.createElement('div');s.className='nav-scrim';s.hidden=true;s.setAttribute('aria-hidden','true');n.appendChild(s);const f='a[href],button:not([disabled]),[tabindex]:not([tabindex="-1"])';t.setAttribute('aria-expanded','false');function sync(){if(m.open){s.hidden=false;t.setAttribute('aria-expanded','true');document.body.style.overflow='hidden';window.requestAnimationFrame(()=>{s.classList.add('open');const first=p.querySelector(f);if(first)first.focus();});}else{s.classList.remove('open');t.setAttribute('aria-expanded','false');document.body.style.overflow='';window.setTimeout(()=>{if(!m.open)s.hidden=true;},400);}}m.addEventListener('toggle',sync);function closeMenu(restore=true){if(!m.open)return;m.open=false;sync();if(restore)t.focus();}s.addEventListener('click',()=>closeMenu(true));p.addEventListener('click',e=>{if(e.target.closest('a,button'))closeMenu(true);});document.addEventListener('keydown',e=>{if(e.key==='Escape'&&m.open)closeMenu(true);});m.addEventListener('keydown',e=>{if(e.key!=='Tab'||!m.open)return;const items=[...p.querySelectorAll(f)];if(!items.length)return;const a=document.activeElement;if(e.shiftKey){if(a===items[0]){t.focus();e.preventDefault();}else if(a===t){items[items.length-1].focus();e.preventDefault();}else if(!p.contains(a)){items[items.length-1].focus();e.preventDefault();}}else{if(a===items[items.length-1]){t.focus();e.preventDefault();}else if(a===t){items[0].focus();e.preventDefault();}else if(!p.contains(a)){items[0].focus();e.preventDefault();}}});window.matchMedia('(min-width: 769px)').addEventListener('change',e=>{if(e.matches)closeMenu(false);});})();`;
 
 function page(
   title: string,
@@ -235,10 +244,10 @@ function page(
     pathname.startsWith("/dashboard/conversations/");
   const mapCurrent = pathname === "/dashboard/mindmap";
   const nav = options.session
-    ? `<nav class="dashboard-nav" aria-label="${messages(locale).shared.mainNav}">${brand(messages(locale).shared.homeLabel)}<details class="dashboard-menu"><summary class="nav-toggle"><span class="hamburger" aria-hidden="true"></span><span class="sr-only">${messages(locale).shared.menu}</span></summary><div class="nav-panel"><a href="/dashboard"${dashboardCurrent ? ' aria-current="page"' : ""}>${t.dashboard}</a><a href="/dashboard/mindmap"${mapCurrent ? ' aria-current="page"' : ""}>${t.memoryMap}</a><a href="/dashboard/export">${t.export}</a>${language}<form method="post" action="/logout"><input type="hidden" name="csrf" value="${options.session.csrf}"><button class="link-button" type="submit">${t.logout}</button></form></div></details></nav>`
+    ? `<nav class="dashboard-nav" aria-label="${messages(locale).shared.mainNav}">${brand(messages(locale).shared.homeLabel)}<details class="dashboard-menu"><summary class="nav-toggle" aria-haspopup="true"><span class="hamburger" aria-hidden="true"></span><span class="sr-only">${messages(locale).shared.menu}</span></summary><div class="nav-panel"><a href="/dashboard"${dashboardCurrent ? ' aria-current="page"' : ""}>${t.dashboard}</a><a href="/dashboard/mindmap"${mapCurrent ? ' aria-current="page"' : ""}>${t.memoryMap}</a><a href="/dashboard/export">${t.export}</a>${language}<form method="post" action="/logout"><input type="hidden" name="csrf" value="${options.session.csrf}"><button class="link-button" type="submit">${t.logout}</button></form></div></details></nav>`
     : `<nav class="dashboard-nav">${brand(messages(locale).shared.homeLabel)}<div>${language}</div></nav>`;
   return new Response(
-    `<!doctype html><html lang="${locale}"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>${escapeHtml(title)} · MemPersist</title>${FAVICON}<link rel="preconnect" href="https://fonts.googleapis.com"><link rel="preconnect" href="https://fonts.gstatic.com" crossorigin><link href="https://fonts.googleapis.com/css2?family=Outfit:wght@400;500;600&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet"><style nonce="${n}">${BASE_CSS}${DASHBOARD_CSS}</style></head><body><a class="skip-link" href="#main">${messages(locale).shared.skip}</a>${nav}<main id="main" class="dashboard-shell" tabindex="-1">${body}</main>${options.script ? `<script nonce="${n}">${options.script}</script>` : ""}</body></html>`,
+    `<!doctype html><html lang="${locale}"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>${escapeHtml(title)} · MemPersist</title>${FAVICON}<link rel="preconnect" href="https://fonts.googleapis.com"><link rel="preconnect" href="https://fonts.gstatic.com" crossorigin><link href="https://fonts.googleapis.com/css2?family=Outfit:wght@400;500;600&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet"><style nonce="${n}">${BASE_CSS}${DASHBOARD_CSS}</style></head><body><a class="skip-link" href="#main">${messages(locale).shared.skip}</a>${nav}<main id="main" class="dashboard-shell" tabindex="-1">${body}</main>${options.session ? `<script nonce="${n}">${DASHBOARD_MENU_SCRIPT}</script>` : ""}${options.script ? `<script nonce="${n}">${options.script}</script>` : ""}</body></html>`,
     {
       headers: htmlHeaders(locale, n),
       ...(options.status === undefined ? {} : { status: options.status }),
@@ -396,7 +405,7 @@ async function login(request: Request, env: AppEnv, locale: Locale): Promise<Res
     if (await readSession(request, env)) return redirect(returnTo);
     return page(
       t.loginTitle,
-      `<section class="auth-card"><p class="eyebrow">PASSWORDLESS</p><h1>${t.loginTitle}</h1><p>${t.loginBody}</p><form method="post" action="/login"><input type="hidden" name="return_to" value="${escapeHtml(returnTo)}"><label for="email">${t.email}</label><input id="email" name="email" type="email" required maxlength="320" autocomplete="email"><button class="button" type="submit">${t.sendLink} <span aria-hidden="true">↗</span></button></form></section>`,
+      `<section class="auth-card"><div class="auth-header"><span class="dash-badge">PASSWORDLESS</span><h1>${t.loginTitle}</h1><p>${t.loginBody}</p></div><form method="post" action="/login"><input type="hidden" name="return_to" value="${escapeHtml(returnTo)}"><label for="email"><span>${t.email}</span><input id="email" name="email" type="email" required maxlength="320" autocomplete="email" placeholder="name@domain.com"></label><button class="button" type="submit">${t.sendLink} <span aria-hidden="true">↗</span></button></form></section>`,
       locale,
       `/login?return_to=${encodeURIComponent(returnTo)}`,
     );
@@ -434,7 +443,7 @@ async function login(request: Request, env: AppEnv, locale: Locale): Promise<Res
   }
   return page(
     t.checkEmail,
-    `<section class="auth-card"><p class="eyebrow">${t.checkEmail}</p><h1>${t.checkEmail}</h1><p>${t.linkSent}</p><a class="button secondary" href="/">${messages(locale).oauth.back}</a></section>`,
+    `<section class="auth-card"><div class="auth-header"><span class="dash-badge">${t.checkEmail}</span><h1>${t.checkEmail}</h1><p>${t.linkSent}</p></div><div class="auth-actions"><a class="button secondary" href="/">${messages(locale).oauth.back}</a></div></section>`,
     locale,
     "/login",
   );
@@ -541,19 +550,19 @@ async function namespacePage(
     ? data.conversations
         .map(
           (item) =>
-            `<li><a href="/dashboard/conversations/${encodeURIComponent(item.id)}"><strong>${escapeHtml(item.title)}</strong><span>${item.updated_at ? escapeHtml(item.updated_at) : ""}</span></a></li>`,
+            `<li><a href="/dashboard/conversations/${encodeURIComponent(item.id)}"><div class="recent-main"><strong class="truncate">${escapeHtml(item.title)}</strong></div><span class="recent-date truncate">${item.updated_at ? escapeHtml(item.updated_at) : ""}</span><span class="recent-arrow" aria-hidden="true">→</span></a></li>`,
         )
         .join("")
-    : `<li>${t.noMemories}</li>`;
+    : `<li><div class="empty-state"><strong>${t.noMemories}</strong></div></li>`;
   const previous = offset > 0 ? Math.max(0, offset - 20) : null;
   const next = offset + 20 < data.total ? offset + 20 : null;
   const emptyForm = nsRow.deletion_job_id
     ? `<p class="ns-meta"><span>${t.pending}</span></p>`
-    : `<details class="ns-empty"><summary>${t.empty}</summary><form method="post" action="/dashboard/namespaces/empty"><input type="hidden" name="csrf" value="${session.csrf}"><input type="hidden" name="namespace" value="${escapeHtml(namespace)}"><label><span>${t.emptyHelp}</span><input name="confirm_namespace" required autocomplete="off"></label><button class="button danger" type="submit">${t.empty}</button></form></details>`;
+    : `<details class="ns-empty"><summary>${t.empty}</summary><form method="post" action="/dashboard/namespaces/empty"><input type="hidden" name="csrf" value="${session.csrf}"><input type="hidden" name="namespace" value="${escapeHtml(namespace)}"><label><span>${t.emptyHelp}</span><input name="confirm_namespace" required autocomplete="off" placeholder="${escapeHtml(namespace)}"></label><button class="button danger" type="submit">${t.empty}</button></form></details>`;
 
   return page(
     namespace,
-    `<p class="dash-back"><a href="/dashboard">← ${t.back}</a></p><header class="dash-head"><div><p class="eyebrow">${t.namespaces}</p><h1>${escapeHtml(namespace)}</h1></div><p>${data.total} ${t.conversations.toLowerCase()}</p></header><section class="card"><ul class="recent-list">${rows}</ul></section>${emptyForm}<nav class="pagination" aria-label="Pagination">${previous === null ? "" : `<a class="button secondary" href="?offset=${previous}">${t.previous}</a>`}${next === null ? "" : `<a class="button secondary" href="?offset=${next}">${t.next}</a>`}</nav>`,
+    `<p class="dash-back"><a href="/dashboard">← ${t.back}</a></p><header class="dash-head"><div><span class="dash-badge">${t.namespaces}</span><h1 class="truncate">${escapeHtml(namespace)}</h1><p>${data.total} ${t.conversations.toLowerCase()}</p></div></header><section class="card"><ul class="recent-list">${rows}</ul></section>${emptyForm}<nav class="pagination" aria-label="Pagination">${previous === null ? "" : `<a class="button secondary" href="?offset=${previous}">${t.previous}</a>`}${next === null ? "" : `<a class="button secondary" href="?offset=${next}">${t.next}</a>`}</nav>`,
     locale,
     url.pathname + url.search,
     { session },
@@ -578,23 +587,23 @@ async function overview(
   const namespaceRows = data.namespaces
     .map(
       (row) =>
-        `<li><a class="ns-link" href="/dashboard/namespaces/${encodeURIComponent(row.namespace)}"><strong>${escapeHtml(row.namespace)}</strong><span>${row.conversations} ${t.conversations.toLowerCase()} · ${row.messages} ${t.messages.toLowerCase()}${row.deletion_job_id ? ` · ${t.pending}` : ""}</span></a>${row.deletion_job_id ? "" : `<details class="ns-empty"><summary>${t.empty}</summary><form method="post" action="/dashboard/namespaces/empty"><input type="hidden" name="csrf" value="${session.csrf}"><input type="hidden" name="namespace" value="${escapeHtml(row.namespace)}"><label><span>${t.emptyHelp}</span><input name="confirm_namespace" required autocomplete="off"></label><button class="button danger" type="submit">${t.empty}</button></form></details>`}</li>`,
+        `<li><a class="ns-link" href="/dashboard/namespaces/${encodeURIComponent(row.namespace)}"><span class="ns-icon" aria-hidden="true"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"></path></svg></span><div class="ns-meta"><strong class="truncate">${escapeHtml(row.namespace)}</strong><span>${row.conversations} ${t.conversations.toLowerCase()} · ${row.messages} ${t.messages.toLowerCase()}${row.deletion_job_id ? ` · ${t.pending}` : ""}</span></div></a>${row.deletion_job_id ? "" : `<details class="ns-empty"><summary>${t.empty}</summary><form method="post" action="/dashboard/namespaces/empty"><input type="hidden" name="csrf" value="${session.csrf}"><input type="hidden" name="namespace" value="${escapeHtml(row.namespace)}"><label><span>${t.emptyHelp}</span><input name="confirm_namespace" required autocomplete="off" placeholder="${escapeHtml(row.namespace)}"></label><button class="button danger" type="submit">${t.empty}</button></form></details>`}</li>`,
     )
     .join("");
   const recent = data.recent.length
     ? data.recent
         .map(
           (item) =>
-            `<li><a href="/dashboard/conversations/${encodeURIComponent(item.id)}"><strong>${escapeHtml(item.title)}</strong><span>${escapeHtml(item.namespace)}${item.updated_at ? ` · ${escapeHtml(item.updated_at)}` : ""}</span></a></li>`,
+            `<li><a href="/dashboard/conversations/${encodeURIComponent(item.id)}"><div class="recent-main"><strong class="truncate">${escapeHtml(item.title)}</strong><span class="recent-ns-tag truncate">${escapeHtml(item.namespace)}</span></div><span class="recent-date truncate">${item.updated_at ? escapeHtml(item.updated_at) : ""}</span><span class="recent-arrow" aria-hidden="true">→</span></a></li>`,
         )
         .join("")
-    : `<li>${t.noMemories}</li>`;
+    : `<li><div class="empty-state"><strong>${t.noMemories}</strong></div></li>`;
   const account = data.deletion
-    ? `<div class="notice" role="status"><strong>${t.pending}</strong><span>${t.deleteDue}: ${escapeHtml(data.deletion.due_at)}</span><form method="post" action="/dashboard/account/cancel"><input type="hidden" name="csrf" value="${session.csrf}"><input type="hidden" name="job_id" value="${data.deletion.id}"><button class="button secondary" type="submit">${t.cancelDeletion}</button></form></div>`
-    : `<section class="card danger-zone"><details><summary><strong>${t.accountDeletion}</strong></summary><p>${t.accountHelp}</p><form method="post" action="/dashboard/account/delete"><input type="hidden" name="csrf" value="${session.csrf}"><label>${t.email}<input name="confirm_email" type="email" required autocomplete="off"></label><button class="button danger" type="submit">${t.schedule}</button></form></details></section>`;
+    ? `<div class="notice" role="status"><strong>${t.pending}</strong><span class="truncate">${t.deleteDue}: ${escapeHtml(data.deletion.due_at)}</span><form method="post" action="/dashboard/account/cancel"><input type="hidden" name="csrf" value="${session.csrf}"><input type="hidden" name="job_id" value="${data.deletion.id}"><button class="button secondary" type="submit">${t.cancelDeletion}</button></form></div>`
+    : `<section class="card danger-zone"><details><summary><strong>${t.accountDeletion}</strong></summary><p>${t.accountHelp}</p><form method="post" action="/dashboard/account/delete"><input type="hidden" name="csrf" value="${session.csrf}"><label>${t.email}<input name="confirm_email" type="email" required autocomplete="off" placeholder="${escapeHtml(session.user.email)}"></label><button class="button danger" type="submit">${t.schedule}</button></form></details></section>`;
   return page(
     t.dashboard,
-    `<header class="dash-head"><div><p class="eyebrow">${t.dashboard}</p><h1>${escapeHtml(session.user.display_name ?? session.user.email)}</h1></div><p>${t.overview}</p></header>${data.deletion ? account : ""}<section class="stats"><article><span>${t.namespaces}</span><strong>${data.namespaces.length}</strong></article><article><span>${t.conversations}</span><strong>${totals.conversations}</strong></article><article><span>${t.messages}</span><strong>${totals.messages}</strong></article></section><div class="dash-main"><div class="dash-side"><section class="card"><h2>${t.profile}</h2><form method="post" action="/dashboard/profile"><input type="hidden" name="csrf" value="${session.csrf}"><label>${t.displayName}<input name="display_name" maxlength="80" required value="${escapeHtml(session.user.display_name ?? "")}"></label><button class="button" type="submit"${data.deletion ? " disabled" : ""}>${t.save}</button></form></section>${data.deletion ? "" : account}</div><div class="dash-content"><section class="card"><div class="section-heading"><h2>${t.namespaces}</h2><a href="/dashboard/mindmap">${t.memoryMap} →</a></div><ul class="namespace-list">${namespaceRows}</ul></section><section class="card"><h2>${t.recent}</h2><ul class="recent-list">${recent}</ul></section></div></div>`,
+    `<header class="dash-head"><div><span class="dash-badge">${t.dashboard}</span><h1 class="truncate">${escapeHtml(session.user.display_name ?? session.user.email)}</h1><p>${t.overview}</p></div><div class="dash-actions"><a class="button secondary" href="/dashboard/mindmap">${t.memoryMap} <span aria-hidden="true">↗</span></a><a class="button secondary" href="/dashboard/export">${t.export} <span aria-hidden="true">↓</span></a></div></header>${data.deletion ? account : ""}<section class="stats"><article class="stat-card"><span>${t.namespaces}</span><strong>${data.namespaces.length}</strong></article><article class="stat-card"><span>${t.conversations}</span><strong>${totals.conversations}</strong></article><article class="stat-card"><span>${t.messages}</span><strong>${totals.messages}</strong></article></section><div class="dash-main"><div class="dash-side"><section class="card"><h2>${t.profile}</h2><form method="post" action="/dashboard/profile"><input type="hidden" name="csrf" value="${session.csrf}"><label>${t.displayName}<input name="display_name" maxlength="80" required value="${escapeHtml(session.user.display_name ?? "")}" placeholder="${escapeHtml(session.user.email)}"></label><button class="button" type="submit"${data.deletion ? " disabled" : ""}>${t.save}</button></form></section>${data.deletion ? "" : account}</div><div class="dash-content"><section class="card"><div class="section-heading"><h2>${t.namespaces}</h2><a class="action-link" href="/dashboard/mindmap">${t.memoryMap} <span aria-hidden="true">→</span></a></div><ul class="namespace-list">${namespaceRows}</ul></section><section class="card"><div class="section-heading"><h2>${t.recent}</h2></div><ul class="recent-list">${recent}</ul></section></div></div>`,
     locale,
     new URL(request.url).pathname,
     { session },
@@ -671,17 +680,31 @@ function accessibleTree(data: Awaited<ReturnType<typeof mindmapData>>, locale: L
         .filter((conversation) => conversation.namespace === namespace.namespace)
         .map(
           (conversation) =>
-            `<li><a href="/dashboard/conversations/${encodeURIComponent(conversation.id)}">${escapeHtml(conversation.title)}</a>${conversation.tags.length ? `<span>${conversation.tags.map(escapeHtml).join(", ")}</span>` : ""}</li>`,
+            `<li><a class="truncate" href="/dashboard/conversations/${encodeURIComponent(conversation.id)}">${escapeHtml(conversation.title)}</a>${conversation.tags.length ? `<span>${renderTagLinks(conversation.tags)}</span>` : ""}</li>`,
         )
         .join("");
-      return `<li><details open><summary>${escapeHtml(namespace.namespace)} (${namespace.conversations})</summary><ul>${children || `<li>${t.noMemories}</li>`}</ul></details></li>`;
+      return `<li><details open><summary><span class="truncate">${escapeHtml(namespace.namespace)} (${namespace.conversations})</span></summary><ul>${children || `<li>${t.noMemories}</li>`}</ul></details></li>`;
     })
     .join("")}</ul>`;
 }
 
-async function mindmap(env: AppEnv, locale: Locale, session: DashboardSession): Promise<Response> {
+async function mindmap(
+  request: Request,
+  env: AppEnv,
+  locale: Locale,
+  session: DashboardSession,
+): Promise<Response> {
   const t = copy[locale];
-  const initial = await mindmapData(env, session.user.id, { limit: 50 });
+  const initialQuery = z
+    .string()
+    .max(100)
+    .catch("")
+    .parse(new URL(request.url).searchParams.get("q") ?? "")
+    .trim();
+  const initial = await mindmapData(env, session.user.id, {
+    limit: 50,
+    ...(initialQuery ? { q: initialQuery } : {}),
+  });
   const accountLabel = locale === "id" ? "Akun saya" : "My account";
   const script = buildMindmapClientScript({
     accountLabel,
@@ -729,13 +752,13 @@ async function conversation(
   const items = result.messages
     .map(
       (message) =>
-        `<article class="message"><header><strong>${escapeHtml(message.role ?? "unknown")}</strong><span>${escapeHtml(message.createdAt ?? "")}</span></header><p>${escapeHtml(message.text)}</p><details><summary>${t.metadata}</summary><pre>${escapeHtml(JSON.stringify({ sourceNodeId: message.sourceNodeId, modelSlug: message.modelSlug, metadata: message.metadata }, null, 2))}</pre></details></article>`,
+        `<article class="message"><header><span class="message-role ${escapeHtml(message.role ?? "unknown")} truncate">${escapeHtml(message.role ?? "unknown")}</span><span class="message-time truncate">${escapeHtml(message.createdAt ?? "")}</span></header><p>${escapeHtml(message.text)}</p><details class="message-details"><summary>${t.metadata}</summary><pre>${escapeHtml(JSON.stringify({ sourceNodeId: message.sourceNodeId, modelSlug: message.modelSlug, metadata: message.metadata }, null, 2))}</pre></details></article>`,
     )
     .join("");
   const previous = offset > 0 ? Math.max(0, offset - 20) : null;
   return page(
     result.conversation.title,
-    `<p class="dash-back"><a href="/dashboard">← ${t.back}</a><a href="/dashboard/namespaces/${encodeURIComponent(result.conversation.namespace)}">${escapeHtml(result.conversation.namespace)}</a></p><header class="hero compact"><p class="eyebrow">${t.conversation}</p><h1>${escapeHtml(result.conversation.title)}</h1><p>${escapeHtml(result.conversation.namespace)} · ${result.total} ${t.messages.toLowerCase()}</p><div class="tags">${result.conversation.tags.map((tag) => `<span>${escapeHtml(tag)}</span>`).join("")}</div></header><section>${items || `<p>${t.noMemories}</p>`}</section><nav class="pagination" aria-label="Pagination">${previous === null ? "" : `<a class="button secondary" href="?offset=${previous}&revision_id=${pinned}">${t.previous}</a>`}${result.nextOffset === null ? "" : `<a class="button secondary" href="?offset=${result.nextOffset}&revision_id=${pinned}">${t.next}</a>`}</nav>`,
+    `<p class="dash-back"><a href="/dashboard">← ${t.back}</a><span class="dash-back-sep" aria-hidden="true">/</span><a class="truncate" href="/dashboard/namespaces/${encodeURIComponent(result.conversation.namespace)}">${escapeHtml(result.conversation.namespace)}</a></p><header class="hero compact"><p class="eyebrow">${t.conversation}</p><h1 class="truncate">${escapeHtml(result.conversation.title)}</h1><p class="truncate">${escapeHtml(result.conversation.namespace)} · ${result.total} ${t.messages.toLowerCase()}</p><div class="tags">${renderTagLinks(result.conversation.tags)}</div></header><section class="messages-stream">${items || `<p>${t.noMemories}</p>`}</section><nav class="pagination" aria-label="Pagination">${previous === null ? "" : `<a class="button secondary" href="?offset=${previous}&revision_id=${pinned}">${t.previous}</a>`}${result.nextOffset === null ? "" : `<a class="button secondary" href="?offset=${result.nextOffset}&revision_id=${pinned}">${t.next}</a>`}</nav>`,
     locale,
     url.pathname + url.search,
     { session },
@@ -845,7 +868,7 @@ export async function handleDashboardRequest(request: Request, env: AppEnv): Pro
       );
     }
     if (url.pathname === "/dashboard/mindmap" && request.method === "GET") {
-      return await mindmap(env, locale, session);
+      return await mindmap(request, env, locale, session);
     }
     if (url.pathname.startsWith("/dashboard/conversations/") && request.method === "GET") {
       const encoded = url.pathname.slice("/dashboard/conversations/".length);
@@ -924,6 +947,189 @@ export async function handleDashboardRequest(request: Request, env: AppEnv): Pro
     return errorResponse(request, error, locale);
   }
 }
-
 const DASHBOARD_CSS = `
-.dashboard-nav{position:sticky;top:0;z-index:12;background:var(--canvas);min-height:76px;border-bottom:1px solid var(--line);display:flex;align-items:center;justify-content:space-between;gap:24px;padding:14px max(20px,calc((100vw - 1160px)/2))}.dashboard-nav>div,.nav-panel{display:flex;align-items:center;gap:18px;flex-wrap:wrap}.dashboard-nav a,.link-button{font-size:13px;text-decoration:none}.dashboard-nav form,.dashboard-menu form{margin:0}.dashboard-menu{display:contents;margin:0}summary.nav-toggle{display:none}.link-button{border:0;background:none;color:inherit;padding:8px;cursor:pointer}.hamburger{display:block;width:18px;height:12px;position:relative;background:linear-gradient(var(--ink),var(--ink)) 0 5px/18px 2px no-repeat}.hamburger::before,.hamburger::after{content:"";position:absolute;left:0;width:18px;height:2px;background:var(--ink)}.hamburger::before{top:0}.hamburger::after{top:10px}.language{display:flex;gap:6px;font:10px var(--mono)}.language a[aria-current]{color:var(--accent);font-weight:600}.dashboard-shell{width:min(1160px,calc(100% - 40px));margin:0 auto;padding:28px 0 48px}.dash-head{display:flex;align-items:baseline;justify-content:space-between;gap:4px 16px;flex-wrap:wrap;margin-bottom:16px}.dash-head h1{font-size:clamp(24px,3.4vw,32px);margin:0}.dash-head p{margin:4px 0 0;font-size:13px}.dash-head .eyebrow{margin:0 0 6px}.hero{max-width:760px;margin-bottom:40px}.hero.compact{margin-top:34px}.hero h1{font-size:clamp(38px,7vw,68px);margin:0}.hero p{font-size:17px}.auth-card{width:min(100%,520px);margin:8vh auto 0;padding:36px;border:1px solid var(--line);background:var(--surface);border-radius:8px}.auth-card h1{font-size:clamp(30px,7vw,48px);margin:0}.auth-card form,.card form{display:grid;gap:14px;margin-top:28px}label{display:grid;gap:8px;font-size:13px}input{min-width:0;width:100%;min-height:46px;padding:10px 12px;border:1px solid #a8ada0;border-radius:5px;background:var(--surface);color:var(--ink)}.stats{display:grid;grid-template-columns:repeat(3,1fr);gap:1px;background:var(--line);border:1px solid var(--line);margin-bottom:16px}.stats article{display:grid;gap:2px;padding:12px 16px;background:var(--surface)}.stats span{font:10px var(--mono);color:var(--muted);text-transform:uppercase}.stats strong{font-size:22px;font-weight:500}.dashboard-grid{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1.4fr);gap:28px;margin-bottom:28px}.dash-main{display:grid;grid-template-columns:300px minmax(0,1fr);gap:16px;margin-bottom:16px}.dash-side,.dash-content{display:grid;gap:16px;align-content:start;min-width:0}.dash-main .card{padding:16px 18px}.dash-main .card h2{margin:0 0 10px;font-size:15px}.dash-main .card form{gap:10px;margin-top:12px}.dash-main input{min-height:38px;padding:8px 10px}.dash-main .section-heading{gap:12px}.dash-main .section-heading h2{margin:0}.card,.map-panel{padding:28px;border:1px solid var(--line);background:var(--surface);border-radius:7px;min-width:0}.card h2{margin-top:0}.section-heading{display:flex;align-items:center;justify-content:space-between;gap:20px;min-width:0}.section-heading h2{min-width:0}.recent-list,.namespace-list,.tree-list{list-style:none;padding:0;margin:0;min-width:0}.recent-list li,.namespace-list>li{min-width:0}.recent-list li+li,.namespace-list>li+li{border-top:1px solid var(--line)}.recent-list a{display:flex;align-items:baseline;justify-content:space-between;gap:10px;padding:8px 0;text-decoration:none;font-size:13px}.recent-list a strong{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;min-width:0}.recent-list a span{flex-shrink:0}.recent-list span,.namespace-list span,.tree-list span{font-size:12px;color:var(--muted)}.namespace-list>li{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:10px 0}.namespace-list>li>div{display:grid;align-content:start;min-width:0}.namespace-list>li strong{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.ns-meta{min-width:0}.ns-meta span{display:block;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.ns-link{display:grid;min-width:0;min-height:44px;align-content:center;text-decoration:none;color:inherit}.ns-link strong{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.ns-link span{display:block;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:12px;color:var(--muted)}.dash-back{display:flex;flex-wrap:wrap;gap:12px 20px;margin-bottom:8px;font-size:13px}.dash-back a{text-decoration:none;font-size:13px}.ns-empty{flex-shrink:0}.ns-empty summary{cursor:pointer;font-size:12px;text-decoration:underline;text-underline-offset:3px}.ns-empty form{display:grid;gap:10px;margin-top:10px;min-width:min(260px,60vw)}.namespace-list form{margin:0}.namespace-list label span{font-size:11px}.button.danger{background:#8d322f;border-color:#8d322f}.danger-zone{margin-top:0;border-color:#d7b4b2}.danger-zone details summary{cursor:pointer;font-size:13px}.danger-zone form{display:grid;gap:10px;margin-top:12px}.notice{display:grid;gap:12px;padding:16px 18px;margin-bottom:16px;border:1px solid #c9a95c;background:#fff7dc}.notice form{margin:0}.search-form{display:grid;gap:10px;margin-bottom:20px}.search-form>div{display:flex;gap:10px}.map-panel{overflow:hidden;margin-bottom:28px}.map-toolbar{display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap;margin:0 0 12px}.map-actions{display:flex;align-items:center;gap:8px;flex-wrap:wrap}.chip-button{min-height:32px;padding:6px 12px;border:1px solid var(--line);border-radius:999px;background:var(--surface);color:var(--ink);font:11px var(--mono);transition:background .2s,color .2s}.chip-button:hover{background:var(--tint);border-color:var(--accent);color:var(--accent)}.map-viewport{position:relative}.map-viewport>p{font:11px var(--mono);margin:0 0 10px}.mindmap-canvas{display:block;width:100%;height:620px;background:radial-gradient(circle at 20% 10%,#fbfaf6,var(--canvas) 62%);border:1px solid var(--line);border-radius:6px;outline-offset:2px;touch-action:none}.mindmap-canvas canvas{cursor:grab}.map-tooltip{position:absolute;z-index:2;display:grid;gap:2px;max-width:248px;padding:10px 12px;border:1px solid var(--line);border-radius:6px;background:var(--surface);box-shadow:0 12px 28px -18px rgba(40,42,37,.55);pointer-events:none;font:11px/1.5 var(--mono);color:var(--muted)}.map-tooltip strong{font:500 12px/1.4 Outfit,sans-serif;color:var(--ink)}.tree-list ul{margin:8px 0 16px}.tree-list summary{cursor:pointer;font-weight:500}.tree-list a{display:inline-block;margin-right:12px}.message{padding:24px 0;border-top:1px solid var(--line)}.message header{display:flex;justify-content:space-between;gap:20px;font:11px var(--mono);color:var(--muted)}.message p{white-space:pre-wrap;color:var(--ink)}pre{overflow:auto;padding:16px;background:var(--canvas);font:11px/1.6 var(--mono)}.tags{display:flex;gap:8px;flex-wrap:wrap}.tags span{padding:4px 8px;background:var(--tint);font:10px var(--mono)}.pagination{display:flex;justify-content:space-between;gap:20px;margin-top:32px}@media(max-width:720px){.dashboard-menu{display:block}summary.nav-toggle{display:grid;place-items:center;margin-left:auto;min-width:44px;min-height:44px;border:1px solid var(--line);border-radius:5px;background:var(--surface);list-style:none;cursor:pointer;position:relative;z-index:13}summary.nav-toggle::-webkit-details-marker{display:none}.nav-panel{display:none}.dashboard-menu[open] .nav-panel{position:fixed;top:0;right:0;bottom:0;width:min(320px,86vw);z-index:11;display:flex;flex-direction:column;align-items:stretch;gap:4px;padding:76px 20px 24px;background:var(--surface);border-left:1px solid var(--line);box-shadow:-4px 0 24px rgba(40,42,37,.06);animation:drawerSlide .25s var(--ease) forwards}@keyframes drawerSlide{from{transform:translateX(100%)}to{transform:translateX(0)}}.dashboard-menu[open]::before{content:"";position:fixed;inset:0;z-index:10;background:rgba(40,42,37,.4);animation:overlayFade .25s var(--ease) forwards}@keyframes overlayFade{from{opacity:0}to{opacity:1}}.dashboard-menu[open] .nav-panel a,.dashboard-menu[open] .nav-panel .link-button{min-height:44px;display:flex;align-items:center;font-size:16px;padding:8px 12px;border-radius:4px}.dashboard-menu[open] .nav-panel .language{padding:8px 12px;font-size:12px}.recent-list a{display:grid;gap:4px;padding:10px 0;min-width:0;min-height:44px}.recent-list a strong{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;min-width:0}.recent-list a span{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:12px;color:var(--muted);min-width:0}.namespace-list>li{display:flex;flex-wrap:wrap;align-items:center;justify-content:space-between;gap:8px 12px;min-width:0}.ns-link{flex:1 1 180px;min-width:0}.ns-empty{min-width:0}.ns-empty[open]{width:100%}.ns-empty form{width:100%;min-width:0}.dash-head{flex-direction:column;align-items:flex-start}.dashboard-shell{width:min(100% - 24px,1160px);padding-top:24px}.stats{grid-template-columns:repeat(3,1fr)}.stats article{padding:10px 12px}.dash-head h1{font-size:26px}.dash-main{grid-template-columns:minmax(0,1fr)}.dashboard-grid{grid-template-columns:minmax(0,1fr)}.search-form>div{display:grid}.card,.map-panel{padding:18px}.mindmap-canvas{height:460px}.map-tooltip{max-width:none}.message header{display:grid;gap:4px}}`;
+.truncate{display:block;min-width:0;max-width:100%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.nav-scrim{position:fixed;inset:0;z-index:10;background:rgba(40,42,37,.4);backdrop-filter:blur(3px);-webkit-backdrop-filter:blur(3px);opacity:0;transition:opacity .35s var(--ease);pointer-events:none}
+.nav-scrim.open{opacity:1;pointer-events:all}
+.dashboard-nav{position:sticky;top:0;z-index:20;background:rgba(247,246,242,.9);backdrop-filter:blur(12px);-webkit-backdrop-filter:blur(12px);min-height:72px;border-bottom:1px solid var(--line);display:flex;align-items:center;justify-content:space-between;gap:24px;padding:12px max(24px,calc((100vw - 1200px)/2));transition:border-color .2s}
+.dashboard-nav>div,.nav-panel{display:flex;align-items:center;gap:8px;flex-wrap:wrap}
+.dashboard-nav a,.link-button{font-size:13px;font-weight:500;text-decoration:none;color:var(--muted);padding:7px 13px;border-radius:6px;transition:color .18s var(--ease),background .18s var(--ease)}
+.dashboard-nav a:hover,.link-button:hover{color:var(--ink);background:rgba(40,42,37,.05)}
+.dashboard-nav a[aria-current="page"]{color:var(--accent);background:var(--tint);font-weight:600}
+.dashboard-nav form,.dashboard-menu form{margin:0}
+.dashboard-menu{display:contents;margin:0}
+summary.nav-toggle{display:none}
+summary.nav-toggle::-webkit-details-marker{display:none}
+.link-button{border:0;background:none;color:var(--muted);cursor:pointer;font-family:inherit;font-size:13px;padding:7px 13px;border-radius:6px;transition:all .18s}
+.link-button:hover{color:var(--ink);background:rgba(40,42,37,.05)}
+.hamburger{display:block;width:18px;height:12px;position:relative;background:linear-gradient(var(--ink),var(--ink)) 0 5px/18px 2px no-repeat;transition:background .2s}
+.hamburger::before,.hamburger::after{content:"";position:absolute;left:0;width:18px;height:2px;background:var(--ink);transition:transform .25s var(--ease),top .25s var(--ease)}
+.hamburger::before{top:0}
+.hamburger::after{top:10px}
+.language{display:inline-flex;align-items:center;gap:3px;padding:2px 8px;border:1px solid var(--line);border-radius:6px;font:10px/1.8 var(--mono);color:var(--muted);background:var(--surface)}
+.language a{padding:2px 4px;border-radius:3px;text-decoration:none;color:inherit;transition:color .15s}
+.language a:hover{color:var(--ink)}
+.language a[aria-current]{color:var(--accent);font-weight:600}
+.language-sep{color:var(--line);margin:0 1px}
+.dashboard-shell{width:min(1200px,calc(100% - 48px));margin:0 auto;padding:32px 0 64px}
+.dash-head{display:flex;align-items:flex-end;justify-content:space-between;gap:20px;flex-wrap:wrap;margin-bottom:28px;padding-bottom:22px;border-bottom:1px solid var(--line);min-width:0;max-width:100%}
+.dash-head>div{min-width:0;max-width:100%;flex:1}
+.dash-head h1{font-size:clamp(28px,3.8vw,40px);font-weight:500;letter-spacing:-.04em;line-height:1.15;margin:0;color:var(--ink);text-wrap:balance;min-width:0;max-width:100%}
+.dash-head h1.truncate{text-wrap:nowrap}
+.dash-head p{margin:6px 0 0;font-size:14px;color:var(--muted);min-width:0;max-width:100%}
+.dash-badge{display:inline-flex;align-items:center;justify-content:center;height:24px;padding:0 12px;border-radius:999px;background:var(--tint);border:1px solid rgba(66,99,74,.2);font:500 10px/1 var(--mono);color:var(--accent);letter-spacing:.08em;text-transform:uppercase;margin:0 0 10px;box-sizing:border-box;vertical-align:middle}
+.dash-actions{display:flex;align-items:center;gap:10px;flex-wrap:wrap;flex-shrink:0}
+.dash-actions .button{min-height:38px;padding:8px 16px;font-size:13px}
+.stats{display:grid;grid-template-columns:repeat(3,1fr);gap:16px;margin-bottom:28px}
+.stats article,.stat-card{display:flex;flex-direction:column;justify-content:space-between;gap:10px;padding:22px 24px;background:var(--surface);border:1px solid var(--line);border-radius:8px;box-shadow:0 1px 3px rgba(40,42,37,.03);transition:transform .2s var(--ease),border-color .2s,box-shadow .2s;min-width:0}
+.stats article:hover,.stat-card:hover{transform:translateY(-1px);border-color:#c8cebf;box-shadow:0 4px 14px -4px rgba(40,42,37,.06)}
+.stats span{font:500 11px var(--mono);color:var(--muted);text-transform:uppercase;letter-spacing:.08em}
+.stats strong{font-family:var(--mono);font-size:clamp(26px,3vw,34px);font-weight:500;color:var(--ink);letter-spacing:-.035em;line-height:1;font-variant-numeric:tabular-nums}
+.dash-main{display:grid;grid-template-columns:320px minmax(0,1fr);gap:24px;align-items:start;margin-bottom:28px}
+.dash-side,.dash-content{display:flex;flex-direction:column;gap:20px;min-width:0;max-width:100%}
+.card,.map-panel{padding:24px 28px;border:1px solid var(--line);background:var(--surface);border-radius:8px;box-shadow:0 1px 3px rgba(40,42,37,.03);min-width:0;max-width:100%}
+.card h2{margin:0;font-size:16px;font-weight:500;letter-spacing:-.02em;color:var(--ink)}
+.section-heading{display:flex;align-items:center;justify-content:space-between;gap:16px;margin-bottom:16px;padding-bottom:14px;border-bottom:1px solid var(--line);min-width:0;max-width:100%}
+.section-heading h2{margin:0;min-width:0;max-width:100%}
+.action-link{display:inline-flex;align-items:center;gap:6px;font-size:12px;font-weight:500;color:var(--accent);text-decoration:none;transition:transform .2s var(--ease),color .2s;flex-shrink:0}
+.action-link:hover{color:var(--ink);transform:translateX(2px)}
+.card form,.auth-card form{display:grid;gap:14px;margin-top:16px;min-width:0;max-width:100%}
+label{display:grid;gap:6px;font:500 11px var(--mono);letter-spacing:.06em;text-transform:uppercase;color:var(--muted);min-width:0;max-width:100%}
+input{min-width:0;max-width:100%;width:100%;min-height:42px;padding:10px 14px;border:1px solid var(--line);border-radius:6px;background:var(--surface);color:var(--ink);font-size:14px;font-family:inherit;transition:border-color .2s,box-shadow .2s,background .2s;box-sizing:border-box}
+input:hover{border-color:#b9beb1}
+input:focus-visible{outline:0;border-color:var(--accent);box-shadow:0 0 0 3px rgba(66,99,74,.18);background:#fff}
+.namespace-list,.recent-list,.tree-list{list-style:none;padding:0;margin:0;min-width:0;max-width:100%;display:flex;flex-direction:column}
+.namespace-list>li{display:flex;align-items:center;justify-content:space-between;gap:16px;padding:12px 14px;margin:0 -14px;border-radius:6px;border-bottom:1px solid rgba(222,223,214,.6);transition:background .18s var(--ease);min-width:0;max-width:calc(100% + 28px)}
+.namespace-list>li:last-child{border-bottom:0}
+.namespace-list>li:hover{background:rgba(40,42,37,.025)}
+.ns-link{display:flex;align-items:center;gap:12px;text-decoration:none;color:inherit;min-width:0;max-width:100%;flex:1}
+.ns-icon{display:grid;place-items:center;width:28px;height:28px;border-radius:6px;background:var(--tint);color:var(--accent);flex-shrink:0}
+.ns-meta{display:grid;gap:2px;min-width:0;max-width:100%;flex:1}
+.ns-meta strong{display:block;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:14px;font-weight:500;color:var(--ink);font-family:var(--mono);min-width:0;max-width:100%}
+.ns-meta span{display:block;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:12px;color:var(--muted);font-family:var(--mono);min-width:0;max-width:100%}
+.ns-empty{flex-shrink:0}
+.ns-empty summary{cursor:pointer;font-size:12px;color:var(--muted);padding:4px 10px;border-radius:5px;border:1px solid var(--line);background:var(--canvas);transition:all .18s}
+.ns-empty:hover summary,.ns-empty[open] summary{color:#8d322f;border-color:#eccdcc;background:#fbf1f0}
+.ns-empty form{display:grid;gap:10px;margin-top:10px;padding:14px;border:1px solid #eccdcc;border-radius:6px;background:#fbf1f0;min-width:min(280px,70vw);max-width:100%;box-sizing:border-box}
+.ns-empty label span{font-size:11px;color:#8d322f;text-transform:none;font-family:inherit;letter-spacing:normal}
+.recent-list li{border-bottom:1px solid rgba(222,223,214,.6);min-width:0;max-width:100%}
+.recent-list li:last-child{border-bottom:0}
+.recent-list a{display:flex;align-items:center;justify-content:space-between;gap:16px;padding:12px 14px;margin:0 -14px;border-radius:6px;text-decoration:none;color:inherit;transition:background .18s var(--ease);min-width:0;max-width:calc(100% + 28px)}
+.recent-list a:hover{background:var(--tint)}
+.recent-main{display:flex;align-items:center;gap:10px;min-width:0;max-width:100%;flex:1}
+.recent-main strong{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.recent-list a strong{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;min-width:0;max-width:100%;font-size:14px;font-weight:500;color:var(--ink)}
+.recent-ns-tag{font:10px var(--mono);padding:2px 7px;border-radius:4px;background:rgba(40,42,37,.06);color:var(--muted);flex-shrink:0;min-width:0;max-width:min(160px,40%);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.recent-date{font:11px var(--mono);color:var(--muted);white-space:nowrap;flex-shrink:0;min-width:0;max-width:min(180px,30%);overflow:hidden;text-overflow:ellipsis}
+.recent-arrow{font-size:13px;color:var(--muted);transition:transform .18s,color .18s;flex-shrink:0}
+.recent-list a:hover .recent-arrow{transform:translateX(3px);color:var(--accent)}
+.empty-state{padding:24px;text-align:center;color:var(--muted);font-size:13px;border:1px dashed var(--line);border-radius:6px;background:var(--canvas)}
+.empty-state strong{font-weight:500;color:var(--muted)}
+.button.danger{background:#8d322f;border-color:#8d322f;color:#fff}
+.button.danger:hover{background:#752825;border-color:#752825}
+.danger-zone{border-color:#eccdcc;background:#fdf9f8}
+.danger-zone details summary{cursor:pointer;font-size:13px;color:#8d322f;font-weight:500}
+.danger-zone details[open] summary{margin-bottom:10px}
+.danger-zone p{font-size:13px;line-height:1.6;color:#6a403e;margin:0 0 10px}
+.danger-zone form{display:grid;gap:10px;margin-top:12px}
+.notice{display:grid;gap:8px;padding:16px 20px;margin-bottom:24px;border:1px solid #e8d7a7;background:#fffbf0;border-radius:8px;color:#705314}
+.notice strong{font-size:14px;font-weight:600}
+.notice span{font:12px var(--mono)}
+.notice form{margin:4px 0 0}
+.dash-back{display:flex;align-items:center;gap:8px;margin-bottom:16px;font-size:13px;min-width:0;max-width:100%}
+.dash-back a{display:inline-flex;align-items:center;gap:4px;text-decoration:none;color:var(--muted);font-weight:500;transition:color .2s,transform .2s;min-width:0;max-width:100%}
+.dash-back a:first-child{flex-shrink:0}
+.dash-back a:hover{color:var(--accent);transform:translateX(-2px)}
+.dash-back a.truncate{display:block;min-width:0;max-width:100%;flex:1}
+.dash-back-sep{color:var(--line);flex-shrink:0}
+.hero{max-width:800px;margin-bottom:36px;min-width:0;max-width:100%}
+.hero.compact{margin-top:24px}
+.hero h1{font-size:clamp(34px,5vw,56px);letter-spacing:-.045em;line-height:1.1;margin:0 0 10px;min-width:0;max-width:100%}
+.hero p{font-size:16px;line-height:1.6;min-width:0;max-width:100%}
+.messages-stream{display:flex;flex-direction:column;gap:18px;min-width:0;max-width:100%}
+.message{padding:22px 26px;border:1px solid var(--line);background:var(--surface);border-radius:8px;box-shadow:0 1px 3px rgba(40,42,37,.03);transition:border-color .2s;min-width:0;max-width:100%}
+.message:hover{border-color:#c8cebf}
+.message header{display:flex;align-items:center;justify-content:space-between;gap:16px;margin-bottom:12px;padding-bottom:10px;border-bottom:1px solid rgba(222,223,214,.6);min-width:0;max-width:100%}
+.message-role{display:inline-flex;align-items:center;gap:6px;padding:3px 9px;border-radius:4px;font:500 10px var(--mono);text-transform:uppercase;letter-spacing:.08em;min-width:0;max-width:60%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.message-role.truncate{display:inline-flex}
+.message-role.user{background:var(--ink);color:var(--surface)}
+.message-role.assistant{background:var(--tint);color:var(--accent);border:1px solid rgba(66,99,74,.2)}
+.message-role.system{background:rgba(40,42,37,.08);color:var(--muted)}
+.message-time{font:11px var(--mono);color:var(--muted);min-width:0;max-width:40%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;flex-shrink:0}
+.message p{font-size:15px;line-height:1.75;color:var(--ink);white-space:pre-wrap;word-break:break-word;margin:0 0 12px}
+.message details summary{font:11px var(--mono);color:var(--muted);cursor:pointer;text-decoration:underline;text-underline-offset:3px}
+.pre,pre{margin-top:10px;padding:14px;border-radius:6px;background:var(--canvas);border:1px solid var(--line);font:11px/1.6 var(--mono);color:var(--ink);overflow-x:auto}
+.tags{display:flex;gap:6px;flex-wrap:wrap;margin-top:12px;min-width:0;max-width:100%}
+.tags a{display:inline-flex;min-width:0;max-width:100%;text-decoration:none}
+.tags span,.tags a span{padding:3px 8px;border-radius:4px;background:var(--tint);color:var(--accent);font:10px var(--mono);border:1px solid rgba(66,99,74,.15);min-width:0;max-width:min(200px,100%);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.pagination{display:flex;justify-content:space-between;gap:16px;margin-top:28px}
+.search-form{display:grid;gap:10px;margin-bottom:24px}
+.search-form>div{display:flex;gap:10px}
+.map-panel{overflow:hidden;margin-bottom:28px}
+.map-toolbar{display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap;margin:0 0 16px}
+.map-actions{display:flex;align-items:center;gap:8px;flex-wrap:wrap}
+.chip-button{min-height:34px;padding:6px 14px;border:1px solid var(--line);border-radius:999px;background:var(--surface);color:var(--ink);font:500 11px var(--mono);transition:all .18s var(--ease);cursor:pointer}
+.chip-button:hover{background:var(--tint);border-color:var(--accent);color:var(--accent);transform:translateY(-1px)}
+.map-viewport{position:relative}
+.map-viewport>p{font:11px var(--mono);color:var(--muted);margin:0 0 10px}
+.mindmap-canvas{display:block;width:100%;height:620px;background:radial-gradient(circle at 20% 10%,#fffefa,var(--canvas) 65%);border:1px solid var(--line);border-radius:8px;outline-offset:2px;touch-action:none}
+.mindmap-canvas canvas{cursor:grab}
+.map-tooltip{position:absolute;z-index:2;display:grid;gap:2px;max-width:260px;padding:10px 14px;border:1px solid var(--line);border-radius:6px;background:var(--surface);box-shadow:0 12px 28px -18px rgba(40,42,37,.55);pointer-events:none;font:11px/1.5 var(--mono);color:var(--muted)}
+.map-tooltip>*{min-width:0;max-width:100%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.map-tooltip strong{font:500 13px/1.4 Outfit,sans-serif;color:var(--ink);min-width:0;max-width:100%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.map-tooltip span,.map-tooltip p{min-width:0;max-width:100%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.tree-list ul{margin:8px 0 16px}
+.tree-list li{min-width:0;max-width:100%}
+.tree-list details{min-width:0;max-width:100%}
+.tree-list summary{cursor:pointer;font-weight:500;min-width:0;max-width:100%}
+.tree-list a{display:inline-block;margin-right:12px;min-width:0;max-width:100%}
+.tree-list a.truncate{display:inline-block;vertical-align:middle;max-width:calc(100% - 24px)}
+.auth-card{width:min(100%,480px);margin:9vh auto 0;padding:40px;border:1px solid var(--line);background:var(--surface);border-radius:12px;box-shadow:0 4px 20px -8px rgba(40,42,37,.08)}
+.auth-card h1{font-size:clamp(30px,5vw,42px);letter-spacing:-.04em;line-height:1.15;margin:0 0 8px}
+.auth-card p{font-size:15px;line-height:1.65;margin:0 0 18px;color:var(--muted)}
+.auth-actions{margin-top:20px}
+@media(max-width:768px){
+  .dashboard-nav{padding:10px 16px;min-height:64px;backdrop-filter:none;-webkit-backdrop-filter:none}
+  .dashboard-menu{display:block}
+  summary.nav-toggle{display:grid;place-items:center;margin-left:auto;width:44px;height:44px;min-width:44px;min-height:44px;padding:0;border:1px solid var(--line);border-radius:4px;background:var(--surface);list-style:none;cursor:pointer;position:relative;z-index:13;transition:border-color .2s}
+  summary.nav-toggle::-webkit-details-marker{display:none}
+  .dashboard-menu[open] summary.nav-toggle,summary.nav-toggle[aria-expanded="true"]{position:fixed;top:10px;right:16px;z-index:13}
+  .dashboard-menu[open] summary.nav-toggle .hamburger,summary.nav-toggle[aria-expanded="true"] .hamburger{background:none}
+  .dashboard-menu[open] summary.nav-toggle .hamburger::before,summary.nav-toggle[aria-expanded="true"] .hamburger::before{top:5px;transform:rotate(45deg)}
+  .dashboard-menu[open] summary.nav-toggle .hamburger::after,summary.nav-toggle[aria-expanded="true"] .hamburger::after{top:5px;transform:rotate(-45deg)}
+  .nav-panel{display:flex;position:fixed;top:0;right:0;bottom:0;width:min(320px,85vw);background:var(--surface);border-left:1px solid var(--line);padding:76px 24px calc(24px + env(safe-area-inset-bottom,0px));flex-direction:column;flex-wrap:nowrap;align-items:stretch;gap:4px;z-index:11;overflow-y:auto;-webkit-overflow-scrolling:touch;box-shadow:-4px 0 24px rgba(40,42,37,.06);transform:translateX(100%);opacity:0;visibility:hidden;pointer-events:none;transition:transform .35s var(--ease),opacity .3s var(--ease),visibility .35s}
+  .dashboard-menu[open] .nav-panel{transform:none;opacity:1;visibility:visible;pointer-events:all}
+  .nav-panel>*{transform:translateX(14px);opacity:0;transition:transform .35s var(--ease),opacity .3s var(--ease)}
+  .dashboard-menu[open] .nav-panel>*{transform:none;opacity:1}
+  .dashboard-menu[open] .nav-panel>:nth-child(1){transition-delay:.05s}
+  .dashboard-menu[open] .nav-panel>:nth-child(2){transition-delay:.09s}
+  .dashboard-menu[open] .nav-panel>:nth-child(3){transition-delay:.13s}
+  .dashboard-menu[open] .nav-panel>:nth-child(4){transition-delay:.17s}
+  .dashboard-menu[open] .nav-panel>:nth-child(5){transition-delay:.21s}
+  @starting-style{
+    .dashboard-menu[open] .nav-panel{transform:translateX(100%);opacity:0}
+    .dashboard-menu[open] .nav-panel>*{transform:translateX(14px);opacity:0}
+  }
+  .dashboard-menu[open] .nav-panel a,.dashboard-menu[open] .nav-panel .link-button{font-size:16px;padding:12px 0;border-bottom:1px solid var(--canvas);color:var(--ink);border-radius:0;background:none;min-height:44px;display:flex;align-items:center;width:100%;text-align:left;transition:color .2s var(--ease)}
+  .dashboard-menu[open] .nav-panel a:hover,.dashboard-menu[open] .nav-panel .link-button:hover{color:var(--accent);background:none}
+  .dashboard-menu[open] .nav-panel a[aria-current="page"]{font-weight:600;color:var(--accent);background:none}
+  .dashboard-menu[open] .nav-panel .language{display:inline-flex;align-self:flex-start;margin:12px 0;padding:6px 12px;font-size:12px;border:1px solid var(--line);border-radius:6px;background:var(--canvas)}
+  .dashboard-menu[open] .nav-panel form{margin:0;width:100%}
+  .dashboard-shell{width:min(100% - 32px,1200px);padding-top:20px}
+  .dash-head{flex-direction:column;align-items:flex-start}
+  .stats{grid-template-columns:1fr;gap:10px}
+  .dash-main{grid-template-columns:minmax(0,1fr);gap:20px}
+  .card,.map-panel{padding:20px 18px}
+  .auth-card{padding:28px 20px;margin-top:4vh}
+  .search-form>div{display:grid}
+  .mindmap-canvas{height:460px}
+  .message{padding:18px}
+  .namespace-list>li{flex-wrap:wrap;gap:12px}
+  .ns-empty[open]{width:100%;margin-top:4px}
+  .ns-empty form{width:100%;min-width:0;max-width:100%;box-sizing:border-box}
+  .recent-list a{flex-direction:column;align-items:flex-start;gap:6px;width:100%}
+  .recent-main{width:100%;min-width:0;max-width:100%}
+  .recent-date{max-width:100%}
+  .recent-arrow{display:none}
+}
+`;
