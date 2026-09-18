@@ -67,24 +67,25 @@ complete the email prompt).
 See [SKILLS.md](../SKILLS.md) for the memory conventions coding agents should follow
 (`project/<slug>` namespaces, search-first workflow, event records).
 
-| Tool                           | Important inputs                               | Result                                                |
-| ------------------------------ | ---------------------------------------------- | ----------------------------------------------------- |
-| `memory_search`                | query, limit 1–20, tags, tag_mode              | compact ranked chunk references and degradation state |
-| `memory_get_context`           | chunk ID, before/after 0–10                    | canonical matched ranges and surrounding messages     |
-| `memory_get_conversation`      | conversation ID, branch, offset, limit         | paginated active timeline or all graph nodes          |
-| `memory_get_conversations`     | 1–20 conversation requests                     | ordered compact pages, errors, and continuations      |
-| `memory_list_conversations`    | cursor, limit, tags, tag_mode                  | metadata and tags only                                |
-| `memory_list_revisions`        | conversation ID, cursor, limit 1–100           | revision metadata newest first, current head marked   |
-| `memory_resolve_conversations` | 1–20 exact titles, optional namespace and tags | conversation IDs, current revision IDs, and live tags |
-| `memory_list_namespaces`       | —                                              | namespaces you own with conversation counts           |
-| `memory_stats`                 | —                                              | per-namespace counts plus indexing health             |
-| `memory_store`                 | title, tags, 1–1000 messages                   | durable revision plus queued index job                |
-| `memory_append`                | conversation ID, base revision, tags, messages | optimistic durable revision plus queued index job     |
-| `memory_replace`               | conversation ID, base revision, messages       | replacement revision plus queued index job            |
-| `memory_update_tags`           | conversation ID, base revision, add/remove     | live tag list after revision-safe mutation            |
-| `memory_delete_conversations`  | 1–100 unique conversation IDs                  | deleted, missing, and per-ID failures                 |
-| `memory_empty_namespace`       | matching namespace confirmation pair           | deletes one of your namespaces; bounded, resumable    |
-| `memory_import_status`         | import UUID                                    | progress, duplicate, or failure metadata              |
+| Tool                           | Important inputs                                    | Result                                                            |
+| ------------------------------ | --------------------------------------------------- | ----------------------------------------------------------------- |
+| `memory_search`                | query, limit 1–20, tags, tag_mode                   | compact ranked chunk references and degradation state             |
+| `memory_get_context`           | chunk ID, before/after 0–10                         | canonical matched ranges and surrounding messages                 |
+| `memory_get_conversation`      | conversation ID, branch, offset, limit              | paginated active timeline or all graph nodes                      |
+| `memory_get_conversations`     | 1–20 conversation requests                          | ordered compact pages, errors, and continuations                  |
+| `memory_list_conversations`    | cursor, limit, tags, tag_mode                       | metadata and tags only                                            |
+| `memory_list_revisions`        | conversation ID, cursor, limit 1–100                | revision metadata newest first, current head marked               |
+| `memory_resolve_conversations` | 1–20 exact titles, optional namespace and tags      | conversation IDs, current revision IDs, and live tags             |
+| `memory_list_namespaces`       | —                                                   | namespaces you own with conversation counts                       |
+| `memory_stats`                 | —                                                   | per-namespace counts plus indexing health                         |
+| `memory_store`                 | title, tags, 1–1000 messages                        | durable revision plus queued index job                            |
+| `memory_append`                | conversation ID, base revision, tags, messages      | optimistic durable revision plus queued index job                 |
+| `memory_replace`               | conversation ID, base revision, messages            | replacement revision plus queued index job                        |
+| `memory_update_tags`           | conversation ID, base revision, add/remove          | live tag list after revision-safe mutation                        |
+| `memory_restore_revision`      | conversation ID, revision ID, base revision, verify | restores head to historic revision; durable receipt and index job |
+| `memory_delete_conversations`  | 1–100 unique conversation IDs                       | deleted, missing, and per-ID failures                             |
+| `memory_empty_namespace`       | matching namespace confirmation pair                | deletes one of your namespaces; bounded, resumable                |
+| `memory_import_status`         | import UUID                                         | progress, duplicate, or failure metadata                          |
 
 Every tool advertises an output schema and returns successful structured data in both
 `structuredContent` and JSON text content for client compatibility.
@@ -97,8 +98,9 @@ conversation only after its canonical R2 keys have been deleted and its D1 catal
 committed.
 
 The intended client pattern is search → select → get context. Use `memory_append` for genuine
-continuation and `memory_replace` with the complete desired transcript when correcting or
-superseding a memory. Administrative retry/reindex/integrity operations remain HTTP/CLI only so
+continuation, `memory_replace` with the complete desired transcript when correcting or superseding a
+memory, and `memory_restore_revision` to revert to an earlier known good revision without synthesizing
+duplicate transcripts. Administrative retry/reindex/integrity operations remain HTTP/CLI only so
 ordinary LLM tool calls cannot trigger expensive maintenance accidentally.
 
 ## Compact reads and batches
@@ -182,6 +184,110 @@ mutates, deletes, or reindexes history, and it stays inside the 64 KiB tool guar
 Missing, deleted, foreign, empty-history, and not-owned-namespace conversations produce the same
 not-found error, so a revision ID or conversation ID from another account reveals nothing.
 Malformed, forged, and stale continuation cursors return `Invalid cursor`.
+
+## Revision restore
+
+`memory_restore_revision` safely restores the active head of an owned conversation (`current_revision_id`
+and `current_node_id` in D1) to a previously committed revision of that same conversation. Unlike
+`memory_replace`, it never synthesizes a new revision manifest, never copies or duplicates segment
+JSONL files in R2, and never mutates or deletes historic revision records. It reuses existing immutable
+canonical objects directly.
+
+### Annotations
+
+- `readOnlyHint`: `false`
+- `destructiveHint`: `true` (repoints the live active head to an earlier state)
+- `openWorldHint`: `false`
+- `idempotentHint`: `true`
+
+### Inputs
+
+```json
+{
+  "conversation_id": "<conversation ID>",
+  "revision_id": "<target revision ID to restore>",
+  "base_revision_id": "<expected current revision ID>",
+  "verify": true
+}
+```
+
+- `conversation_id`: memory UUID or 64-character hexadecimal conversation ID.
+- `revision_id`: 64-character hexadecimal revision ID of a historic revision belonging to this conversation.
+- `base_revision_id`: 64-character hexadecimal revision ID representing the caller's expected current head.
+- `verify`: optional boolean (default `false`). When `true`, reloads the restored canonical revision from R2,
+  validates segment integrity hashes, confirms D1 head pointer alignment, and returns a bounded compact readback.
+
+### Output
+
+```json
+{
+  "conversation_id": "<conversation ID>",
+  "previous_revision_id": "<base revision ID>",
+  "revision_id": "<restored revision ID>",
+  "durable": true,
+  "indexing": {
+    "status": "queued",
+    "job_id": "<job ID>"
+  },
+  "verification": {
+    "status": "passed",
+    "revision_id": "<restored revision ID>",
+    "checked_messages": 42,
+    "readback": {
+      "conversation": {
+        "id": "<conversation ID>",
+        "revisionId": "<restored revision ID>",
+        "title": "RP Campaign",
+        "namespace": "personal",
+        "tags": ["rp", "act-1"]
+      },
+      "messages": [
+        {
+          "sourceNodeId": "<node ID>",
+          "role": "user",
+          "text": "The party approaches the gate.",
+          "createdAt": "2026-09-17T00:00:00.000Z",
+          "updatedAt": null
+        }
+      ],
+      "offset": 0,
+      "nextOffset": null,
+      "total": 42,
+      "oversizedMessage": null
+    }
+  }
+}
+```
+
+### Concurrency, Tenancy, and Security Semantics
+
+1. **Optimistic concurrency**: The restore executes a D1 compare-and-swap (CAS) matching
+   `conversations.current_revision_id = base_revision_id`. If the live head changed concurrently (due to
+   an append, replace, or another restore), the CAS fails with an optimistic concurrency error
+   (`IMPORT_CONFLICT`, HTTP 409). Stale writes or stale restores cannot overwrite concurrent updates.
+2. **Tenancy and ownership validation**:
+   - Asserts account and namespace write eligibility (`assertAccountWritable`). Locked or pending-deletion
+     accounts/namespaces reject the restore.
+   - The conversation must belong to the authenticated caller's account and an owned namespace.
+   - The target `revision_id` must be an existing revision of that exact conversation in `conversation_revisions`.
+   - Missing, deleted, foreign-account, or unrelated revision IDs return a uniform `NOT_FOUND` error,
+     preventing metadata or existence leakage across tenants.
+3. **Preserved metadata**: The conversation ID, creation timestamp, live title, namespace, and live tags
+   remain untouched. Only `current_revision_id`, `current_node_id`, and `updated_at` are updated.
+4. **Deterministic transition audit trail**:
+   - Derives `transitionId = domainId("transition", conversationId, baseRevisionId, revisionId)`.
+   - Writes an immutable transition record to R2 at
+     `canonical/conversations/${conversationId}/transitions/${transitionId}.json`
+     (format `mempersist.conversation-transition.v1`) prior to D1 CAS.
+   - Records the transition state in D1 `conversation_head_transitions` (`prepared` → `applied` on success,
+     or `failed` if CAS detects a concurrent modification).
+5. **Idempotence**: Repeating the same restore with the same `(conversation_id, revision_id, base_revision_id)`
+   after it has succeeded is a clean no-op that returns the durable receipt.
+6. **Derived indexing and verification separation**:
+   - A background index job is enqueued for the restored revision.
+   - If queueing or verification encounters an error after the D1 head CAS succeeds, the response preserves
+     `durable: true` with `indexing.status: "failed"` or `verification.status: "failed"`. The restore itself
+     is committed and durable. See [recovery](operations-and-recovery.md).
 
 ## Exact-title conversation resolution
 

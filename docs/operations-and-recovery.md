@@ -9,8 +9,7 @@
 - Retrieval fixtures: `yarn retrieval:evaluate`
 - Worker logs: `yarn wrangler tail`
 
-Structured logs expose request/job IDs and categories. D1 tables `imports`, `import_items`, `jobs`, and `chunk_index_state` provide durable progress/error state. Cloudflare dashboards provide queue backlog, Worker latency/errors, storage growth, AI usage, and Vectorize counts without an extra monitoring stack.
-
+Structured logs expose request/job IDs and categories. D1 tables `imports`, `import_items`, `jobs`, `chunk_index_state`, and `conversation_head_transitions` provide durable progress/error state. Cloudflare dashboards provide queue backlog, Worker latency/errors, storage growth, AI usage, and Vectorize counts without an extra monitoring stack.
 Dashboard deletion progress is separate in `deletion_jobs`. Namespace jobs remain locked after a
 failure; account jobs remain read-only. Fix the recorded error and re-enqueue the job ID rather than
 removing the lock or repeating the user's request.
@@ -67,6 +66,77 @@ original prose from D1 chunks or overwrite a later revision by retrying blindly.
 `readback_error` or `oversizedMessage` requires an authorized canonical HTTP read/export;
 it does not mean a committed write vanished. Semantic omissions still require a reviewed
 replacement with the latest base revision.
+
+### Revision restore and head-transition recovery
+
+`memory_restore_revision` restores an owned conversation's active head (`current_revision_id` and
+`current_node_id`) to a historic canonical revision without creating duplicate revision objects.
+Transitions are tracked in D1 `conversation_head_transitions` and immutably logged in R2 under
+`canonical/conversations/${conversationId}/transitions/${transitionId}.json` (format
+`mempersist.conversation-transition.v1`).
+
+To inspect transition history for a conversation:
+
+```sql
+SELECT id, previous_revision_id, restored_revision_id, status, created_at, applied_at
+FROM conversation_head_transitions
+WHERE conversation_id = '<conversation-id>'
+ORDER BY created_at DESC;
+```
+
+#### Partial transition recovery (R2-only or prepared D1)
+
+If a Worker crashes or experiences a network disconnection after writing the R2 transition JSON
+or inserting a `prepared` row in `conversation_head_transitions`, but before executing the D1 CAS:
+
+1. The live head in D1 remains at `previous_revision_id`.
+2. The transition record in D1 remains in `status = 'prepared'`.
+3. Canonical data in R2 is completely untouched and intact.
+
+**Recovery**: Do not manually delete R2 transition objects or drop D1 rows. Safely resubmit the
+`memory_restore_revision` request with the same `(conversation_id, revision_id, base_revision_id)`.
+The restore handler detects the prepared transition, uses `putImmutable` to avoid duplicating R2
+objects, and atomically commits the D1 compare-and-swap update to `applied`.
+
+#### Stale base revision conflict on restore
+
+If `memory_restore_revision` returns an optimistic concurrency error (`IMPORT_CONFLICT`, HTTP 409):
+
+1. A concurrent write (store, append, replace, or another restore) modified `conversations.current_revision_id`
+   after the caller observed the base revision.
+2. The D1 `conversation_head_transitions` table records a transition row with `status = 'failed'` to preserve
+   an audit trail of the attempted transition.
+3. The conversation's active head in D1 remains untouched at the current head; no invalid transition occurs.
+
+**Recovery**: Never force-update D1 catalog pointers. Inspect the conversation's active head using
+`memory_list_revisions` or query `SELECT current_revision_id FROM conversations WHERE id = ?`.
+Evaluate the recent changes. If restoration to the historic revision is still desired, submit
+`memory_restore_revision` using the updated current revision ID as `base_revision_id`. If retrying with
+the original parameters, the system resets the transition row status to `prepared` if the base condition aligns.
+
+#### Restore post-commit queue failure or verification failure
+
+When `memory_restore_revision` returns `durable: true` with `indexing.status: "failed"` or
+`verification.status: "failed"`:
+
+1. **The head transition is already durably committed** in D1 and R2.
+2. **Queue failure**: If indexing could not be enqueued (`error.code: "DERIVED_INDEXING"`), search
+   queries may temporarily serve the prior revision until indexed. Recover by finding the job in D1
+   `jobs` (`WHERE subject_id = '<restored_revision_id>'`) and running `yarn retry <job-id>`, or
+   rebuilding search indexes with `yarn reindex`. Do not resend the restore request or re-upload
+   transcripts.
+3. **Verification failure**: If post-commit verification fails (`error.code: "CANONICAL_STORAGE"`),
+   read the conversation at that exact `revision_id` using `memory_get_conversation`. Run
+   `yarn verify:integrity` to check that the canonical manifest and segment hashes in R2 match D1
+   catalog records. If canonical R2 objects were damaged or missing, restore them from an independent
+   R2 backup. Never delete canonical data or attempt to reconstruct transcripts from search chunks.
+
+#### Safe idempotent retry
+
+Repeating `memory_restore_revision` with the same `(conversation_id, revision_id, base_revision_id)`
+after a successful transition is completely safe. The operation detects that the current head matches
+`revision_id` and returns the durable receipt without modifying storage or creating duplicate transition
+rows.
 
 ### D1 loss
 

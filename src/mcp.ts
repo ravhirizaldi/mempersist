@@ -3,7 +3,7 @@ import { z } from "zod";
 import { createMcpConversation } from "./chatgpt";
 import { deleteConversations, deleteNamespace, MAX_CONVERSATION_DELETE_BATCH } from "./deletion";
 import type { AppEnv } from "./domain";
-import { completeMemoryWrite } from "./writes";
+import { completeMemoryRestore, completeMemoryWrite } from "./writes";
 import {
   boundCompactPage,
   compactConversationPage,
@@ -19,6 +19,7 @@ import {
   listConversations,
   replaceConversation,
   resolveConversations,
+  restoreConversationRevision,
   updateConversationTags,
   writeCanonicalConversation,
 } from "./storage";
@@ -48,16 +49,14 @@ const nonEmptyNamespaceSchema = z
 
 const tagsSchema = z.array(z.string().trim().min(1).max(64)).max(20).default([]);
 
+const revisionIdSchema = z.string().regex(/^[a-f0-9]{64}$/u);
 const readFormatSchema = z.enum(["compact", "canonical"]).default("canonical");
 const conversationRequestSchema = z.object({
   conversation_id: conversationIdSchema,
   offset: z.number().int().min(0).max(Number.MAX_SAFE_INTEGER).default(0),
   limit: z.number().int().min(1).max(100).default(20),
   branch: z.enum(["active", "all"]).default("active"),
-  revision_id: z
-    .string()
-    .regex(/^[a-f0-9]{64}$/u)
-    .optional(),
+  revision_id: revisionIdSchema.optional(),
 });
 const readOnlyAnnotations = {
   readOnlyHint: true,
@@ -233,6 +232,20 @@ const verificationOutputSchema = z.object({
 });
 const memoryWriteOutputSchema = z.object({
   conversation_id: z.string(),
+  revision_id: z.string(),
+  durable: z.literal(true),
+  indexing: z.union([
+    z.object({ status: z.literal("queued"), job_id: z.string() }),
+    z.object({
+      status: z.literal("failed"),
+      error: z.object({ code: z.string(), message: z.string(), retryable: z.boolean() }),
+    }),
+  ]),
+  verification: verificationOutputSchema.optional(),
+});
+const memoryRestoreOutputSchema = z.object({
+  conversation_id: z.string(),
+  previous_revision_id: z.string(),
   revision_id: z.string(),
   durable: z.literal(true),
   indexing: z.union([
@@ -585,6 +598,38 @@ export function createMemoryMcpServer(env: AppEnv, tenant: Tenant): McpServer {
         tenant.userId,
       );
       return toolResult(await completeMemoryWrite(env, stored, messages, verify));
+    },
+  );
+
+  server.registerTool(
+    "memory_restore_revision",
+    {
+      description:
+        "Restore a conversation's active timeline to an existing canonical revision using optimistic concurrency; canonical revision objects are reused immutably and durable transition history is recorded. Live title, namespace, identity, and tags are preserved. Optional verify checks the committed head revision and returns paginated compact readback.",
+      annotations: {
+        readOnlyHint: false,
+        destructiveHint: true,
+        openWorldHint: false,
+        idempotentHint: true,
+      },
+      outputSchema: memoryRestoreOutputSchema,
+      inputSchema: z.object({
+        conversation_id: conversationIdSchema,
+        revision_id: revisionIdSchema,
+        base_revision_id: revisionIdSchema,
+        verify: z.boolean().default(false),
+      }),
+    },
+    async ({ conversation_id, revision_id, base_revision_id, verify }) => {
+      const restored = await restoreConversationRevision(
+        env,
+        conversation_id,
+        revision_id,
+        base_revision_id,
+        tenant.namespaces,
+        tenant.userId,
+      );
+      return toolResult(await completeMemoryRestore(env, restored, verify));
     },
   );
 

@@ -136,6 +136,7 @@ Available tools:
 - `memory_store`
 - `memory_append`
 - `memory_replace`
+- `memory_restore_revision`
 
 `memory_store` and `memory_append` accept optional tags (lowercased, deduplicated, up to 20);
 `memory_search` filters by tags with AND semantics and returns each conversation's tags. See
@@ -154,8 +155,10 @@ conversation owners by exact title without semantic search, returning conversati
 revision IDs, and live tags. `memory_list_revisions` returns the immutable revision
 history of one owned conversation (metadata only, newest first, cursor-paged), so a client can
 pin and read any earlier revision with `memory_get_conversation` instead of relying on a
-retained write receipt. Store/append/replace accept `verify: true` to reload the
-committed R2 revision and return compact readback with separate indexing/verification status.
+retained write receipt. `memory_restore_revision` restores an owned conversation to any historical
+revision with `base_revision_id` optimistic concurrency, recording an immutable head transition
+without creating redundant canonical revisions. Store/append/replace/restore accept `verify: true`
+to reload the committed R2 revision and return compact readback with separate indexing/verification status.
 See the [RP workflow and reviewable runtime-rule amendment](docs/rp-workflow.md).
 
 ## Quality gate

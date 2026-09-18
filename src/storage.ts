@@ -43,6 +43,23 @@ export interface StoredRevision {
   writeOffset?: number;
 }
 
+export interface RestoredRevision extends StoredRevision {
+  previousRevisionId: string;
+  transitionId: string;
+  transitionKey?: string;
+}
+
+export interface CanonicalTransitionRecord {
+  format: "mempersist.conversation-transition.v1";
+  transitionId: string;
+  conversationId: string;
+  operation: "restore";
+  previousRevisionId: string;
+  restoredRevisionId: string;
+  userId: string;
+  createdAt: string;
+}
+
 function chunked<T>(values: T[], size: number): T[][] {
   const groups: T[][] = [];
   for (let index = 0; index < values.length; index += size)
@@ -925,4 +942,181 @@ export async function replaceConversation(
     activeSourceNodeIds: nodes.map((node) => node.sourceNodeId),
   };
   return writeCanonicalConversation(env, updated, null, baseRevisionId, loaded.row.user_id);
+}
+
+export async function restoreConversationRevision(
+  env: AppEnv,
+  conversationId: string,
+  revisionId: string,
+  baseRevisionId: string,
+  expectedNamespaces?: string[],
+  expectedUserId?: string,
+): Promise<RestoredRevision> {
+  const loaded = await loadCurrentConversation(
+    env,
+    conversationId,
+    expectedNamespaces,
+    expectedUserId,
+  );
+  await assertAccountWritable(env, loaded.row.user_id, loaded.row.namespace);
+
+  const targetRow = await env.MEMORY_DB.prepare(
+    `SELECT id, conversation_id, manifest_object_key FROM conversation_revisions WHERE id = ? AND conversation_id = ?`,
+  )
+    .bind(revisionId, conversationId)
+    .first<RevisionRow>();
+  if (!targetRow) {
+    throw new AppError("NOT_FOUND", "Revision not found", 404);
+  }
+
+  const target = await loadCanonicalRevision(env, revisionId);
+  if (
+    target.manifest.conversationId !== conversationId ||
+    target.conversation.id !== conversationId ||
+    target.manifest.revisionId !== revisionId
+  ) {
+    throw new AppError("NOT_FOUND", "Revision not found", 404);
+  }
+
+  const segment = target.manifest.segments[0];
+  if (!segment) {
+    throw new AppError("CANONICAL_STORAGE", "Revision has no canonical segment", 500);
+  }
+
+  const transitionId = await domainId("transition", conversationId, baseRevisionId, revisionId);
+  const transitionKey = `canonical/conversations/${conversationId}/transitions/${transitionId}.json`;
+
+  const existingTransition = await env.MEMORY_DB.prepare(
+    `SELECT id, status, previous_revision_id, restored_revision_id
+     FROM conversation_head_transitions
+     WHERE id = ?`,
+  )
+    .bind(transitionId)
+    .first<{
+      id: string;
+      status: string;
+      previous_revision_id: string;
+      restored_revision_id: string;
+    }>();
+
+  if (
+    loaded.row.current_revision_id === revisionId &&
+    existingTransition &&
+    existingTransition.previous_revision_id === baseRevisionId &&
+    existingTransition.restored_revision_id === revisionId
+  ) {
+    if (existingTransition.status !== "applied") {
+      await env.MEMORY_DB.prepare(
+        `UPDATE conversation_head_transitions SET status = 'applied', applied_at = ? WHERE id = ?`,
+      )
+        .bind(new Date().toISOString(), transitionId)
+        .run();
+    }
+    return {
+      conversationId,
+      revisionId,
+      manifestKey: targetRow.manifest_object_key,
+      segmentKey: segment.key,
+      contentHash: target.manifest.contentHash,
+      created: false,
+      previousRevisionId: baseRevisionId,
+      transitionId,
+      transitionKey,
+    };
+  }
+
+  if (loaded.row.current_revision_id !== baseRevisionId) {
+    throw new AppError("IMPORT_CONFLICT", "base_revision_id is stale", 409);
+  }
+
+  const now = new Date().toISOString();
+  const transitionRecord: CanonicalTransitionRecord = {
+    format: "mempersist.conversation-transition.v1",
+    transitionId,
+    conversationId,
+    operation: "restore",
+    previousRevisionId: baseRevisionId,
+    restoredRevisionId: revisionId,
+    userId: loaded.row.user_id,
+    createdAt: now,
+  };
+
+  try {
+    await putImmutable(env.MEMORY_BUCKET, transitionKey, stableJson(transitionRecord), {
+      sha256: await sha256(stableJson(transitionRecord)),
+      format: transitionRecord.format,
+    });
+  } catch (error) {
+    throw new AppError(
+      "CANONICAL_STORAGE",
+      `R2 transition write failed: ${error instanceof Error ? error.message : String(error)}`,
+      503,
+      true,
+    );
+  }
+
+  await env.MEMORY_DB.prepare(
+    `INSERT INTO conversation_head_transitions
+     (id, conversation_id, previous_revision_id, restored_revision_id, operation, user_id, transition_object_key, status, created_at, applied_at)
+     VALUES (?, ?, ?, ?, 'restore', ?, ?, 'prepared', ?, NULL)
+     ON CONFLICT(id) DO UPDATE SET status = 'prepared' WHERE status != 'applied'`,
+  )
+    .bind(
+      transitionId,
+      conversationId,
+      baseRevisionId,
+      revisionId,
+      loaded.row.user_id,
+      transitionKey,
+      now,
+    )
+    .run();
+
+  const targetNodeId =
+    target.manifest.currentSourceNodeId ?? target.conversation.currentSourceNodeId ?? null;
+
+  const updateResult = await env.MEMORY_DB.prepare(
+    `UPDATE conversations
+     SET current_revision_id = ?, current_node_id = ?, updated_at = ?
+     WHERE id = ? AND current_revision_id = ?`,
+  )
+    .bind(revisionId, targetNodeId, now, conversationId, baseRevisionId)
+    .run();
+
+  if (updateResult.meta.changes !== 1) {
+    await env.MEMORY_DB.prepare(
+      `UPDATE conversation_head_transitions
+       SET status = 'failed'
+       WHERE id = ? AND status = 'prepared'`,
+    )
+      .bind(transitionId)
+      .run();
+
+    throw new AppError(
+      "IMPORT_CONFLICT",
+      "Conversation changed before restore completed",
+      409,
+      false,
+    );
+  }
+
+  await env.MEMORY_DB.prepare(
+    `UPDATE conversation_head_transitions
+     SET status = 'applied', applied_at = ?
+     WHERE id = ?`,
+  )
+    .bind(now, transitionId)
+    .run();
+
+  return {
+    conversationId,
+    revisionId,
+    manifestKey: targetRow.manifest_object_key,
+    segmentKey: segment.key,
+    contentHash: target.manifest.contentHash,
+    created: false,
+    previousRevisionId: baseRevisionId,
+    transitionId,
+    transitionKey,
+  };
 }

@@ -167,6 +167,8 @@ export function landingPage(locale: Locale = "en"): Response {
         <tr><td><code>memory_stats</code></td><td>counts and indexing health</td></tr>
         <tr><td><code>memory_store</code></td><td>durable new memory</td></tr>
         <tr><td><code>memory_append</code></td><td>extend a conversation, optimistic revision check</td></tr>
+        <tr><td><code>memory_replace</code></td><td>replace its transcript, optimistic revision check</td></tr>
+        <tr><td><code>memory_restore_revision</code></td><td>restore historical revision, optimistic revision check</td></tr>
         <tr><td><code>memory_update_tags</code></td><td>change tags</td></tr>
         <tr><td><code>memory_delete_conversations</code></td><td>delete specific memories (confirmed)</td></tr>
         <tr><td><code>memory_empty_namespace</code></td><td>empty one namespace (exact confirmation)</td></tr>

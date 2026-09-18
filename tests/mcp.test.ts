@@ -45,6 +45,7 @@ describe("MCP server", () => {
       "memory_list_revisions",
       "memory_replace",
       "memory_resolve_conversations",
+      "memory_restore_revision",
       "memory_search",
       "memory_stats",
       "memory_store",
@@ -73,6 +74,14 @@ describe("MCP server", () => {
       );
     }
     expect(result.tools.find((tool) => tool.name === "memory_replace")?.annotations).toEqual({
+      readOnlyHint: false,
+      destructiveHint: true,
+      openWorldHint: false,
+      idempotentHint: true,
+    });
+    expect(
+      result.tools.find((tool) => tool.name === "memory_restore_revision")?.annotations,
+    ).toEqual({
       readOnlyHint: false,
       destructiveHint: true,
       openWorldHint: false,
@@ -326,5 +335,51 @@ describe("MCP server", () => {
     expect(emptyTitle.isError).toBe(true);
     expect(whitespaceTitle.isError).toBe(true);
     expect(tooManyRequests.isError).toBe(true);
+  });
+
+  it("validates revision restore request inputs", async () => {
+    const client = await connectedClient();
+    const cases: Array<Record<string, unknown>> = [
+      {},
+      {
+        conversation_id: "not-a-memory-id",
+        revision_id: "a".repeat(64),
+        base_revision_id: "b".repeat(64),
+      },
+      { conversation_id: crypto.randomUUID() },
+      { conversation_id: crypto.randomUUID(), revision_id: "" },
+      {
+        conversation_id: crypto.randomUUID(),
+        revision_id: "invalid",
+        base_revision_id: "b".repeat(64),
+      },
+      {
+        conversation_id: crypto.randomUUID(),
+        revision_id: "A".repeat(64),
+        base_revision_id: "b".repeat(64),
+      },
+      { conversation_id: crypto.randomUUID(), revision_id: "a".repeat(64) },
+      { conversation_id: crypto.randomUUID(), revision_id: "a".repeat(64), base_revision_id: "" },
+      {
+        conversation_id: crypto.randomUUID(),
+        revision_id: "a".repeat(64),
+        base_revision_id: "invalid",
+      },
+      {
+        conversation_id: crypto.randomUUID(),
+        revision_id: "a".repeat(64),
+        base_revision_id: "B".repeat(64),
+      },
+      {
+        conversation_id: crypto.randomUUID(),
+        revision_id: "a".repeat(64),
+        base_revision_id: "b".repeat(64),
+        verify: "not-a-boolean",
+      },
+    ];
+    for (const args of cases) {
+      const result = await client.callTool({ name: "memory_restore_revision", arguments: args });
+      expect(result.isError, JSON.stringify(args)).toBe(true);
+    }
   });
 });
