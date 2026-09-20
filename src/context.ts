@@ -418,6 +418,89 @@ interface RequiredSectionBaseline {
   serialized_bytes: number;
   messages: RequiredMessageBaseline[];
 }
+type RevisionCache = Map<
+  string,
+  { conversation: CanonicalConversation; manifest: CanonicalRevisionManifest }
+>;
+type SeenMessages = Map<string, { section: ContextSection; message: ContextMessage }>;
+
+interface WarningState {
+  warnings: ContextWarning[];
+  droppedCount: number;
+}
+
+interface ResolvedRequiredItems {
+  items: PinnedResolvedItem[];
+  revisionPins: ContextRevisionPin[];
+  pinMap: Map<string, ContextRevisionPin>;
+}
+
+interface RequiredState {
+  items: PinnedResolvedItem[];
+  revisionPins: ContextRevisionPin[];
+  pinMap: Map<string, ContextRevisionPin>;
+  revisionCache: RevisionCache;
+  sections: ContextSection[];
+  seenMessages: SeenMessages;
+  estimatedTokens: number;
+}
+
+interface RetrievalState {
+  candidates: RetrievedCandidate[];
+  omitted: ContextOmission[];
+  degraded: boolean;
+  unavailable: Set<string>;
+}
+
+interface EvidenceOnlyCandidate {
+  conversation_id: string;
+  revision_id: string;
+  stagedEvidence: StagedEvidenceItem[];
+}
+
+interface AdmissionState {
+  sections: ContextSection[];
+  usedEstimatedTokens: number;
+  candidateEvidence: Map<ContextSection, StagedEvidenceItem[]>;
+  evidenceOnly: EvidenceOnlyCandidate[];
+  requiredBaselines: RequiredSectionBaseline[];
+}
+
+function addWarning(state: WarningState, warning: ContextWarning): void {
+  if (state.droppedCount > 0) {
+    state.droppedCount++;
+    return;
+  }
+  if (state.warnings.length < MAX_CONTEXT_WARNINGS) {
+    state.warnings.push(warning);
+    return;
+  }
+  state.warnings.pop();
+  state.droppedCount = 2;
+}
+
+function finalizeWarnings(state: WarningState): void {
+  if (state.droppedCount > 0) {
+    state.warnings.push({
+      code: "DIAGNOSTICS_TRUNCATED",
+      message: `${state.droppedCount} additional context warnings truncated`,
+    });
+  }
+}
+
+function evictWarningDetailForBudget(state: WarningState): boolean {
+  const summary = state.warnings.at(-1);
+  if (summary?.code === "DIAGNOSTICS_TRUNCATED") {
+    if (state.warnings.length <= 1) return false;
+    state.warnings.splice(state.warnings.length - 2, 1);
+    state.droppedCount++;
+    summary.message = `${state.droppedCount} additional context warnings truncated`;
+    return true;
+  }
+  if (state.warnings.length === 0) return false;
+  state.warnings.pop();
+  return true;
+}
 
 function restoreRequiredBaselines(baselines: RequiredSectionBaseline[]): void {
   for (const base of baselines) {
@@ -547,18 +630,11 @@ function computePackSerializedBytes(pack: Record<string, unknown>): number {
   return n;
 }
 
-export async function buildContext(
+async function resolveRequiredItems(
   env: AppEnv,
   tenant: Tenant,
   input: BuildContextInput,
-): Promise<ContextPack> {
-  validateInput(tenant, input);
-
-  const deduplicate = input.options?.deduplicate ?? true;
-  const includeProvenance = input.options?.include_provenance ?? true;
-  const includeCompiledText = input.options?.include_compiled_text ?? true;
-
-  // 1. Resolve and pin all required selectors BEFORE any canonical loading or retrieval
+): Promise<ResolvedRequiredItems> {
   const resolvedRequired: PinnedResolvedItem[] = new Array<PinnedResolvedItem>(
     input.required.length,
   );
@@ -704,6 +780,7 @@ export async function buildContext(
       }),
     );
   }
+
   // Canonicalize duplicate required selectors for the same conversation_id to one chosen pinned revision
   const canonicalByConv = new Map<string, PinnedResolvedItem>();
   for (const item of resolvedRequired) {
@@ -744,20 +821,29 @@ export async function buildContext(
       });
     }
   }
-  const revision_pins = Array.from(pinMap.values());
+  const revisionPins = Array.from(pinMap.values());
 
-  // 2. Load pinned canonical revisions in bounded waves of 4
+  return {
+    items: resolvedRequired,
+    revisionPins,
+    pinMap,
+  };
+}
+
+async function prepareRequiredState(
+  env: AppEnv,
+  resolved: ResolvedRequiredItems,
+  includeProvenance: boolean,
+  deduplicate: boolean,
+): Promise<RequiredState> {
   const uniqueRevisionIds = Array.from(
     new Set(
-      resolvedRequired
+      resolved.items
         .filter((item): item is PinnedResolvedItem => item !== undefined)
         .map((item) => item.revisionId),
     ),
   );
-  const revisionCache = new Map<
-    string,
-    { conversation: CanonicalConversation; manifest: CanonicalRevisionManifest }
-  >();
+  const revisionCache: RevisionCache = new Map();
 
   for (let i = 0; i < uniqueRevisionIds.length; i += 4) {
     const wave = uniqueRevisionIds.slice(i, i + 4);
@@ -770,10 +856,11 @@ export async function buildContext(
       }
     }
   }
-  // 3. Extract required messages and construct required sections
+
+  // Extract required messages and construct required sections
   const requiredSections: ContextSection[] = [];
-  for (let i = 0; i < resolvedRequired.length; i++) {
-    const item = resolvedRequired[i];
+  for (let i = 0; i < resolved.items.length; i++) {
+    const item = resolved.items[i];
     if (!item) continue;
     const loaded = revisionCache.get(item.revisionId);
     if (!loaded) continue;
@@ -841,7 +928,7 @@ export async function buildContext(
   });
 
   // Track seen messages for deduplication
-  const seenMessages = new Map<string, { section: ContextSection; message: ContextMessage }>();
+  const seenMessages: SeenMessages = new Map();
 
   // If deduplication is enabled, deduplicate across required sections as well
   for (const sec of requiredSections) {
@@ -859,22 +946,35 @@ export async function buildContext(
     sec.serialized_bytes = jsonBytes(sec);
   }
 
-  // 4. Check if required content alone exceeds budget
-  const requiredEstimatedTokens = requiredSections.reduce(
-    (sum, sec) => sum + sec.estimated_tokens,
-    0,
-  );
+  const estimatedTokens = requiredSections.reduce((sum, sec) => sum + sec.estimated_tokens, 0);
 
+  return {
+    items: resolved.items,
+    revisionPins: resolved.revisionPins,
+    pinMap: resolved.pinMap,
+    revisionCache,
+    sections: requiredSections,
+    seenMessages,
+    estimatedTokens,
+  };
+}
+
+async function requiredBudgetFailure(
+  env: AppEnv,
+  input: BuildContextInput,
+  required: RequiredState,
+  includeCompiledText: boolean,
+): Promise<ContextPackRequiredBudgetExceeded | null> {
   const draftRequiredOnly: Record<string, unknown> = {
     status: "complete",
     pack_id: "0".repeat(64),
     namespace: input.namespace ?? null,
     task: input.task,
-    revision_pins,
-    sections: requiredSections,
+    revision_pins: required.revisionPins,
+    sections: required.sections,
     budget: {
       max_estimated_tokens: input.budget.max_estimated_tokens,
-      used_estimated_tokens: requiredEstimatedTokens,
+      used_estimated_tokens: required.estimatedTokens,
       max_serialized_bytes: input.budget.max_serialized_bytes,
       used_serialized_bytes: 0,
       estimator: ESTIMATOR_VERSION,
@@ -883,310 +983,295 @@ export async function buildContext(
     degraded: false,
     unavailable: [],
     warnings: [],
-    ...(includeCompiledText ? { compiled_text: buildCompiledText(requiredSections) } : {}),
+    ...(includeCompiledText ? { compiled_text: buildCompiledText(required.sections) } : {}),
   };
 
   const requiredSerializedBytes = computePackSerializedBytes(draftRequiredOnly);
 
   if (
-    requiredEstimatedTokens > input.budget.max_estimated_tokens ||
-    requiredSerializedBytes > input.budget.max_serialized_bytes
+    required.estimatedTokens <= input.budget.max_estimated_tokens &&
+    requiredSerializedBytes <= input.budget.max_serialized_bytes
   ) {
-    const suggestedTokens = Math.max(
-      requiredEstimatedTokens,
-      Math.ceil((requiredEstimatedTokens * 1.05) / 100) * 100,
-    );
-    const suggestedBytes = Math.max(
-      requiredSerializedBytes,
-      Math.ceil((requiredSerializedBytes * 1.05) / 1024) * 1024,
-    );
+    return null;
+  }
 
-    const exceededWarnings: ContextWarning[] = [];
-    if (requiredSerializedBytes > MAX_SERIALIZED_BYTES_LIMIT) {
-      exceededWarnings.push({
-        code: "REQUIRED_CONTENT_EXCEEDS_MCP_LIMIT",
-        bytes: requiredSerializedBytes,
-        message: `Required content exceeds maximum MCP limit of ${MAX_SERIALIZED_BYTES_LIMIT} bytes. Narrow required modes or use revision-pinned pagination.`,
-      });
-    }
+  const suggestedTokens = Math.max(
+    required.estimatedTokens,
+    Math.ceil((required.estimatedTokens * 1.05) / 100) * 100,
+  );
+  const suggestedBytes = Math.max(
+    requiredSerializedBytes,
+    Math.ceil((requiredSerializedBytes * 1.05) / 1024) * 1024,
+  );
 
-    const MAX_OVERSIZED_DIAGNOSTICS = 20;
-    let totalOversized = 0;
-    let representedOversized = 0;
+  const exceededWarnings: ContextWarning[] = [];
+  if (requiredSerializedBytes > MAX_SERIALIZED_BYTES_LIMIT) {
+    exceededWarnings.push({
+      code: "REQUIRED_CONTENT_EXCEEDS_MCP_LIMIT",
+      bytes: requiredSerializedBytes,
+      message: `Required content exceeds maximum MCP limit of ${MAX_SERIALIZED_BYTES_LIMIT} bytes. Narrow required modes or use revision-pinned pagination.`,
+    });
+  }
 
-    for (const sec of requiredSections) {
-      for (const msg of sec.messages) {
-        const msgBytes = jsonBytes(msg);
-        if (msgBytes > input.budget.max_serialized_bytes || msgBytes > MAX_SERIALIZED_BYTES_LIMIT) {
-          totalOversized++;
-          if (representedOversized < MAX_OVERSIZED_DIAGNOSTICS) {
-            representedOversized++;
-            exceededWarnings.push({
-              code: "OVERSIZED_MESSAGE",
-              conversation_id: msg.conversation_id,
-              revision_id: msg.revision_id,
-              source_node_id: msg.source_node_id,
-              bytes: msgBytes,
-              message: `Message ${msg.source_node_id} exceeds byte limit (${msgBytes} bytes)`,
-            });
-          }
+  const MAX_OVERSIZED_DIAGNOSTICS = 20;
+  let totalOversized = 0;
+  let representedOversized = 0;
+
+  for (const sec of required.sections) {
+    for (const msg of sec.messages) {
+      const msgBytes = jsonBytes(msg);
+      if (msgBytes > input.budget.max_serialized_bytes || msgBytes > MAX_SERIALIZED_BYTES_LIMIT) {
+        totalOversized++;
+        if (representedOversized < MAX_OVERSIZED_DIAGNOSTICS) {
+          representedOversized++;
+          exceededWarnings.push({
+            code: "OVERSIZED_MESSAGE",
+            conversation_id: msg.conversation_id,
+            revision_id: msg.revision_id,
+            source_node_id: msg.source_node_id,
+            bytes: msgBytes,
+            message: `Message ${msg.source_node_id} exceeds byte limit (${msgBytes} bytes)`,
+          });
         }
       }
     }
-
-    if (totalOversized > representedOversized) {
-      exceededWarnings.push({
-        code: "DIAGNOSTICS_TRUNCATED",
-        message: `${totalOversized - representedOversized} additional oversized messages truncated`,
-      });
-    }
-
-    const exceededPackId = await computePackId(env, input, revision_pins, [], "");
-
-    return {
-      status: "required_budget_exceeded",
-      required_estimated_tokens: requiredEstimatedTokens,
-      required_serialized_bytes: requiredSerializedBytes,
-      suggested_minimum: {
-        max_estimated_tokens: suggestedTokens,
-        max_serialized_bytes: suggestedBytes,
-      },
-      warnings: exceededWarnings,
-      pack_id: exceededPackId,
-      degraded: false,
-      unavailable: [],
-    };
   }
 
-  // 5. Run retrieval concurrently only after required pins and budget check
-  let degraded = false;
-  const unavailableSet = new Set<string>();
-  const warnings: ContextWarning[] = [];
-  let droppedWarningCount = 0;
-  function addWarning(warning: ContextWarning): void {
-    if (droppedWarningCount > 0) {
-      droppedWarningCount++;
-      return;
-    }
-    if (warnings.length < MAX_CONTEXT_WARNINGS) {
-      warnings.push(warning);
-      return;
-    }
-    warnings.pop();
-    droppedWarningCount = 2;
-  }
-  function finalizeWarnings(): void {
-    if (droppedWarningCount > 0) {
-      warnings.push({
-        code: "DIAGNOSTICS_TRUNCATED",
-        message: `${droppedWarningCount} additional context warnings truncated`,
-      });
-    }
-  }
-  function evictWarningDetailForBudget(): boolean {
-    const summary = warnings.at(-1);
-    if (summary?.code === "DIAGNOSTICS_TRUNCATED") {
-      if (warnings.length <= 1) return false;
-      warnings.splice(warnings.length - 2, 1);
-      droppedWarningCount++;
-      summary.message = `${droppedWarningCount} additional context warnings truncated`;
-      return true;
-    }
-    if (warnings.length === 0) return false;
-    warnings.pop();
-    return true;
-  }
-  const omitted: ContextOmission[] = [];
-  const retrievedCandidates: RetrievedCandidate[] = [];
-
-  if (input.retrieve && input.retrieve.length > 0) {
-    const searchTasks = input.retrieve.map(async (retReq, retrieveIndex) => {
-      const namespaces = resolveItemNamespaces(tenant, input.namespace, retReq.namespace);
-      const limit = Math.min(20, Math.max(1, Math.floor(retReq.limit ?? 8)));
-      try {
-        const response = await searchMemory(env, {
-          query: retReq.query,
-          limit,
-          namespaces,
-          userId: tenant.userId,
-          ...(retReq.tags !== undefined ? { tags: retReq.tags } : {}),
-          ...(retReq.tag_mode !== undefined ? { tagMode: retReq.tag_mode } : {}),
-        });
-        return { retrieveIndex, retReq, namespaces, response, error: null };
-      } catch (err: unknown) {
-        return { retrieveIndex, retReq, namespaces, response: null, error: err };
-      }
+  if (totalOversized > representedOversized) {
+    exceededWarnings.push({
+      code: "DIAGNOSTICS_TRUNCATED",
+      message: `${totalOversized - representedOversized} additional oversized messages truncated`,
     });
+  }
 
-    const searchResponses = await Promise.all(searchTasks);
+  const exceededPackId = await computePackId(env, input, required.revisionPins, [], "");
 
-    for (const res of searchResponses) {
-      if (res.error || !res.response) {
-        degraded = true;
-        addWarning({
-          code: "RETRIEVAL_FAILED",
-          message: res.error instanceof Error ? res.error.message : "Search query failed",
+  return {
+    status: "required_budget_exceeded",
+    required_estimated_tokens: required.estimatedTokens,
+    required_serialized_bytes: requiredSerializedBytes,
+    suggested_minimum: {
+      max_estimated_tokens: suggestedTokens,
+      max_serialized_bytes: suggestedBytes,
+    },
+    warnings: exceededWarnings,
+    pack_id: exceededPackId,
+    degraded: false,
+    unavailable: [],
+  };
+}
+
+async function collectRetrievedCandidates(
+  env: AppEnv,
+  tenant: Tenant,
+  input: BuildContextInput,
+  required: RequiredState,
+  warningState: WarningState,
+): Promise<RetrievalState> {
+  let degraded = false;
+  const unavailable = new Set<string>();
+  const omitted: ContextOmission[] = [];
+  const candidates: RetrievedCandidate[] = [];
+
+  if (!input.retrieve || input.retrieve.length === 0) {
+    return { candidates, omitted, degraded, unavailable };
+  }
+
+  const searchTasks = input.retrieve.map(async (retReq, retrieveIndex) => {
+    const namespaces = resolveItemNamespaces(tenant, input.namespace, retReq.namespace);
+    const limit = Math.min(20, Math.max(1, Math.floor(retReq.limit ?? 8)));
+    try {
+      const response = await searchMemory(env, {
+        query: retReq.query,
+        limit,
+        namespaces,
+        userId: tenant.userId,
+        ...(retReq.tags !== undefined ? { tags: retReq.tags } : {}),
+        ...(retReq.tag_mode !== undefined ? { tagMode: retReq.tag_mode } : {}),
+      });
+      return { retrieveIndex, retReq, namespaces, response, error: null };
+    } catch (err: unknown) {
+      return { retrieveIndex, retReq, namespaces, response: null, error: err };
+    }
+  });
+
+  const searchResponses = await Promise.all(searchTasks);
+
+  for (const res of searchResponses) {
+    if (res.error || !res.response) {
+      degraded = true;
+      addWarning(warningState, {
+        code: "RETRIEVAL_FAILED",
+        message: res.error instanceof Error ? res.error.message : "Search query failed",
+      });
+      continue;
+    }
+
+    if (res.response.degraded) {
+      degraded = true;
+    }
+    for (const un of res.response.unavailable) {
+      unavailable.add(un);
+    }
+
+    // Process each hit returned by search
+    for (const hit of res.response.results) {
+      // Query D1 for chunk sources and conversation head revision check
+      const rowsResult = await env.MEMORY_DB.prepare(
+        `SELECT c.revision_id, cv.current_revision_id, c.namespace, c.title, c.branch_key, s.source_node_id, s.source_sequence, s.char_start, s.char_end, s.ordinal
+         FROM chunks c
+         JOIN chunk_sources s ON s.chunk_id = c.id
+         JOIN conversations cv ON cv.id = c.conversation_id
+         WHERE c.id = ? AND cv.user_id = ? AND cv.deleted_at IS NULL
+         ORDER BY s.ordinal`,
+      )
+        .bind(hit.chunkId, tenant.userId)
+        .all<ChunkSourceRow>();
+
+      const rows = rowsResult.results;
+      if (!rows || rows.length === 0) {
+        omitted.push({
+          kind: "retrieved",
+          conversation_id: hit.conversationId,
+          revision_id: hit.revisionId,
+          reason: "unavailable",
         });
         continue;
       }
 
-      if (res.response.degraded) {
-        degraded = true;
-      }
-      for (const un of res.response.unavailable) {
-        unavailableSet.add(un);
-      }
-
-      // Process each hit returned by search
-      for (const hit of res.response.results) {
-        // Query D1 for chunk sources and conversation head revision check
-        const rowsResult = await env.MEMORY_DB.prepare(
-          `SELECT c.revision_id, cv.current_revision_id, c.namespace, c.title, c.branch_key, s.source_node_id, s.source_sequence, s.char_start, s.char_end, s.ordinal
-           FROM chunks c
-           JOIN chunk_sources s ON s.chunk_id = c.id
-           JOIN conversations cv ON cv.id = c.conversation_id
-           WHERE c.id = ? AND cv.user_id = ? AND cv.deleted_at IS NULL
-           ORDER BY s.ordinal`,
-        )
-          .bind(hit.chunkId, tenant.userId)
-          .all<ChunkSourceRow>();
-
-        const rows = rowsResult.results;
-        if (!rows || rows.length === 0) {
-          omitted.push({
-            kind: "retrieved",
-            conversation_id: hit.conversationId,
-            revision_id: hit.revisionId,
-            reason: "unavailable",
-          });
-          continue;
-        }
-
-        const firstRow = rows[0];
-        if (!firstRow) {
-          omitted.push({
-            kind: "retrieved",
-            conversation_id: hit.conversationId,
-            revision_id: hit.revisionId,
-            reason: "unavailable",
-          });
-          continue;
-        }
-        // Tenant/namespace access check
-        if (!res.namespaces.includes(firstRow.namespace)) {
-          omitted.push({
-            kind: "retrieved",
-            conversation_id: hit.conversationId,
-            revision_id: hit.revisionId,
-            reason: "unavailable",
-          });
-          continue;
-        }
-
-        // Stale revision check: check both indexed chunk revision and current conversation head
-        const pinned = pinMap.get(hit.conversationId);
-        const isStale =
-          firstRow.revision_id !== hit.revisionId ||
-          (firstRow.current_revision_id !== null &&
-            firstRow.current_revision_id !== hit.revisionId) ||
-          (pinned !== undefined && pinned.revision_id !== hit.revisionId);
-
-        if (isStale) {
-          omitted.push({
-            kind: "retrieved",
-            conversation_id: hit.conversationId,
-            revision_id: hit.revisionId,
-            reason: "stale_revision",
-          });
-          addWarning({
-            code: "STALE_REVISION",
-            conversation_id: hit.conversationId,
-            revision_id: hit.revisionId,
-            message: `Retrieved revision "${hit.revisionId}" is stale (current head is "${firstRow.current_revision_id}")`,
-          });
-          continue;
-        }
-
-        // Load canonical revision for retrieved chunk (must load the search-returned revision)
-        let loadedRev = revisionCache.get(hit.revisionId);
-        if (!loadedRev) {
-          try {
-            loadedRev = await loadCanonicalRevision(env, hit.revisionId);
-            revisionCache.set(hit.revisionId, loadedRev);
-          } catch (err: unknown) {
-            const isNotFound = err instanceof AppError && err.code === "NOT_FOUND";
-            omitted.push({
-              kind: "retrieved",
-              conversation_id: hit.conversationId,
-              revision_id: hit.revisionId,
-              reason: isNotFound ? "stale_revision" : "unavailable",
-            });
-            addWarning({
-              code: isNotFound ? "STALE_REVISION" : "CONTEXT_LOAD_FAILED",
-              conversation_id: hit.conversationId,
-              revision_id: hit.revisionId,
-              message: err instanceof Error ? err.message : "Failed to load canonical revision",
-            });
-            continue;
-          }
-        }
-
-        // Extract messages around chunk sources
-        const before = Math.min(10, Math.max(0, Math.floor(res.retReq.context_before ?? 2)));
-        const after = Math.min(10, Math.max(0, Math.floor(res.retReq.context_after ?? 2)));
-        const byId = new Map(loadedRev.conversation.nodes.map((node) => [node.sourceNodeId, node]));
-        const active = loadedRev.conversation.activeSourceNodeIds ?? [];
-        const activeSequences = rows.flatMap((source) =>
-          source.source_sequence === null ? [] : [source.source_sequence],
-        );
-
-        let chunkMessages: CanonicalNode[];
-        if (
-          firstRow.branch_key === "active" &&
-          activeSequences.length === rows.length &&
-          activeSequences.length > 0
-        ) {
-          const start = Math.max(0, Math.min(...activeSequences) - before);
-          const end = Math.min(active.length, Math.max(...activeSequences) + after + 1);
-          chunkMessages = active
-            .slice(start, end)
-            .flatMap((id) => (byId.get(id) ? [byId.get(id)!] : []));
-        } else {
-          chunkMessages = expandPointerNeighborhood(
-            loadedRev.conversation,
-            rows.map((source) => source.source_node_id),
-            before,
-            after,
-            firstRow.branch_key,
-          );
-        }
-        chunkMessages = chunkMessages.filter((node) => node.text.length > 0);
-
-        const matchedRanges: MatchedRange[] = rows.map((r) => ({
-          source_node_id: r.source_node_id,
-          char_start: r.char_start,
-          char_end: r.char_end,
-        }));
-
-        retrievedCandidates.push({
-          request_index: res.retrieveIndex,
-          title: firstRow.title || hit.title || loadedRev.conversation.title,
-          priority: res.retReq.priority,
-          score: hit.score,
-          chunkId: hit.chunkId,
+      const firstRow = rows[0];
+      if (!firstRow) {
+        omitted.push({
+          kind: "retrieved",
           conversation_id: hit.conversationId,
           revision_id: hit.revisionId,
-          rawMessages: chunkMessages,
-          matched_ranges: matchedRanges,
-          sources: hit.sources,
+          reason: "unavailable",
         });
+        continue;
       }
+      // Tenant/namespace access check
+      if (!res.namespaces.includes(firstRow.namespace)) {
+        omitted.push({
+          kind: "retrieved",
+          conversation_id: hit.conversationId,
+          revision_id: hit.revisionId,
+          reason: "unavailable",
+        });
+        continue;
+      }
+
+      // Stale revision check: check both indexed chunk revision and current conversation head
+      const pinned = required.pinMap.get(hit.conversationId);
+      const isStale =
+        firstRow.revision_id !== hit.revisionId ||
+        (firstRow.current_revision_id !== null &&
+          firstRow.current_revision_id !== hit.revisionId) ||
+        (pinned !== undefined && pinned.revision_id !== hit.revisionId);
+
+      if (isStale) {
+        omitted.push({
+          kind: "retrieved",
+          conversation_id: hit.conversationId,
+          revision_id: hit.revisionId,
+          reason: "stale_revision",
+        });
+        addWarning(warningState, {
+          code: "STALE_REVISION",
+          conversation_id: hit.conversationId,
+          revision_id: hit.revisionId,
+          message: `Retrieved revision "${hit.revisionId}" is stale (current head is "${firstRow.current_revision_id}")`,
+        });
+        continue;
+      }
+
+      // Load canonical revision for retrieved chunk (must load the search-returned revision)
+      let loadedRev = required.revisionCache.get(hit.revisionId);
+      if (!loadedRev) {
+        try {
+          loadedRev = await loadCanonicalRevision(env, hit.revisionId);
+          required.revisionCache.set(hit.revisionId, loadedRev);
+        } catch (err: unknown) {
+          const isNotFound = err instanceof AppError && err.code === "NOT_FOUND";
+          omitted.push({
+            kind: "retrieved",
+            conversation_id: hit.conversationId,
+            revision_id: hit.revisionId,
+            reason: isNotFound ? "stale_revision" : "unavailable",
+          });
+          addWarning(warningState, {
+            code: isNotFound ? "STALE_REVISION" : "CONTEXT_LOAD_FAILED",
+            conversation_id: hit.conversationId,
+            revision_id: hit.revisionId,
+            message: err instanceof Error ? err.message : "Failed to load canonical revision",
+          });
+          continue;
+        }
+      }
+
+      // Extract messages around chunk sources
+      const before = Math.min(10, Math.max(0, Math.floor(res.retReq.context_before ?? 2)));
+      const after = Math.min(10, Math.max(0, Math.floor(res.retReq.context_after ?? 2)));
+      const byId = new Map(loadedRev.conversation.nodes.map((node) => [node.sourceNodeId, node]));
+      const active = loadedRev.conversation.activeSourceNodeIds ?? [];
+      const activeSequences = rows.flatMap((source) =>
+        source.source_sequence === null ? [] : [source.source_sequence],
+      );
+
+      let chunkMessages: CanonicalNode[];
+      if (
+        firstRow.branch_key === "active" &&
+        activeSequences.length === rows.length &&
+        activeSequences.length > 0
+      ) {
+        const start = Math.max(0, Math.min(...activeSequences) - before);
+        const end = Math.min(active.length, Math.max(...activeSequences) + after + 1);
+        chunkMessages = active
+          .slice(start, end)
+          .flatMap((id) => (byId.get(id) ? [byId.get(id)!] : []));
+      } else {
+        chunkMessages = expandPointerNeighborhood(
+          loadedRev.conversation,
+          rows.map((source) => source.source_node_id),
+          before,
+          after,
+          firstRow.branch_key,
+        );
+      }
+      chunkMessages = chunkMessages.filter((node) => node.text.length > 0);
+
+      const matchedRanges: MatchedRange[] = rows.map((r) => ({
+        source_node_id: r.source_node_id,
+        char_start: r.char_start,
+        char_end: r.char_end,
+      }));
+
+      candidates.push({
+        request_index: res.retrieveIndex,
+        title: firstRow.title || hit.title || loadedRev.conversation.title,
+        priority: res.retReq.priority,
+        score: hit.score,
+        chunkId: hit.chunkId,
+        conversation_id: hit.conversationId,
+        revision_id: hit.revisionId,
+        rawMessages: chunkMessages,
+        matched_ranges: matchedRanges,
+        sources: hit.sources,
+      });
     }
   }
 
-  // 6. Sort retrieved candidates and greedily fit whole messages
-  // Sorting: priority desc, score desc, request_index asc, stable conversation/revision/chunk IDs
-  retrievedCandidates.sort((a, b) => {
+  return { candidates, omitted, degraded, unavailable };
+}
+
+function admitRetrievedCandidates(
+  input: BuildContextInput,
+  required: RequiredState,
+  retrieval: RetrievalState,
+  warningState: WarningState,
+  includeProvenance: boolean,
+  includeCompiledText: boolean,
+): AdmissionState {
+  retrieval.candidates.sort((a, b) => {
     if (b.priority !== a.priority) return b.priority - a.priority;
     if (b.score !== a.score) return b.score - a.score;
     if (a.request_index !== b.request_index) return a.request_index - b.request_index;
@@ -1199,17 +1284,13 @@ export async function buildContext(
     return a.chunkId.localeCompare(b.chunkId);
   });
 
-  const admittedSections: ContextSection[] = [...requiredSections];
-  let usedEstimatedTokens = requiredEstimatedTokens;
+  const admittedSections: ContextSection[] = [...required.sections];
+  let usedEstimatedTokens = required.estimatedTokens;
 
   const candidateEvidenceMap = new Map<ContextSection, StagedEvidenceItem[]>();
-  const admittedEvidenceOnlyCandidates: Array<{
-    conversation_id: string;
-    revision_id: string;
-    stagedEvidence: StagedEvidenceItem[];
-  }> = [];
+  const admittedEvidenceOnlyCandidates: EvidenceOnlyCandidate[] = [];
 
-  const requiredBaselines: RequiredSectionBaseline[] = requiredSections.map((sec) => ({
+  const requiredBaselines: RequiredSectionBaseline[] = required.sections.map((sec) => ({
     section: sec,
     ...(sec.matched_chunk_ids ? { matched_chunk_ids: [...sec.matched_chunk_ids] } : {}),
     ...(sec.matched_ranges ? { matched_ranges: sec.matched_ranges.map((r) => ({ ...r })) } : {}),
@@ -1220,7 +1301,9 @@ export async function buildContext(
     })),
   }));
 
-  for (const candidate of retrievedCandidates) {
+  const deduplicate = input.options?.deduplicate ?? true;
+
+  for (const candidate of retrieval.candidates) {
     // 6a. Check for oversized messages in optional retrieved candidate
     let hasOversizedMessage = false;
     for (const rawMsg of candidate.rawMessages) {
@@ -1248,7 +1331,7 @@ export async function buildContext(
       const msgBytes = jsonBytes(msg);
       if (msgBytes > input.budget.max_serialized_bytes || msgBytes > MAX_SERIALIZED_BYTES_LIMIT) {
         hasOversizedMessage = true;
-        addWarning({
+        addWarning(warningState, {
           code: "OVERSIZED_MESSAGE",
           conversation_id: candidate.conversation_id,
           revision_id: candidate.revision_id,
@@ -1260,7 +1343,7 @@ export async function buildContext(
     }
 
     if (hasOversizedMessage) {
-      omitted.push({
+      retrieval.omitted.push({
         kind: "retrieved",
         conversation_id: candidate.conversation_id,
         revision_id: candidate.revision_id,
@@ -1274,8 +1357,8 @@ export async function buildContext(
 
     for (const rawMsg of candidate.rawMessages) {
       const key = `${candidate.conversation_id}:${candidate.revision_id}:${rawMsg.sourceNodeId}`;
-      if (deduplicate && seenMessages.has(key)) {
-        const existing = seenMessages.get(key)!;
+      if (deduplicate && required.seenMessages.has(key)) {
+        const existing = required.seenMessages.get(key)!;
         // Merge evidence into existing placement (required or retrieved)
         stagedEvidence.push({
           section: existing.section,
@@ -1367,7 +1450,7 @@ export async function buildContext(
           pack_id: "0".repeat(64),
           namespace: input.namespace ?? null,
           task: input.task,
-          revision_pins,
+          revision_pins: required.revisionPins,
           sections: admittedSections,
           budget: {
             max_estimated_tokens: input.budget.max_estimated_tokens,
@@ -1376,17 +1459,17 @@ export async function buildContext(
             used_serialized_bytes: 0,
             estimator: ESTIMATOR_VERSION,
           },
-          omitted,
-          degraded,
-          unavailable: Array.from(unavailableSet).sort(),
-          warnings,
+          omitted: retrieval.omitted,
+          degraded: retrieval.degraded,
+          unavailable: Array.from(retrieval.unavailable).sort(),
+          warnings: warningState.warnings,
           ...(testCompiledText !== undefined ? { compiled_text: testCompiledText } : {}),
         };
 
         const measuredBytes = computePackSerializedBytes(draftTestPack);
         if (measuredBytes > input.budget.max_serialized_bytes) {
           rollbackStagedEvidence(stagedEvidence);
-          omitted.push({
+          retrieval.omitted.push({
             kind: "retrieved",
             conversation_id: candidate.conversation_id,
             revision_id: candidate.revision_id,
@@ -1408,7 +1491,7 @@ export async function buildContext(
     // 1. Check token budget
     if (usedEstimatedTokens + candidateTokens > input.budget.max_estimated_tokens) {
       rollbackStagedEvidence(stagedEvidence);
-      omitted.push({
+      retrieval.omitted.push({
         kind: "retrieved",
         conversation_id: candidate.conversation_id,
         revision_id: candidate.revision_id,
@@ -1446,7 +1529,7 @@ export async function buildContext(
       pack_id: "0".repeat(64),
       namespace: input.namespace ?? null,
       task: input.task,
-      revision_pins,
+      revision_pins: required.revisionPins,
       sections: testSections,
       budget: {
         max_estimated_tokens: input.budget.max_estimated_tokens,
@@ -1455,17 +1538,17 @@ export async function buildContext(
         used_serialized_bytes: 0,
         estimator: ESTIMATOR_VERSION,
       },
-      omitted,
-      degraded,
-      unavailable: Array.from(unavailableSet).sort(),
-      warnings,
+      omitted: retrieval.omitted,
+      degraded: retrieval.degraded,
+      unavailable: Array.from(retrieval.unavailable).sort(),
+      warnings: warningState.warnings,
       ...(testCompiledText !== undefined ? { compiled_text: testCompiledText } : {}),
     };
 
     const measuredBytes = computePackSerializedBytes(draftTestPack);
     if (measuredBytes > input.budget.max_serialized_bytes) {
       rollbackStagedEvidence(stagedEvidence);
-      omitted.push({
+      retrieval.omitted.push({
         kind: "retrieved",
         conversation_id: candidate.conversation_id,
         revision_id: candidate.revision_id,
@@ -1483,111 +1566,139 @@ export async function buildContext(
 
     for (const msg of candidateMessages) {
       const key = `${candidate.conversation_id}:${candidate.revision_id}:${msg.source_node_id}`;
-      seenMessages.set(key, { section: candidateSection, message: msg });
+      required.seenMessages.set(key, { section: candidateSection, message: msg });
     }
   }
 
-  // 7. Recheck current heads for admitted retrieved conversation/revision pairs immediately before final output
-  const admittedRetrievedSections = admittedSections.filter((s) => s.kind === "retrieved");
-  if (admittedRetrievedSections.length > 0 || admittedEvidenceOnlyCandidates.length > 0) {
-    const distinctRetrievedConvIds = Array.from(
-      new Set([
-        ...admittedRetrievedSections.map((s) => s.conversation_id),
-        ...admittedEvidenceOnlyCandidates.map((c) => c.conversation_id),
-      ]),
-    );
-    const headByConvId: Record<string, string | null> = {};
+  return {
+    sections: admittedSections,
+    usedEstimatedTokens,
+    candidateEvidence: candidateEvidenceMap,
+    evidenceOnly: admittedEvidenceOnlyCandidates,
+    requiredBaselines,
+  };
+}
 
-    for (const convId of distinctRetrievedConvIds) {
-      const row = await env.MEMORY_DB.prepare(
-        `SELECT current_revision_id FROM conversations WHERE id = ? AND user_id = ? AND deleted_at IS NULL`,
-      )
-        .bind(convId, tenant.userId)
-        .first<{ current_revision_id: string | null }>();
-      headByConvId[convId] = row ? row.current_revision_id : null;
-    }
+async function recheckAdmittedHeads(
+  env: AppEnv,
+  tenant: Tenant,
+  admission: AdmissionState,
+  retrieval: RetrievalState,
+  warningState: WarningState,
+): Promise<void> {
+  const admittedRetrievedSections = admission.sections.filter((s) => s.kind === "retrieved");
+  if (admittedRetrievedSections.length === 0 && admission.evidenceOnly.length === 0) {
+    return;
+  }
 
-    const staleSections = new Set<ContextSection>();
+  const distinctRetrievedConvIds = Array.from(
+    new Set([
+      ...admittedRetrievedSections.map((s) => s.conversation_id),
+      ...admission.evidenceOnly.map((c) => c.conversation_id),
+    ]),
+  );
+  const headByConvId: Record<string, string | null> = {};
 
-    for (const sec of admittedRetrievedSections) {
-      const currentHead = headByConvId[sec.conversation_id];
-      if (currentHead === undefined || currentHead === null || currentHead !== sec.revision_id) {
-        staleSections.add(sec);
-        omitted.push({
-          kind: "retrieved",
-          conversation_id: sec.conversation_id,
-          revision_id: sec.revision_id,
-          reason: "stale_revision",
-        });
-        addWarning({
-          code: "STALE_REVISION",
-          conversation_id: sec.conversation_id,
-          revision_id: sec.revision_id,
-          message: `Retrieved revision "${sec.revision_id}" is stale (current head is "${currentHead ?? "null"}")`,
-        });
-      }
-    }
+  for (const convId of distinctRetrievedConvIds) {
+    const row = await env.MEMORY_DB.prepare(
+      `SELECT current_revision_id FROM conversations WHERE id = ? AND user_id = ? AND deleted_at IS NULL`,
+    )
+      .bind(convId, tenant.userId)
+      .first<{ current_revision_id: string | null }>();
+    headByConvId[convId] = row ? row.current_revision_id : null;
+  }
 
-    for (let i = admittedEvidenceOnlyCandidates.length - 1; i >= 0; i--) {
-      const cand = admittedEvidenceOnlyCandidates[i]!;
-      const currentHead = headByConvId[cand.conversation_id];
-      if (currentHead === undefined || currentHead === null || currentHead !== cand.revision_id) {
-        rollbackStagedEvidence(cand.stagedEvidence);
-        omitted.push({
-          kind: "retrieved",
-          conversation_id: cand.conversation_id,
-          revision_id: cand.revision_id,
-          reason: "stale_revision",
-        });
-        addWarning({
-          code: "STALE_REVISION",
-          conversation_id: cand.conversation_id,
-          revision_id: cand.revision_id,
-          message: `Retrieved revision "${cand.revision_id}" is stale (current head is "${currentHead ?? "null"}")`,
-        });
-      }
-    }
-    const remainingEvidenceOnly = admittedEvidenceOnlyCandidates.filter((cand) => {
-      const currentHead = headByConvId[cand.conversation_id];
-      return currentHead !== undefined && currentHead !== null && currentHead === cand.revision_id;
-    });
-    admittedEvidenceOnlyCandidates.length = 0;
-    admittedEvidenceOnlyCandidates.push(...remainingEvidenceOnly);
+  const staleSections = new Set<ContextSection>();
 
-    if (staleSections.size > 0) {
-      for (let i = admittedSections.length - 1; i >= 0; i--) {
-        const sec = admittedSections[i]!;
-        if (sec.kind === "retrieved" && staleSections.has(sec)) {
-          usedEstimatedTokens -= sec.estimated_tokens;
-          const staged = candidateEvidenceMap.get(sec);
-          if (staged) {
-            rollbackStagedEvidence(staged);
-          }
-        }
-      }
-      const remainingSections: ContextSection[] = [];
-      for (const sec of admittedSections) {
-        if (!(sec.kind === "retrieved" && staleSections.has(sec))) {
-          remainingSections.push(sec);
-        }
-      }
-      admittedSections.length = 0;
-      admittedSections.push(...remainingSections);
+  for (const sec of admittedRetrievedSections) {
+    const currentHead = headByConvId[sec.conversation_id];
+    if (currentHead === undefined || currentHead === null || currentHead !== sec.revision_id) {
+      staleSections.add(sec);
+      retrieval.omitted.push({
+        kind: "retrieved",
+        conversation_id: sec.conversation_id,
+        revision_id: sec.revision_id,
+        reason: "stale_revision",
+      });
+      addWarning(warningState, {
+        code: "STALE_REVISION",
+        conversation_id: sec.conversation_id,
+        revision_id: sec.revision_id,
+        message: `Retrieved revision "${sec.revision_id}" is stale (current head is "${currentHead ?? "null"}")`,
+      });
     }
   }
-  finalizeWarnings();
+
+  for (let i = admission.evidenceOnly.length - 1; i >= 0; i--) {
+    const cand = admission.evidenceOnly[i]!;
+    const currentHead = headByConvId[cand.conversation_id];
+    if (currentHead === undefined || currentHead === null || currentHead !== cand.revision_id) {
+      rollbackStagedEvidence(cand.stagedEvidence);
+      retrieval.omitted.push({
+        kind: "retrieved",
+        conversation_id: cand.conversation_id,
+        revision_id: cand.revision_id,
+        reason: "stale_revision",
+      });
+      addWarning(warningState, {
+        code: "STALE_REVISION",
+        conversation_id: cand.conversation_id,
+        revision_id: cand.revision_id,
+        message: `Retrieved revision "${cand.revision_id}" is stale (current head is "${currentHead ?? "null"}")`,
+      });
+    }
+  }
+  const remainingEvidenceOnly = admission.evidenceOnly.filter((cand) => {
+    const currentHead = headByConvId[cand.conversation_id];
+    return currentHead !== undefined && currentHead !== null && currentHead === cand.revision_id;
+  });
+  admission.evidenceOnly.length = 0;
+  admission.evidenceOnly.push(...remainingEvidenceOnly);
+
+  if (staleSections.size > 0) {
+    for (let i = admission.sections.length - 1; i >= 0; i--) {
+      const sec = admission.sections[i]!;
+      if (sec.kind === "retrieved" && staleSections.has(sec)) {
+        admission.usedEstimatedTokens -= sec.estimated_tokens;
+        const staged = admission.candidateEvidence.get(sec);
+        if (staged) {
+          rollbackStagedEvidence(staged);
+        }
+      }
+    }
+    const remainingSections: ContextSection[] = [];
+    for (const sec of admission.sections) {
+      if (!(sec.kind === "retrieved" && staleSections.has(sec))) {
+        remainingSections.push(sec);
+      }
+    }
+    admission.sections.length = 0;
+    admission.sections.push(...remainingSections);
+  }
+}
+
+async function finalizeContextPack(
+  env: AppEnv,
+  input: BuildContextInput,
+  required: RequiredState,
+  retrieval: RetrievalState,
+  admission: AdmissionState,
+  warningState: WarningState,
+  includeCompiledText: boolean,
+): Promise<ContextPackComplete> {
+  finalizeWarnings(warningState);
 
   // Update serialized_bytes for every admitted section
-  for (const sec of admittedSections) {
+  for (const sec of admission.sections) {
     sec.serialized_bytes = jsonBytes(sec);
   }
 
-  let finalCompiledText = includeCompiledText ? buildCompiledText(admittedSections) : undefined;
+  let finalCompiledText = includeCompiledText ? buildCompiledText(admission.sections) : undefined;
   let finalPackId = await computePackId(
     env,
     input,
-    revision_pins,
-    admittedSections,
+    required.revisionPins,
+    admission.sections,
     finalCompiledText,
   );
 
@@ -1596,48 +1707,48 @@ export async function buildContext(
     pack_id: finalPackId,
     namespace: input.namespace ?? null,
     task: input.task,
-    revision_pins,
-    sections: admittedSections,
+    revision_pins: required.revisionPins,
+    sections: admission.sections,
     budget: {
       max_estimated_tokens: input.budget.max_estimated_tokens,
-      used_estimated_tokens: usedEstimatedTokens,
+      used_estimated_tokens: admission.usedEstimatedTokens,
       max_serialized_bytes: input.budget.max_serialized_bytes,
       used_serialized_bytes: 0,
       estimator: ESTIMATOR_VERSION,
     },
-    omitted,
-    degraded,
-    unavailable: Array.from(unavailableSet).sort(),
-    warnings,
+    omitted: retrieval.omitted,
+    degraded: retrieval.degraded,
+    unavailable: Array.from(retrieval.unavailable).sort(),
+    warnings: warningState.warnings,
     ...(finalCompiledText !== undefined ? { compiled_text: finalCompiledText } : {}),
   };
 
   const budgetCeiling = Math.min(input.budget.max_serialized_bytes, MAX_SERIALIZED_BYTES_LIMIT);
   let totalFinalBytes = computePackSerializedBytes(finalPack as unknown as Record<string, unknown>);
-  const initialRetrievedSectionsCount = admittedSections.length - requiredSections.length;
+  const initialRetrievedSectionsCount = admission.sections.length - required.sections.length;
 
   // If optional sections/diagnostics make it too large:
   // 1. Remove lowest-priority retrieved sections (from end of admittedSections)
-  while (admittedSections.length > requiredSections.length && totalFinalBytes > budgetCeiling) {
-    const popped = admittedSections.pop();
+  while (admission.sections.length > required.sections.length && totalFinalBytes > budgetCeiling) {
+    const popped = admission.sections.pop();
     if (!popped) break;
-    usedEstimatedTokens -= popped.estimated_tokens;
-    const staged = candidateEvidenceMap.get(popped);
+    admission.usedEstimatedTokens -= popped.estimated_tokens;
+    const staged = admission.candidateEvidence.get(popped);
     if (staged) {
       rollbackStagedEvidence(staged);
     }
-    omitted.push({
+    retrieval.omitted.push({
       kind: "retrieved",
       conversation_id: popped.conversation_id,
       revision_id: popped.revision_id,
       reason: "budget",
     });
-    for (const sec of admittedSections) {
+    for (const sec of admission.sections) {
       sec.serialized_bytes = jsonBytes(sec);
     }
-    finalCompiledText = includeCompiledText ? buildCompiledText(admittedSections) : undefined;
-    finalPack.sections = admittedSections;
-    finalPack.budget.used_estimated_tokens = usedEstimatedTokens;
+    finalCompiledText = includeCompiledText ? buildCompiledText(admission.sections) : undefined;
+    finalPack.sections = admission.sections;
+    finalPack.budget.used_estimated_tokens = admission.usedEstimatedTokens;
     if (finalCompiledText !== undefined) {
       finalPack.compiled_text = finalCompiledText;
     } else {
@@ -1646,8 +1757,8 @@ export async function buildContext(
     finalPackId = await computePackId(
       env,
       input,
-      revision_pins,
-      admittedSections,
+      required.revisionPins,
+      admission.sections,
       finalCompiledText,
     );
     finalPack.pack_id = finalPackId;
@@ -1655,22 +1766,22 @@ export async function buildContext(
   }
 
   // If budget trimming removed all optional retrieved sections, restore required baseline atomically
-  if (initialRetrievedSectionsCount > 0 && admittedSections.length === requiredSections.length) {
-    restoreRequiredBaselines(requiredBaselines);
-    for (const cand of admittedEvidenceOnlyCandidates) {
-      omitted.push({
+  if (initialRetrievedSectionsCount > 0 && admission.sections.length === required.sections.length) {
+    restoreRequiredBaselines(admission.requiredBaselines);
+    for (const cand of admission.evidenceOnly) {
+      retrieval.omitted.push({
         kind: "retrieved",
         conversation_id: cand.conversation_id,
         revision_id: cand.revision_id,
         reason: "budget",
       });
     }
-    admittedEvidenceOnlyCandidates.length = 0;
+    admission.evidenceOnly.length = 0;
 
-    for (const sec of admittedSections) {
+    for (const sec of admission.sections) {
       sec.serialized_bytes = jsonBytes(sec);
     }
-    finalCompiledText = includeCompiledText ? buildCompiledText(admittedSections) : undefined;
+    finalCompiledText = includeCompiledText ? buildCompiledText(admission.sections) : undefined;
     if (finalCompiledText !== undefined) {
       finalPack.compiled_text = finalCompiledText;
     } else {
@@ -1679,8 +1790,8 @@ export async function buildContext(
     finalPackId = await computePackId(
       env,
       input,
-      revision_pins,
-      admittedSections,
+      required.revisionPins,
+      admission.sections,
       finalCompiledText,
     );
     finalPack.pack_id = finalPackId;
@@ -1690,21 +1801,21 @@ export async function buildContext(
   // 2. If only required sections remain and it is still too large,
   // roll back all evidence attached to required sections and bound omission/warning metadata
   if (totalFinalBytes > budgetCeiling) {
-    restoreRequiredBaselines(requiredBaselines);
-    for (const cand of admittedEvidenceOnlyCandidates) {
-      omitted.push({
+    restoreRequiredBaselines(admission.requiredBaselines);
+    for (const cand of admission.evidenceOnly) {
+      retrieval.omitted.push({
         kind: "retrieved",
         conversation_id: cand.conversation_id,
         revision_id: cand.revision_id,
         reason: "budget",
       });
     }
-    admittedEvidenceOnlyCandidates.length = 0;
+    admission.evidenceOnly.length = 0;
 
-    for (const sec of admittedSections) {
+    for (const sec of admission.sections) {
       sec.serialized_bytes = jsonBytes(sec);
     }
-    finalCompiledText = includeCompiledText ? buildCompiledText(admittedSections) : undefined;
+    finalCompiledText = includeCompiledText ? buildCompiledText(admission.sections) : undefined;
     if (finalCompiledText !== undefined) {
       finalPack.compiled_text = finalCompiledText;
     } else {
@@ -1712,27 +1823,104 @@ export async function buildContext(
     }
     totalFinalBytes = computePackSerializedBytes(finalPack as unknown as Record<string, unknown>);
 
-    while (warnings.length > 0 && totalFinalBytes > budgetCeiling) {
-      if (!evictWarningDetailForBudget()) break;
+    while (warningState.warnings.length > 0 && totalFinalBytes > budgetCeiling) {
+      if (!evictWarningDetailForBudget(warningState)) break;
       totalFinalBytes = computePackSerializedBytes(finalPack as unknown as Record<string, unknown>);
     }
-    while (omitted.length > 0 && totalFinalBytes > budgetCeiling) {
-      omitted.pop();
+    while (retrieval.omitted.length > 0 && totalFinalBytes > budgetCeiling) {
+      retrieval.omitted.pop();
       totalFinalBytes = computePackSerializedBytes(finalPack as unknown as Record<string, unknown>);
     }
-    if (totalFinalBytes > budgetCeiling && warnings.at(-1)?.code === "DIAGNOSTICS_TRUNCATED") {
-      warnings.pop();
+    if (
+      totalFinalBytes > budgetCeiling &&
+      warningState.warnings.at(-1)?.code === "DIAGNOSTICS_TRUNCATED"
+    ) {
+      warningState.warnings.pop();
       totalFinalBytes = computePackSerializedBytes(finalPack as unknown as Record<string, unknown>);
     }
-    if (totalFinalBytes > budgetCeiling && unavailableSet.size > 0) {
-      unavailableSet.clear();
+    if (totalFinalBytes > budgetCeiling && retrieval.unavailable.size > 0) {
+      retrieval.unavailable.clear();
       finalPack.unavailable = [];
     }
   }
 
-  finalPackId = await computePackId(env, input, revision_pins, admittedSections, finalCompiledText);
+  finalPackId = await computePackId(
+    env,
+    input,
+    required.revisionPins,
+    admission.sections,
+    finalCompiledText,
+  );
   finalPack.pack_id = finalPackId;
   totalFinalBytes = computePackSerializedBytes(finalPack as unknown as Record<string, unknown>);
   finalPack.budget.used_serialized_bytes = totalFinalBytes;
   return finalPack;
+}
+
+export async function buildContext(
+  env: AppEnv,
+  tenant: Tenant,
+  input: BuildContextInput,
+): Promise<ContextPack> {
+  validateInput(tenant, input);
+
+  const deduplicate = input.options?.deduplicate ?? true;
+  const includeProvenance = input.options?.include_provenance ?? true;
+  const includeCompiledText = input.options?.include_compiled_text ?? true;
+
+  // 1. Resolve and pin required selectors
+  const resolvedRequired = await resolveRequiredItems(env, tenant, input);
+
+  // 2. Prepare required state and sections
+  const requiredState = await prepareRequiredState(
+    env,
+    resolvedRequired,
+    includeProvenance,
+    deduplicate,
+  );
+
+  // 3. Early exit if required content alone exceeds budget
+  const earlyFailure = await requiredBudgetFailure(env, input, requiredState, includeCompiledText);
+  if (earlyFailure) {
+    return earlyFailure;
+  }
+
+  // 4. Request-local warning state
+  const warningState: WarningState = {
+    warnings: [],
+    droppedCount: 0,
+  };
+
+  // 5. Run retrieval and canonical expansion
+  const retrievalState = await collectRetrievedCandidates(
+    env,
+    tenant,
+    input,
+    requiredState,
+    warningState,
+  );
+
+  // 6. Sort and admit candidates into budget
+  const admissionState = admitRetrievedCandidates(
+    input,
+    requiredState,
+    retrievalState,
+    warningState,
+    includeProvenance,
+    includeCompiledText,
+  );
+
+  // 7. Recheck current heads for admitted conversations
+  await recheckAdmittedHeads(env, tenant, admissionState, retrievalState, warningState);
+
+  // 8. Finalize context pack and enforce byte ceilings
+  return finalizeContextPack(
+    env,
+    input,
+    requiredState,
+    retrievalState,
+    admissionState,
+    warningState,
+    includeCompiledText,
+  );
 }
