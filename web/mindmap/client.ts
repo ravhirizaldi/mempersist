@@ -128,7 +128,9 @@ function init(): void {
   let rows: MindmapClientConversation[] = [];
   let namespaces: MindmapClientPayload["namespaces"] = [];
   let cursor: string | null = null;
-  let query = "";
+  const initialQuery = new URLSearchParams(window.location.search).get("q")?.trim() ?? "";
+  let query = initialQuery;
+  queryInput.value = initialQuery;
   const collapsed = new Set<string>();
   const byId = new Map<string, MindmapClientConversation>();
 

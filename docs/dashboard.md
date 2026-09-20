@@ -18,6 +18,7 @@ Its interactive view is Cytoscape.js, bundled locally and inlined behind the exi
 with an accessible nested-list equivalent that carries the same content. Conversation pages pin
 pagination to the revision loaded on the first page.
 
+Conversation tags link to the memory map with that tag prefilled in the title-and-tag filter.
 `/dashboard/export` streams `mempersist.account-export.v1`. It contains the profile, namespace
 catalog, live tags, and every complete current canonical conversation, including canonical
 metadata and raw node fields. It excludes historical revisions, derived indexes, and original

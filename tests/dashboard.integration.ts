@@ -755,6 +755,49 @@ describe("dashboard namespace browse and mobile nav", () => {
     expect(html).toContain('href="/dashboard/namespaces/docs-ns"');
   });
 
+  it("links conversation tags to a filtered memory map", async () => {
+    const test = dashboardEnv();
+    const user = await getOrCreateUser(test.env, "tag-links@example.com");
+    const { cookie } = await signIn(test.env, test.sent, user.email);
+    await grantNamespace(test.env, user.id, "tagged-ns");
+    await grantNamespace(test.env, user.id, "other-ns");
+    const tagged = await createMcpConversation({
+      title: "tagged memory",
+      namespace: "tagged-ns",
+      tags: ["Focus Tag"],
+      messages: [{ role: "user", content: "tagged content" }],
+    });
+    const other = await createMcpConversation({
+      title: "other memory",
+      namespace: "other-ns",
+      tags: ["different"],
+      messages: [{ role: "user", content: "other content" }],
+    });
+    await writeCanonicalConversation(test.env, tagged, null, null, user.id);
+    await writeCanonicalConversation(test.env, other, null, null, user.id);
+
+    const conversationResponse = await handleDashboardRequest(
+      new Request(`https://mempersist.codifiedtech.id/dashboard/conversations/${tagged.id}`, {
+        headers: { cookie },
+      }),
+      test.env,
+    );
+    expect(conversationResponse.status).toBe(200);
+    const conversationHtml = await conversationResponse.text();
+    expect(conversationHtml).toContain('href="/dashboard/mindmap?q=focus%20tag"');
+
+    const mapResponse = await handleDashboardRequest(
+      new Request("https://mempersist.codifiedtech.id/dashboard/mindmap?q=focus%20tag", {
+        headers: { cookie },
+      }),
+      test.env,
+    );
+    expect(mapResponse.status).toBe(200);
+    const mapHtml = await mapResponse.text();
+    expect(mapHtml).toContain("tagged memory");
+    expect(mapHtml).not.toContain("other memory");
+  });
+
   it("escapes malicious script tags in titles on namespace page", async () => {
     const test = dashboardEnv();
     const user = await getOrCreateUser(test.env, "xss-ns@example.com");
