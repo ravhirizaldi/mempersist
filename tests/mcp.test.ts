@@ -41,6 +41,7 @@ describe("MCP server", () => {
     expect(result.tools.map((tool) => tool.name).sort()).toEqual([
       "memory_append",
       "memory_build_context",
+      "memory_copy_conversations",
       "memory_delete_conversations",
       "memory_empty_namespace",
       "memory_get_context",
@@ -108,6 +109,14 @@ describe("MCP server", () => {
       idempotentHint: false,
     });
     expect(result.tools.find((tool) => tool.name === "memory_append")?.annotations).toEqual({
+      readOnlyHint: false,
+      destructiveHint: false,
+      openWorldHint: false,
+      idempotentHint: true,
+    });
+    expect(
+      result.tools.find((tool) => tool.name === "memory_copy_conversations")?.annotations,
+    ).toEqual({
       readOnlyHint: false,
       destructiveHint: false,
       openWorldHint: false,
@@ -391,6 +400,72 @@ describe("MCP server", () => {
     }
   });
 
+  it("validates conversation copy request inputs", async () => {
+    const client = await connectedClient();
+    const validBase = {
+      target_namespace: "target-ns",
+      idempotency_key: "idem-1",
+      requests: [{ conversation_id: crypto.randomUUID() }],
+    };
+    const cases: Array<Record<string, unknown>> = [
+      {
+        ...validBase,
+        requests: [],
+      },
+      {
+        ...validBase,
+        requests: Array.from({ length: 21 }, () => ({
+          conversation_id: crypto.randomUUID(),
+        })),
+      },
+      {
+        target_namespace: "target-ns",
+        requests: [{ conversation_id: crypto.randomUUID() }],
+      },
+      {
+        ...validBase,
+        idempotency_key: "",
+      },
+      {
+        ...validBase,
+        idempotency_key: "   ",
+      },
+      {
+        ...validBase,
+        target_namespace: "",
+      },
+      {
+        ...validBase,
+        target_namespace: "   ",
+      },
+      {
+        ...validBase,
+        requests: [
+          {
+            conversation_id: crypto.randomUUID(),
+            revision_id: "invalid",
+          },
+        ],
+      },
+      {
+        ...validBase,
+        requests: [
+          {
+            conversation_id: crypto.randomUUID(),
+            tags: { mode: "merge", add: [], remove: [] },
+          },
+        ],
+      },
+      {
+        ...validBase,
+        verify: "true",
+      },
+    ];
+    for (const args of cases) {
+      const result = await client.callTool({ name: "memory_copy_conversations", arguments: args });
+      expect(result.isError, JSON.stringify(args)).toBe(true);
+    }
+  });
   it("validates context build request inputs and bounds", async () => {
     const client = await connectedClient();
     const validBase = {

@@ -8,11 +8,13 @@ canonical/conversations/<conversation-id>/segments/<sha256>.jsonl
 canonical/conversations/<conversation-id>/revisions/<revision-id>.json
 ```
 
-Raw paths are immutable per import. Segment paths are content-addressed; manifests are immutable revision documents. Canonical JSONL is uncompressed in V1 for portability and straightforward inspection/range evolution. One revision segment per conversation avoids tiny-object request overhead. Compression can be added as a versioned format only after measured storage/operation benefit.
+Raw paths are immutable per import. Segment paths are content-addressed; manifests are immutable revision documents. Canonical JSONL is uncompressed in V1 for portability and straightforward inspection/range evolution. One revision segment per conversation avoids tiny-object request overhead. Compression can be added as a versioned format only after measured storage/operation benefit. Cross-namespace destination copies introduce no new key prefixes, reusing standard `canonical/conversations/<dest-conversation-id>/...` paths.
 
 ## IDs and revisions
 
-IDs are lowercase SHA-256 hex over domain-separated inputs. ChatGPT conversation IDs derive from source type and source ID; MCP-created conversations use UUIDs. Segment IDs derive from bytes. Revision IDs cover the segment hash, current branch state, and metadata. Chunk IDs cover strategy version, generation, revision, branch, and exact source ranges; vector IDs additionally cover generation.
+IDs are lowercase SHA-256 hex over domain-separated inputs. ChatGPT conversation IDs derive from source type and source ID; MCP-created conversations use UUIDs; copied conversations derive deterministic IDs using domain `copy-conversation` over `(userId, idempotencyKey, requestIndex, sourceConversationId, pinnedRevisionId, targetNamespace)` with message-node IDs derived via domain `message-node` over `(destConversationId, sourceNodeId)`. Segment IDs derive from bytes. Revision IDs cover the segment hash, current branch state, and metadata. Chunk IDs cover strategy version, generation, revision, branch, and exact source ranges; vector IDs additionally cover generation.
+
+First-class provenance `derivedFrom` (`{ operation: "copy", conversationId, revisionId, namespace, copiedAt }` or `null`) is attached to both the segment header and revision manifest. In migration 0011, the original unique constraint on `(source_type, source_id)` (`conversations_source_idx`) was replaced by non-unique lookup index `conversations_source_lookup_idx`, allowing lossless copies of imported ChatGPT conversations to preserve original `sourceType` and `sourceId` without collision. D1 table `conversation_copy_operations` serves as the idempotency ledger keyed by `(user_id, idempotency_key)`, recording wire request material hashes, pinned source revisions, timestamps, and per-request destination receipts.
 
 ## Chunking
 

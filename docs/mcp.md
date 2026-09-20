@@ -67,25 +67,27 @@ complete the email prompt).
 See [SKILLS.md](../SKILLS.md) for the memory conventions coding agents should follow
 (`project/<slug>` namespaces, search-first workflow, event records).
 
-| Tool                           | Important inputs                                    | Result                                                            |
-| ------------------------------ | --------------------------------------------------- | ----------------------------------------------------------------- |
-| `memory_search`                | query, limit 1–20, tags, tag_mode                   | compact ranked chunk references and degradation state             |
-| `memory_get_context`           | chunk ID, before/after 0–10                         | canonical matched ranges and surrounding messages                 |
-| `memory_get_conversation`      | conversation ID, branch, offset, limit              | paginated active timeline or all graph nodes                      |
-| `memory_get_conversations`     | 1–20 conversation requests                          | ordered compact pages, errors, and continuations                  |
-| `memory_list_conversations`    | cursor, limit, tags, tag_mode                       | metadata and tags only                                            |
-| `memory_list_revisions`        | conversation ID, cursor, limit 1–100                | revision metadata newest first, current head marked               |
-| `memory_resolve_conversations` | 1–20 exact titles, optional namespace and tags      | conversation IDs, current revision IDs, and live tags             |
-| `memory_list_namespaces`       | —                                                   | namespaces you own with conversation counts                       |
-| `memory_stats`                 | —                                                   | per-namespace counts plus indexing health                         |
-| `memory_store`                 | title, tags, 1–1000 messages                        | durable revision plus queued index job                            |
-| `memory_append`                | conversation ID, base revision, tags, messages      | optimistic durable revision plus queued index job                 |
-| `memory_replace`               | conversation ID, base revision, messages            | replacement revision plus queued index job                        |
-| `memory_update_tags`           | conversation ID, base revision, add/remove          | live tag list after revision-safe mutation                        |
-| `memory_restore_revision`      | conversation ID, revision ID, base revision, verify | restores head to historic revision; durable receipt and index job |
-| `memory_delete_conversations`  | 1–100 unique conversation IDs                       | deleted, missing, and per-ID failures                             |
-| `memory_empty_namespace`       | matching namespace confirmation pair                | deletes one of your namespaces; bounded, resumable                |
-| `memory_import_status`         | import UUID                                         | progress, duplicate, or failure metadata                          |
+| Tool                           | Important inputs                                                                  | Result                                                            |
+| ------------------------------ | --------------------------------------------------------------------------------- | ----------------------------------------------------------------- |
+| `memory_search`                | query, limit 1–20, tags, tag_mode                                                 | compact ranked chunk references and degradation state             |
+| `memory_get_context`           | chunk ID, before/after 0–10                                                       | canonical matched ranges and surrounding messages                 |
+| `memory_get_conversation`      | conversation ID, branch, offset, limit                                            | paginated active timeline or all graph nodes                      |
+| `memory_get_conversations`     | 1–20 conversation requests                                                        | ordered compact pages, errors, and continuations                  |
+| `memory_list_conversations`    | cursor, limit, tags, tag_mode                                                     | metadata and tags only                                            |
+| `memory_list_revisions`        | conversation ID, cursor, limit 1–100                                              | revision metadata newest first, current head marked               |
+| `memory_resolve_conversations` | 1–20 exact titles, optional namespace and tags                                    | conversation IDs, current revision IDs, and live tags             |
+| `memory_build_context`         | task, 1–20 required selectors, max 8 retrieve, budgets, options                   | deterministic revision-pinned context pack within token/byte caps |
+| `memory_list_namespaces`       | —                                                                                 | namespaces you own with conversation counts                       |
+| `memory_stats`                 | —                                                                                 | per-namespace counts plus indexing health                         |
+| `memory_store`                 | title, tags, 1–1000 messages                                                      | durable revision plus queued index job                            |
+| `memory_append`                | conversation ID, base revision, tags, messages                                    | optimistic durable revision plus queued index job                 |
+| `memory_replace`               | conversation ID, base revision, messages                                          | replacement revision plus queued index job                        |
+| `memory_update_tags`           | conversation ID, base revision, add/remove                                        | live tag list after revision-safe mutation                        |
+| `memory_restore_revision`      | conversation ID, revision ID, base revision, verify                               | restores head to historic revision; durable receipt and index job |
+| `memory_copy_conversations`    | target_namespace, create_target_namespace, idempotency_key, 1–20 requests, verify | ordered per-item receipts                                         |
+| `memory_delete_conversations`  | 1–100 unique conversation IDs                                                     | deleted, missing, and per-ID failures                             |
+| `memory_empty_namespace`       | matching namespace confirmation pair                                              | deletes one of your namespaces; bounded, resumable                |
+| `memory_import_status`         | import UUID                                                                       | progress, duplicate, or failure metadata                          |
 
 Every tool advertises an output schema and returns successful structured data in both
 `structuredContent` and JSON text content for client compatibility.
@@ -99,8 +101,9 @@ committed.
 
 The intended client pattern is search → select → get context. Use `memory_append` for genuine
 continuation, `memory_replace` with the complete desired transcript when correcting or superseding a
-memory, and `memory_restore_revision` to revert to an earlier known good revision without synthesizing
-duplicate transcripts. Administrative retry/reindex/integrity operations remain HTTP/CLI only so
+memory, `memory_restore_revision` to revert to an earlier known good revision without synthesizing
+duplicate transcripts, and `memory_copy_conversations` for lossless copying into another owned namespace.
+Administrative retry/reindex/integrity operations remain HTTP/CLI only so
 ordinary LLM tool calls cannot trigger expensive maintenance accidentally.
 
 ## Compact reads and batches
@@ -288,6 +291,172 @@ canonical objects directly.
    - If queueing or verification encounters an error after the D1 head CAS succeeds, the response preserves
      `durable: true` with `indexing.status: "failed"` or `verification.status: "failed"`. The restore itself
      is committed and durable. See [recovery](operations-and-recovery.md).
+
+## Conversation copy
+
+`memory_copy_conversations` performs a lossless canonical copy of 1–20 owned conversations into
+another namespace owned by the same account. It loads the source R2 canonical revision directly
+(preserving inactive branches, raw source payloads, metadata, timestamps, and anomalies), mints a
+new destination conversation ID and new message-node IDs, attaches first-class `derivedFrom`
+provenance, and guarantees idempotency through D1 tracking. Source conversations and source R2
+objects remain completely immutable.
+
+### Annotations
+
+- `readOnlyHint`: `false`
+- `destructiveHint`: `false`
+- `openWorldHint`: `false`
+- `idempotentHint`: `true`
+
+### Inputs
+
+```json
+{
+  "target_namespace": "project/forked-service",
+  "create_target_namespace": false,
+  "idempotency_key": "copy-2026-09-18-001",
+  "verify": true,
+  "requests": [
+    {
+      "conversation_id": "<source conversation ID>",
+      "revision_id": "<optional source revision ID>",
+      "title": "Forked Project Memory",
+      "tags": {
+        "mode": "inherit",
+        "add": ["fork"],
+        "remove": ["upstream"]
+      }
+    }
+  ]
+}
+```
+
+- `target_namespace`: destination namespace name. Must be owned by the authenticated account unless
+  `create_target_namespace: true` is set.
+- `create_target_namespace`: optional boolean (default `false`). When `false`, copying to an unowned
+  namespace returns an `AUTHENTICATION` 403 error (`Namespace is not accessible to this account`). When
+  `true`, automatically grants and claims the target namespace for the caller.
+- `idempotency_key`: non-empty string (1–128 characters) identifying the batch operation.
+- `verify`: optional boolean (default `false`). When `true`, reloads each copied canonical revision from
+  R2, validates segment integrity and manifest provenance, confirms D1 head pointer alignment, and
+  returns a bounded compact readback.
+- `requests`: array of 1–20 copy request objects:
+  - `conversation_id`: source conversation ID (UUID or 64-character hexadecimal ID).
+  - `revision_id`: optional 64-character hexadecimal revision ID. If omitted, pins the source conversation's
+    `current_revision_id` at the start of the copy operation.
+  - `title`: optional title override (1–500 characters). When omitted, inherits the source revision title.
+  - `tags`: optional tag specification object (default `{ mode: "inherit", add: [], remove: [] }`):
+    - `mode`: `"inherit"` (starts from the source revision's canonical tags) or `"replace"` (starts from `[]`).
+    - `add`: array of normalized tags to add (up to 20).
+    - `remove`: array of normalized tags to remove (up to 20).
+    - Tags are applied as `remove` then `add`, then normalized. If the resulting tag count exceeds 20,
+      the item fails with `VALIDATION`.
+
+### Output
+
+Output returns ordered per-item receipts matching the input `requests` array:
+
+```json
+{
+  "results": [
+    {
+      "request_index": 0,
+      "status": "copied",
+      "source_conversation_id": "<source conversation ID>",
+      "source_revision_id": "<pinned source revision ID>",
+      "conversation_id": "<new destination conversation ID>",
+      "revision_id": "<new destination revision ID>",
+      "indexing": {
+        "status": "queued",
+        "job_id": "<job ID>"
+      },
+      "verification": {
+        "status": "passed",
+        "revision_id": "<new destination revision ID>",
+        "checked_messages": 42,
+        "readback": {
+          "conversation": {
+            "id": "<destination conversation ID>",
+            "revisionId": "<destination revision ID>",
+            "title": "Forked Project Memory",
+            "namespace": "project/forked-service",
+            "tags": ["fork"]
+          },
+          "messages": [
+            {
+              "sourceNodeId": "<node ID>",
+              "role": "user",
+              "text": "Starting the forked service architecture.",
+              "createdAt": "2026-09-18T00:00:00.000Z",
+              "updatedAt": null
+            }
+          ],
+          "offset": 0,
+          "nextOffset": null,
+          "total": 42,
+          "oversizedMessage": null
+        }
+      }
+    },
+    {
+      "request_index": 1,
+      "status": "failed",
+      "source_conversation_id": "<missing conversation ID>",
+      "error": {
+        "code": "NOT_FOUND",
+        "message": "Conversation not found"
+      }
+    }
+  ]
+}
+```
+
+### Semantics and Invariants
+
+1. **Source revision pinning and immutability**:
+   - For requests omitting `revision_id`, MemPersist pins the source conversation's current head
+     (`current_revision_id`) in D1 before performing any destination R2 writes. Subsequent retries
+     reuse the stored pin even if the source head advances concurrently.
+   - Source D1 records (`current_revision_id`, title, tags) and source R2 objects are never mutated.
+2. **Deterministic identities and full-graph preservation**:
+   - Destination conversation ID is deterministically minted:
+     `domainId("copy-conversation", userId, idempotencyKey, String(requestIndex), sourceConversationId, pinnedRevisionId, targetNamespace)`.
+   - Message node IDs are re-derived: `domainId("message-node", destConversationId, sourceNodeId)`.
+   - Source node relationships (`sourceNodeId`, `parentSourceNodeId`, `childSourceNodeIds`,
+     `currentSourceNodeId`, `activeSourceNodeIds`), inactive branches, raw payloads, custom metadata,
+     timestamps, and anomalies are preserved verbatim.
+3. **First-class provenance**:
+   - The destination canonical conversation and revision manifest record `derivedFrom`:
+     ```json
+     {
+       "operation": "copy",
+       "conversationId": "<source conversation ID>",
+       "revisionId": "<pinned revision ID>",
+       "namespace": "<source namespace>",
+       "copiedAt": "2026-09-18T00:00:00.000Z"
+     }
+     ```
+   - `copiedAt` is captured when the idempotency operation begins and persisted in D1, ensuring
+     identical canonical bytes and stable revision hashes across retries.
+4. **Idempotency replay vs conflict**:
+   - Operations are recorded in D1 `conversation_copy_operations` keyed by `(user_id, idempotency_key)`.
+   - A SHA-256 hash of the normalized request material detects conflicts. Replaying the identical
+     request returns the existing destination receipts. Reusing the same `idempotency_key` with
+     different material (different target namespace, titles, revisions, or tags) returns an
+     `IMPORT_CONFLICT` (HTTP 409) tool error.
+5. **Namespace ownership and creation**:
+   - Target namespaces must belong to the caller's account. Unowned target namespaces return 403
+     `AUTHENTICATION` unless `create_target_namespace: true` is provided to claim the namespace.
+   - Same-account copies across owned namespaces are supported, including copying into the source namespace.
+6. **Cross-namespace search visibility**:
+   - Copied conversations exist as distinct canonical entities. A `memory_search` scoped to the source
+     namespace returns the source; a search scoped to the target namespace returns the destination;
+     and a search covering both owned namespaces may return matches from both.
+7. **Independent indexing and verification**:
+   - Canonical R2 persistence and D1 catalog registration complete before background indexing or
+     verification run.
+   - Failures during indexing queueing or verification return `indexing.status: "failed"` or
+     `verification.status: "failed"` without invalidating the committed destination conversation.
 
 ## Exact-title conversation resolution
 

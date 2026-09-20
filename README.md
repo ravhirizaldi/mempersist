@@ -138,6 +138,7 @@ Available tools:
 - `memory_append`
 - `memory_replace`
 - `memory_restore_revision`
+- `memory_copy_conversations`
 
 `memory_store` and `memory_append` accept optional tags (lowercased, deduplicated, up to 20);
 `memory_search` filters by tags with AND semantics and returns each conversation's tags. See
@@ -158,8 +159,11 @@ history of one owned conversation (metadata only, newest first, cursor-paged), s
 pin and read any earlier revision with `memory_get_conversation` instead of relying on a
 retained write receipt. `memory_restore_revision` restores an owned conversation to any historical
 revision with `base_revision_id` optimistic concurrency, recording an immutable head transition
-without creating redundant canonical revisions. Store/append/replace/restore accept `verify: true`
-to reload the committed R2 revision and return compact readback with separate indexing/verification status.
+without creating redundant canonical revisions. `memory_copy_conversations` performs a lossless
+canonical R2 copy of 1–20 owned conversations into another owned namespace using a required
+`idempotency_key` and attaching first-class `derivedFrom` provenance, rather than a compact-message
+restorable via `memory_store`. Store/append/replace/restore/copy accept `verify: true` to reload the
+committed R2 revision and return compact readback with separate indexing/verification status.
 See the [RP workflow and reviewable runtime-rule amendment](docs/rp-workflow.md).
 
 For prompt and task execution, `memory_build_context` compiles a deterministic, revision-pinned context pack

@@ -187,3 +187,80 @@ export async function completeMemoryRestore(
     ...(verify ? { verification: await verifyRestoredRevision(env, restored) } : {}),
   };
 }
+
+export async function verifyCopiedRevision(env: AppEnv, stored: StoredRevision) {
+  try {
+    const { conversation } = await loadCanonicalRevision(env, stored.revisionId, stored);
+    const row = await env.MEMORY_DB.prepare(
+      "SELECT current_revision_id FROM conversations WHERE id = ? AND deleted_at IS NULL",
+    )
+      .bind(stored.conversationId)
+      .first<{ current_revision_id: string }>();
+    const matches =
+      row?.current_revision_id === stored.revisionId &&
+      conversation.derivedFrom?.operation === "copy";
+    const tags =
+      (await loadConversationTags(env, [stored.conversationId])).get(stored.conversationId) ?? [];
+    const offset = 0;
+    const readback = boundCompactPage(
+      compactConversationPage(
+        conversationPage(conversation, stored.revisionId, tags, offset, 100),
+        offset,
+      ),
+    );
+    return {
+      status: matches ? ("passed" as const) : ("failed" as const),
+      revision_id: stored.revisionId,
+      checked_messages: conversation.activeSourceNodeIds.length,
+      ...(matches
+        ? {}
+        : {
+            error: {
+              code: "CANONICAL_STORAGE",
+              message: "Conversation head or provenance does not match the copied revision",
+            },
+          }),
+      ...(jsonBytes(readback) <= COMPACT_RESPONSE_BYTES
+        ? { readback }
+        : {
+            readback_error: {
+              code: "RESPONSE_TOO_LARGE",
+              message: "Conversation metadata exceeds the readback budget",
+              offset,
+            },
+          }),
+    };
+  } catch {
+    return {
+      status: "failed" as const,
+      revision_id: stored.revisionId,
+      error: {
+        code: "CANONICAL_STORAGE",
+        message: "Copied revision could not be read and verified",
+      },
+    };
+  }
+}
+
+export async function completeMemoryCopy(env: AppEnv, stored: StoredRevision, verify: boolean) {
+  let indexing;
+  try {
+    const jobId = await enqueueIndex(env, stored.revisionId);
+    indexing = { status: "queued" as const, job_id: jobId };
+  } catch {
+    indexing = {
+      status: "failed" as const,
+      error: {
+        code: "DERIVED_INDEXING",
+        message: "Canonical revision copied; indexing could not be queued",
+        retryable: true,
+      },
+    };
+  }
+  return {
+    conversation_id: stored.conversationId,
+    revision_id: stored.revisionId,
+    indexing,
+    ...(verify ? { verification: await verifyCopiedRevision(env, stored) } : {}),
+  };
+}

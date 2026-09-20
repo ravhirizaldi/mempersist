@@ -152,6 +152,7 @@ export async function normalizeChatGptConversation(input: unknown): Promise<Cano
     nodes,
     metadata: asJson(rawMetadata),
     anomalies: branch.anomalies,
+    derivedFrom: null,
   };
 }
 
@@ -199,5 +200,6 @@ export async function createMcpConversation(input: {
     nodes,
     metadata: {},
     anomalies: [],
+    derivedFrom: null,
   };
 }

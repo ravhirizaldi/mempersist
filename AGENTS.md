@@ -2,6 +2,14 @@
 
 @SKILLS.md
 
+## MCP copy workflow
+
+Use `memory_copy_conversations` for forks/templates/promotion between owned namespaces; search both namespaces if a copy exists.
+
+| Tool                        | Purpose                                    |
+| --------------------------- | ------------------------------------------ |
+| `memory_copy_conversations` | lossless copy into another owned namespace |
+
 This file is the operational contract for every human or AI coding session in this repository.
 
 ## Mission and boundaries

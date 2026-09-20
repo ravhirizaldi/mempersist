@@ -6,7 +6,7 @@ import {
   type CanonicalNode,
   type CanonicalRevisionManifest,
 } from "./domain";
-import { AppError } from "./errors";
+import { AppError, errorDetails } from "./errors";
 import { assertAccountWritable, OWNER_DB_USER_ID } from "./tenant";
 
 const encoder = new TextEncoder();
@@ -125,6 +125,7 @@ export async function writeCanonicalConversation(
     segments: [{ id: segmentId, key: segmentKey, sha256: segmentHash, sizeBytes }],
     metadata: conversation.metadata,
     anomalies: conversation.anomalies,
+    derivedFrom: conversation.derivedFrom ?? null,
   };
 
   try {
@@ -295,6 +296,7 @@ function parseSegment(text: string): CanonicalConversation {
     ...(headerConversation as Omit<CanonicalConversation, "nodes">),
     tags: normalizeTags(headerConversation.tags ?? []),
     nodes,
+    derivedFrom: headerConversation.derivedFrom ?? null,
   };
 }
 
@@ -348,6 +350,7 @@ export async function loadCanonicalRevision(
   if (!manifestObject)
     throw new AppError("CANONICAL_STORAGE", "Revision manifest missing from R2", 500);
   const manifest = JSON.parse(await manifestObject.text()) as CanonicalRevisionManifest;
+  manifest.derivedFrom ??= null;
   const segment = manifest.segments[0];
   if (!segment) throw new AppError("CANONICAL_STORAGE", "Revision has no canonical segment", 500);
   const segmentObject = await env.MEMORY_BUCKET.get(segment.key);
@@ -1119,4 +1122,447 @@ export async function restoreConversationRevision(
     transitionId,
     transitionKey,
   };
+}
+
+export interface CopyConversationRequest {
+  conversationId: string;
+  revisionId?: string;
+  title?: string;
+  tags?: { mode: "inherit" | "replace"; add: string[]; remove: string[] };
+}
+
+export interface CopyConversationsInput {
+  userId: string;
+  namespaces: string[];
+  targetNamespace: string;
+  idempotencyKey: string;
+  requests: CopyConversationRequest[];
+}
+
+export type CopiedConversationResult =
+  | {
+      requestIndex: number;
+      status: "copied";
+      sourceConversationId: string;
+      sourceRevisionId: string;
+      stored: StoredRevision;
+    }
+  | {
+      requestIndex: number;
+      status: "failed";
+      sourceConversationId: string;
+      error: { code: string; message: string };
+    };
+
+interface ConversationCopyOperationRow {
+  user_id: string;
+  idempotency_key: string;
+  material_hash: string;
+  target_namespace: string;
+  copied_at: string;
+  requests_json: string;
+  created_at: string;
+  updated_at: string;
+}
+
+interface StoredCopyRequestState {
+  request_index: number;
+  source_conversation_id: string;
+  pinned_revision_id: string | null;
+  destination_conversation_id: string | null;
+  destination_revision_id: string | null;
+  status: "copied" | "failed";
+  error?: { code: string; message: string };
+}
+
+function copyTags(
+  sourceTags: string[],
+  spec: { mode: "inherit" | "replace"; add: string[]; remove: string[] },
+): string[] {
+  const base = spec.mode === "replace" ? [] : sourceTags;
+  const toRemove = new Set(normalizeTags(spec.remove));
+  const toAdd = normalizeTags(spec.add);
+  const next = normalizeTags([...base.filter((tag) => !toRemove.has(tag)), ...toAdd]);
+  if (next.length > 20) {
+    throw new AppError("VALIDATION", "Tag set exceeds 20 after normalization", 400);
+  }
+  return next;
+}
+
+export async function copyConversations(
+  env: AppEnv,
+  input: CopyConversationsInput,
+): Promise<CopiedConversationResult[]> {
+  await assertAccountWritable(env, input.userId, input.targetNamespace);
+
+  const wireRequests = input.requests.map((req) => ({
+    conversation_id: req.conversationId,
+    revision_id: req.revisionId ?? null,
+    title: req.title ?? null,
+    tags: {
+      mode: req.tags?.mode ?? "inherit",
+      add: req.tags?.add ?? [],
+      remove: req.tags?.remove ?? [],
+    },
+  }));
+  const materialHash = await sha256(
+    stableJson({
+      target_namespace: input.targetNamespace,
+      requests: wireRequests,
+    }),
+  );
+
+  let operationRow = await env.MEMORY_DB.prepare(
+    `SELECT user_id, idempotency_key, material_hash, target_namespace, copied_at, requests_json, created_at, updated_at
+     FROM conversation_copy_operations
+     WHERE user_id = ? AND idempotency_key = ?`,
+  )
+    .bind(input.userId, input.idempotencyKey)
+    .first<ConversationCopyOperationRow>();
+
+  if (operationRow && operationRow.material_hash !== materialHash) {
+    throw new AppError(
+      "IMPORT_CONFLICT",
+      "idempotency_key was reused with different copy material",
+      409,
+    );
+  }
+
+  const now = new Date().toISOString();
+  if (!operationRow) {
+    await env.MEMORY_DB.prepare(
+      `INSERT INTO conversation_copy_operations (
+         user_id, idempotency_key, material_hash, target_namespace, copied_at, requests_json, created_at, updated_at
+       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+       ON CONFLICT(user_id, idempotency_key) DO NOTHING`,
+    )
+      .bind(
+        input.userId,
+        input.idempotencyKey,
+        materialHash,
+        input.targetNamespace,
+        now,
+        JSON.stringify([]),
+        now,
+        now,
+      )
+      .run();
+
+    operationRow = await env.MEMORY_DB.prepare(
+      `SELECT user_id, idempotency_key, material_hash, target_namespace, copied_at, requests_json, created_at, updated_at
+       FROM conversation_copy_operations
+       WHERE user_id = ? AND idempotency_key = ?`,
+    )
+      .bind(input.userId, input.idempotencyKey)
+      .first<ConversationCopyOperationRow>();
+
+    if (!operationRow) {
+      throw new AppError(
+        "RETRYABLE_INFRASTRUCTURE",
+        "Failed to initialize copy operation",
+        500,
+        true,
+      );
+    }
+    if (operationRow.material_hash !== materialHash) {
+      throw new AppError(
+        "IMPORT_CONFLICT",
+        "idempotency_key was reused with different copy material",
+        409,
+      );
+    }
+  }
+
+  const copiedAt = operationRow.copied_at;
+  let states: StoredCopyRequestState[];
+  try {
+    states = JSON.parse(operationRow.requests_json) as StoredCopyRequestState[];
+  } catch {
+    states = [];
+  }
+
+  let pinsChanged = false;
+  for (let i = 0; i < input.requests.length; i++) {
+    const req = input.requests[i]!;
+    let state = states.find((s) => s.request_index === i);
+
+    if (!state || (state.pinned_revision_id === null && state.status !== "failed")) {
+      pinsChanged = true;
+      const sourceRow = await env.MEMORY_DB.prepare(
+        `SELECT id, current_revision_id, namespace FROM conversations WHERE id = ? AND deleted_at IS NULL AND user_id = ?`,
+      )
+        .bind(req.conversationId, input.userId)
+        .first<{ id: string; current_revision_id: string | null; namespace: string }>();
+
+      if (!sourceRow || !input.namespaces.includes(sourceRow.namespace)) {
+        state = {
+          request_index: i,
+          source_conversation_id: req.conversationId,
+          pinned_revision_id: null,
+          destination_conversation_id: null,
+          destination_revision_id: null,
+          status: "failed",
+          error: { code: "NOT_FOUND", message: "Conversation not found" },
+        };
+      } else if (!req.revisionId) {
+        if (!sourceRow.current_revision_id) {
+          state = {
+            request_index: i,
+            source_conversation_id: req.conversationId,
+            pinned_revision_id: null,
+            destination_conversation_id: null,
+            destination_revision_id: null,
+            status: "failed",
+            error: { code: "NOT_FOUND", message: "Revision not found" },
+          };
+        } else {
+          state = {
+            request_index: i,
+            source_conversation_id: req.conversationId,
+            pinned_revision_id: sourceRow.current_revision_id,
+            destination_conversation_id: null,
+            destination_revision_id: null,
+            status: "failed",
+          };
+        }
+      } else {
+        const revRow = await env.MEMORY_DB.prepare(
+          `SELECT id FROM conversation_revisions WHERE id = ? AND conversation_id = ?`,
+        )
+          .bind(req.revisionId, req.conversationId)
+          .first<{ id: string }>();
+
+        if (!revRow) {
+          state = {
+            request_index: i,
+            source_conversation_id: req.conversationId,
+            pinned_revision_id: null,
+            destination_conversation_id: null,
+            destination_revision_id: null,
+            status: "failed",
+            error: { code: "NOT_FOUND", message: "Revision not found" },
+          };
+        } else {
+          state = {
+            request_index: i,
+            source_conversation_id: req.conversationId,
+            pinned_revision_id: req.revisionId,
+            destination_conversation_id: null,
+            destination_revision_id: null,
+            status: "failed",
+          };
+        }
+      }
+
+      const existingIndex = states.findIndex((s) => s.request_index === i);
+      if (existingIndex >= 0) {
+        states[existingIndex] = state;
+      } else {
+        states.push(state);
+      }
+    }
+  }
+
+  states.sort((a, b) => a.request_index - b.request_index);
+
+  if (pinsChanged) {
+    await env.MEMORY_DB.prepare(
+      `UPDATE conversation_copy_operations SET requests_json = ?, updated_at = ? WHERE user_id = ? AND idempotency_key = ?`,
+    )
+      .bind(JSON.stringify(states), new Date().toISOString(), input.userId, input.idempotencyKey)
+      .run();
+  }
+
+  const results: CopiedConversationResult[] = [];
+
+  for (let i = 0; i < input.requests.length; i++) {
+    const req = input.requests[i]!;
+    const state = states.find((s) => s.request_index === i) ?? {
+      request_index: i,
+      source_conversation_id: req.conversationId,
+      pinned_revision_id: null,
+      destination_conversation_id: null,
+      destination_revision_id: null,
+      status: "failed",
+      error: { code: "NOT_FOUND", message: "Conversation not found" },
+    };
+
+    if (
+      state.status === "copied" &&
+      state.destination_conversation_id &&
+      state.destination_revision_id &&
+      state.pinned_revision_id
+    ) {
+      try {
+        const destConvId = state.destination_conversation_id;
+        const destRevId = state.destination_revision_id;
+        const { manifest: destManifest } = await loadCanonicalRevision(env, destRevId);
+        const destSegment = destManifest.segments[0];
+        const manifestKey = `canonical/conversations/${destConvId}/revisions/${destRevId}.json`;
+        const segmentKey = destSegment
+          ? destSegment.key
+          : `canonical/conversations/${destConvId}/segments/${destManifest.segments[0]?.sha256}.jsonl`;
+        const stored: StoredRevision = {
+          conversationId: destConvId,
+          revisionId: destRevId,
+          manifestKey,
+          segmentKey,
+          contentHash: destManifest.contentHash,
+          created: false,
+        };
+        results.push({
+          requestIndex: i,
+          status: "copied",
+          sourceConversationId: req.conversationId,
+          sourceRevisionId: state.pinned_revision_id,
+          stored,
+        });
+        continue;
+      } catch {
+        // Fall back to attempting write below
+      }
+    }
+
+    if (!state.pinned_revision_id) {
+      results.push({
+        requestIndex: i,
+        status: "failed",
+        sourceConversationId: req.conversationId,
+        error: state.error ?? { code: "NOT_FOUND", message: "Conversation not found" },
+      });
+      continue;
+    }
+
+    try {
+      const pinnedRevId = state.pinned_revision_id;
+      let loadedSource: {
+        manifest: CanonicalRevisionManifest;
+        conversation: CanonicalConversation;
+      };
+      try {
+        loadedSource = await loadCanonicalRevision(env, pinnedRevId);
+      } catch (err) {
+        if (err instanceof AppError && err.code === "NOT_FOUND") {
+          throw err;
+        }
+        const details = errorDetails(err);
+        throw new AppError("CANONICAL_STORAGE", details.message, 500, details.retryable);
+      }
+
+      const { manifest: sourceManifest, conversation: sourceConv } = loadedSource;
+      if (
+        sourceManifest.conversationId !== req.conversationId ||
+        sourceConv.id !== req.conversationId
+      ) {
+        throw new AppError("NOT_FOUND", "Revision not found", 404);
+      }
+
+      const destId = await domainId(
+        "copy-conversation",
+        input.userId,
+        input.idempotencyKey,
+        String(i),
+        sourceConv.id,
+        pinnedRevId,
+        input.targetNamespace,
+      );
+
+      const destTags = copyTags(
+        sourceConv.tags ?? [],
+        req.tags ?? { mode: "inherit", add: [], remove: [] },
+      );
+
+      const destNodes: CanonicalNode[] = [];
+      for (const node of sourceConv.nodes) {
+        destNodes.push({
+          ...node,
+          id: await domainId("message-node", destId, node.sourceNodeId),
+        });
+      }
+
+      const destConversation: CanonicalConversation = {
+        id: destId,
+        sourceType: sourceConv.sourceType,
+        sourceId: sourceConv.sourceId,
+        title: req.title ?? sourceConv.title,
+        namespace: input.targetNamespace,
+        tags: destTags,
+        createdAt: sourceConv.createdAt,
+        updatedAt: sourceConv.updatedAt,
+        currentSourceNodeId: sourceConv.currentSourceNodeId,
+        activeSourceNodeIds: sourceConv.activeSourceNodeIds,
+        nodes: destNodes,
+        metadata: sourceConv.metadata,
+        anomalies: sourceConv.anomalies,
+        derivedFrom: {
+          operation: "copy",
+          conversationId: sourceConv.id,
+          revisionId: pinnedRevId,
+          namespace: sourceConv.namespace,
+          copiedAt,
+        },
+      };
+
+      const stored = await writeCanonicalConversation(
+        env,
+        destConversation,
+        null,
+        null,
+        input.userId,
+      );
+
+      state.destination_conversation_id = destId;
+      state.destination_revision_id = stored.revisionId;
+      state.status = "copied";
+      delete state.error;
+
+      const stateIndex = states.findIndex((s) => s.request_index === i);
+      if (stateIndex >= 0) states[stateIndex] = state;
+
+      await env.MEMORY_DB.prepare(
+        `UPDATE conversation_copy_operations SET requests_json = ?, updated_at = ? WHERE user_id = ? AND idempotency_key = ?`,
+      )
+        .bind(JSON.stringify(states), new Date().toISOString(), input.userId, input.idempotencyKey)
+        .run();
+
+      results.push({
+        requestIndex: i,
+        status: "copied",
+        sourceConversationId: req.conversationId,
+        sourceRevisionId: pinnedRevId,
+        stored,
+      });
+    } catch (error) {
+      if (
+        error instanceof AppError &&
+        (error.code === "IMPORT_CONFLICT" ||
+          error.code === "DELETION_PENDING" ||
+          error.code === "AUTHENTICATION")
+      ) {
+        throw error;
+      }
+
+      const details = errorDetails(error);
+      state.status = "failed";
+      state.error = { code: details.code, message: details.message };
+
+      const stateIndex = states.findIndex((s) => s.request_index === i);
+      if (stateIndex >= 0) states[stateIndex] = state;
+
+      await env.MEMORY_DB.prepare(
+        `UPDATE conversation_copy_operations SET requests_json = ?, updated_at = ? WHERE user_id = ? AND idempotency_key = ?`,
+      )
+        .bind(JSON.stringify(states), new Date().toISOString(), input.userId, input.idempotencyKey)
+        .run();
+
+      results.push({
+        requestIndex: i,
+        status: "failed",
+        sourceConversationId: req.conversationId,
+        error: { code: details.code, message: details.message },
+      });
+    }
+  }
+
+  return results;
 }

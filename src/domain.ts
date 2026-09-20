@@ -40,6 +40,14 @@ export interface CanonicalNode {
   raw: JsonValue;
 }
 
+export interface CopyProvenance {
+  operation: "copy";
+  conversationId: string;
+  revisionId: string;
+  namespace: string;
+  copiedAt: string;
+}
+
 export interface CanonicalConversation {
   id: string;
   sourceType: string;
@@ -54,6 +62,7 @@ export interface CanonicalConversation {
   nodes: CanonicalNode[];
   metadata: JsonValue;
   anomalies: string[];
+  derivedFrom: CopyProvenance | null;
 }
 
 export interface CanonicalRevisionManifest {
@@ -74,6 +83,7 @@ export interface CanonicalRevisionManifest {
   segments: Array<{ id: string; key: string; sha256: string; sizeBytes: number }>;
   metadata: JsonValue;
   anomalies: string[];
+  derivedFrom: CopyProvenance | null;
 }
 
 export interface ChunkSource {

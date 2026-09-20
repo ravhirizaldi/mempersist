@@ -3,7 +3,7 @@ import { z } from "zod";
 import { createMcpConversation } from "./chatgpt";
 import { deleteConversations, deleteNamespace, MAX_CONVERSATION_DELETE_BATCH } from "./deletion";
 import type { AppEnv } from "./domain";
-import { completeMemoryRestore, completeMemoryWrite } from "./writes";
+import { completeMemoryCopy, completeMemoryRestore, completeMemoryWrite } from "./writes";
 import {
   boundCompactPage,
   compactConversationPage,
@@ -15,6 +15,7 @@ import { searchMemory } from "./search";
 import { assertAccountWritable, grantNamespace, scopeNamespaces, type Tenant } from "./tenant";
 import {
   appendConversation,
+  copyConversations,
   listConversationRevisions,
   listConversations,
   replaceConversation,
@@ -434,6 +435,33 @@ const memoryRestoreOutputSchema = z.object({
     }),
   ]),
   verification: verificationOutputSchema.optional(),
+});
+const copyResultItemSchema = z.union([
+  z.object({
+    request_index: z.number().int().min(0),
+    status: z.literal("copied"),
+    source_conversation_id: z.string(),
+    source_revision_id: z.string(),
+    conversation_id: z.string(),
+    revision_id: z.string(),
+    indexing: z.union([
+      z.object({ status: z.literal("queued"), job_id: z.string() }),
+      z.object({
+        status: z.literal("failed"),
+        error: z.object({ code: z.string(), message: z.string(), retryable: z.boolean() }),
+      }),
+    ]),
+    verification: verificationOutputSchema.optional(),
+  }),
+  z.object({
+    request_index: z.number().int().min(0),
+    status: z.literal("failed"),
+    source_conversation_id: z.string(),
+    error: z.object({ code: z.string(), message: z.string() }),
+  }),
+]);
+const copyConversationsOutputSchema = z.object({
+  results: z.array(copyResultItemSchema),
 });
 const deleteFailureOutputSchema = z.object({
   conversation_id: z.string(),
@@ -856,6 +884,101 @@ export function createMemoryMcpServer(env: AppEnv, tenant: Tenant): McpServer {
         tenant.userId,
       );
       return toolResult(await completeMemoryRestore(env, restored, verify));
+    },
+  );
+
+  server.registerTool(
+    "memory_copy_conversations",
+    {
+      description:
+        "Copy 1–20 owned conversations by canonical R2 revision into another namespace you own; optional create_target_namespace; required idempotency_key; optional verify.",
+      annotations: {
+        readOnlyHint: false,
+        destructiveHint: false,
+        openWorldHint: false,
+        idempotentHint: true,
+      },
+      outputSchema: copyConversationsOutputSchema,
+      inputSchema: z.object({
+        target_namespace: nonEmptyNamespaceSchema,
+        create_target_namespace: z.boolean().default(false),
+        idempotency_key: z
+          .string()
+          .min(1)
+          .max(128)
+          .refine((v) => /\S/u.test(v), "idempotency_key must not be empty"),
+        verify: z.boolean().default(false),
+        requests: z
+          .array(
+            z.object({
+              conversation_id: conversationIdSchema,
+              revision_id: revisionIdSchema.optional(),
+              title: z.string().min(1).max(500).optional(),
+              tags: z
+                .object({
+                  mode: z.enum(["inherit", "replace"]).default("inherit"),
+                  add: tagsSchema,
+                  remove: tagsSchema,
+                })
+                .default({ mode: "inherit", add: [], remove: [] }),
+            }),
+          )
+          .min(1)
+          .max(20),
+      }),
+    },
+    async (input) => {
+      const targetNamespace = input.target_namespace;
+      await assertAccountWritable(env, tenant.userId);
+      if (!tenant.namespaces.includes(targetNamespace)) {
+        if (input.create_target_namespace) {
+          await grantNamespace(env, tenant.userId, targetNamespace);
+        } else {
+          scopeNamespaces(tenant, targetNamespace);
+        }
+      }
+      const effectiveNamespaces = tenant.namespaces.includes(targetNamespace)
+        ? tenant.namespaces
+        : [...tenant.namespaces, targetNamespace];
+
+      const copyResults = await copyConversations(env, {
+        userId: tenant.userId,
+        namespaces: effectiveNamespaces,
+        targetNamespace,
+        idempotencyKey: input.idempotency_key,
+        requests: input.requests.map((req) => ({
+          conversationId: req.conversation_id,
+          ...(req.revision_id ? { revisionId: req.revision_id } : {}),
+          ...(req.title !== undefined ? { title: req.title } : {}),
+          tags: req.tags,
+        })),
+      });
+
+      const results = await Promise.all(
+        copyResults.map(async (item) => {
+          if (item.status === "failed") {
+            return {
+              request_index: item.requestIndex,
+              status: "failed" as const,
+              source_conversation_id: item.sourceConversationId,
+              error: item.error,
+            };
+          }
+          const completed = await completeMemoryCopy(env, item.stored, input.verify);
+          return {
+            request_index: item.requestIndex,
+            status: "copied" as const,
+            source_conversation_id: item.sourceConversationId,
+            source_revision_id: item.sourceRevisionId,
+            conversation_id: item.stored.conversationId,
+            revision_id: item.stored.revisionId,
+            indexing: completed.indexing,
+            ...(completed.verification ? { verification: completed.verification } : {}),
+          };
+        }),
+      );
+
+      return toolResult({ results });
     },
   );
 

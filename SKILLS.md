@@ -38,7 +38,8 @@ Do not store routine commits, "I did X" churn, or facts you can read from the re
    sending the complete intended message list and the `base_revision_id` returned by the previous
    store/append/replace/restore. Use `memory_append` only for genuine continuation. Use `memory_restore_revision`
    to restore an owned conversation to any historical revision using `base_revision_id` optimistic concurrency
-   and an immutable head transition without creating duplicate canonical revisions.
+   and an immutable head transition without creating duplicate canonical revisions. Use `memory_copy_conversations`
+   for forks/templates/promotion between owned namespaces; search both namespaces if a copy exists.
 5. **Delete only on explicit user confirmation.** Remove specific memories with
    `memory_delete_conversations`; clear an entire project with `memory_empty_namespace`
    (exact confirmation required). Never delete memory unprompted.
@@ -99,6 +100,7 @@ is strictly read-only and extractive: it never invokes generative models or writ
 | `memory_append`                | extend an existing conversation, optimistic revision check  |
 | `memory_replace`               | replace its transcript, optimistic revision check           |
 | `memory_restore_revision`      | restore historical revision, optimistic revision check      |
+| `memory_copy_conversations`    | lossless copy into another owned namespace                  |
 | `memory_update_tags`           | change tags on an existing conversation                     |
 | `memory_delete_conversations`  | delete specific memories (user-confirmed)                   |
 | `memory_empty_namespace`       | empty one of your namespaces (exact confirmation)           |
