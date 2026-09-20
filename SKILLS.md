@@ -63,6 +63,18 @@ durability, verification, and indexing as separate outcomes; do not duplicate a 
 write because a later verification/indexing step failed. See [the RP workflow](docs/rp-workflow.md)
 for explicit `simpan state` and existing owner boundaries.
 
+When preparing context for a prompt or complex task, call `memory_build_context` instead of
+manually chaining resolution, batch reads, search, context retrieval, deduplication, and budget fitting.
+Pass 1–20 `required` memory selectors (exact `title` or `conversation_id`, with `mode: "full" | "tail"`,
+`branch: "active" | "all"`, `priority`, and optional `tail_messages` defaulting to 20), up to 8 optional
+`retrieve` queries with context windows, explicit token and serialized byte budgets (`max_serialized_bytes`
+up to 49,152), and options (`deduplicate`, `include_provenance`, `include_compiled_text`). The server pins
+all required current revisions before loading R2 canonical bodies, loads search hits from their pinned
+revision IDs, structurally deduplicates overlapping nodes, enforces deterministic priority/score/identifier
+ordering, greedily fits whole messages, and returns a deterministic `pack_id`. If required content alone
+exceeds either budget, it returns a bounded diagnostic with suggested minimums without leaking text. The tool
+is strictly read-only and extractive: it never invokes generative models or writes to memory.
+
 ## Discovery
 
 - `memory_list_namespaces` shows which namespaces your account owns.
@@ -80,6 +92,7 @@ for explicit `simpan state` and existing owner boundaries.
 | `memory_list_conversations`    | metadata + tags per conversation                            |
 | `memory_list_revisions`        | immutable revision history of one owned conversation        |
 | `memory_resolve_conversations` | resolve up to 20 exact titles without semantic search       |
+| `memory_build_context`         | deterministic revision-pinned context pack for a task       |
 | `memory_list_namespaces`       | namespaces you own                                          |
 | `memory_stats`                 | counts + indexing health                                    |
 | `memory_store`                 | durable new memory (claims `project/<slug>` on first write) |

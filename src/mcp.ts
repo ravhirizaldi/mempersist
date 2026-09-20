@@ -23,6 +23,7 @@ import {
   updateConversationTags,
   writeCanonicalConversation,
 } from "./storage";
+import { buildContext, MAX_SERIALIZED_BYTES_LIMIT, type BuildContextInput } from "./context";
 
 const messageSchema = z.object({
   role: z.string().min(1).max(40),
@@ -220,6 +221,183 @@ const conversationResolveRequestSchema = z.object({
 const conversationResolveInputSchema = z.object({
   requests: z.array(conversationResolveRequestSchema).min(1).max(20),
 });
+export const buildContextRequiredSelectorSchema = z
+  .object({
+    conversation_id: conversationIdSchema.optional(),
+    title: z
+      .string()
+      .min(1)
+      .max(500)
+      .refine((value) => value.trim().length > 0, "Title must not be empty or whitespace-only")
+      .optional(),
+    namespace: z.string().min(1).max(100).optional(),
+    tags: tagsSchema.optional(),
+    tag_mode: z.enum(["any", "all"]).default("all"),
+  })
+  .refine(
+    (selector) => (selector.conversation_id !== undefined) !== (selector.title !== undefined),
+    "Selector must contain exactly one of conversation_id or title",
+  );
+
+export const buildContextRequiredItemSchema = z.object({
+  selector: buildContextRequiredSelectorSchema,
+  mode: z.enum(["full", "tail"]).default("full"),
+  branch: z.enum(["active", "all"]).default("active"),
+  priority: z.number().default(100),
+  tail_messages: z.number().int().min(1).max(100).optional(),
+});
+
+export const buildContextRetrieveItemSchema = z.object({
+  query: z
+    .string()
+    .min(1)
+    .max(2000)
+    .refine((val) => val.trim().length > 0, "Query must not be empty or whitespace-only"),
+  namespace: z.string().min(1).max(100).optional(),
+  tags: tagsSchema.optional(),
+  tag_mode: z.enum(["any", "all"]).default("all"),
+  limit: z.number().int().min(1).max(20).default(8),
+  context_before: z.number().int().min(0).max(10).default(2),
+  context_after: z.number().int().min(0).max(10).default(2),
+  priority: z.number().default(50),
+});
+
+export const buildContextBudgetSchema = z.object({
+  max_estimated_tokens: z.number().int().min(1),
+  max_serialized_bytes: z.number().int().min(1).max(MAX_SERIALIZED_BYTES_LIMIT),
+});
+
+export const buildContextOptionsSchema = z
+  .object({
+    deduplicate: z.boolean().default(true),
+    include_provenance: z.boolean().default(true),
+    include_compiled_text: z.boolean().default(true),
+  })
+  .default({
+    deduplicate: true,
+    include_provenance: true,
+    include_compiled_text: true,
+  });
+
+export const buildContextInputSchema = z.object({
+  namespace: z.string().min(1).max(100).optional(),
+  task: z
+    .string()
+    .min(1)
+    .max(1000)
+    .refine((val) => val.trim().length > 0, "Task must not be empty or whitespace-only"),
+  required: z.array(buildContextRequiredItemSchema).min(1).max(20),
+  retrieve: z.array(buildContextRetrieveItemSchema).max(8).optional(),
+  budget: buildContextBudgetSchema,
+  options: buildContextOptionsSchema.optional(),
+});
+
+export const contextRevisionPinSchema = z.object({
+  conversation_id: z.string(),
+  revision_id: z.string(),
+  title: z.string(),
+  namespace: z.string(),
+});
+
+export const contextMessageProvenanceSchema = z.object({
+  kind: z.enum(["required", "retrieved"]),
+  request_index: z.number(),
+  conversation_id: z.string(),
+  revision_id: z.string(),
+  source_node_id: z.string(),
+  chunk_ids: z.array(z.string()).optional(),
+  score: z.number().optional(),
+  sources: z.array(z.enum(["lexical", "semantic", "recent_canonical"])).optional(),
+});
+
+export const contextMessageSchema = z.object({
+  source_node_id: z.string(),
+  role: nullableStringSchema,
+  created_at: nullableStringSchema,
+  updated_at: nullableStringSchema,
+  text: z.string(),
+  conversation_id: z.string(),
+  revision_id: z.string(),
+  provenance: contextMessageProvenanceSchema.optional(),
+});
+
+export const matchedRangeSchema = z.object({
+  source_node_id: z.string(),
+  char_start: z.number(),
+  char_end: z.number(),
+});
+
+export const contextSectionSchema = z.object({
+  kind: z.enum(["required", "retrieved"]),
+  request_index: z.number(),
+  title: z.string(),
+  priority: z.number(),
+  conversation_id: z.string(),
+  revision_id: z.string(),
+  messages: z.array(contextMessageSchema),
+  estimated_tokens: z.number(),
+  serialized_bytes: z.number(),
+  matched_chunk_ids: z.array(z.string()).optional(),
+  matched_ranges: z.array(matchedRangeSchema).optional(),
+});
+
+export const contextBudgetUsageSchema = z.object({
+  max_estimated_tokens: z.number(),
+  used_estimated_tokens: z.number(),
+  max_serialized_bytes: z.number(),
+  used_serialized_bytes: z.number(),
+  estimator: z.literal("mempersist-token-estimate-v1"),
+});
+
+export const contextOmissionSchema = z.object({
+  kind: z.literal("retrieved"),
+  conversation_id: z.string(),
+  revision_id: z.string(),
+  reason: z.enum(["budget", "stale_revision", "unavailable"]),
+});
+
+export const contextWarningSchema = z.object({
+  code: z.string(),
+  conversation_id: z.string().optional(),
+  revision_id: z.string().optional(),
+  source_node_id: z.string().optional(),
+  bytes: z.number().optional(),
+  message: z.string().optional(),
+});
+
+export const buildContextCompleteOutputSchema = z.object({
+  status: z.literal("complete"),
+  pack_id: z.string(),
+  namespace: nullableStringSchema,
+  task: z.string(),
+  revision_pins: z.array(contextRevisionPinSchema),
+  sections: z.array(contextSectionSchema),
+  budget: contextBudgetUsageSchema,
+  omitted: z.array(contextOmissionSchema),
+  degraded: z.boolean(),
+  unavailable: z.array(z.string()),
+  warnings: z.array(contextWarningSchema),
+  compiled_text: z.string().optional(),
+});
+
+export const buildContextRequiredBudgetExceededOutputSchema = z.object({
+  status: z.literal("required_budget_exceeded"),
+  required_estimated_tokens: z.number(),
+  required_serialized_bytes: z.number(),
+  suggested_minimum: z.object({
+    max_estimated_tokens: z.number(),
+    max_serialized_bytes: z.number(),
+  }),
+  warnings: z.array(contextWarningSchema),
+  pack_id: z.string().optional(),
+  degraded: z.boolean(),
+  unavailable: z.array(z.string()),
+});
+
+export const buildContextOutputSchema = z.union([
+  buildContextCompleteOutputSchema,
+  buildContextRequiredBudgetExceededOutputSchema,
+]);
 const verificationOutputSchema = z.object({
   status: z.enum(["passed", "failed"]),
   revision_id: z.string(),
@@ -496,6 +674,54 @@ export function createMemoryMcpServer(env: AppEnv, tenant: Tenant): McpServer {
           has_more: item.hasMore,
         })),
       });
+    },
+  );
+  server.registerTool(
+    "memory_build_context",
+    {
+      description:
+        "Compile a deterministic, revision-pinned context pack from required canonical conversations and optional hybrid-search evidence within explicit token and serialized-byte budgets.",
+      annotations: readOnlyAnnotations,
+      outputSchema: buildContextOutputSchema,
+      inputSchema: buildContextInputSchema,
+    },
+    async (input) => {
+      const buildInput: BuildContextInput = {
+        ...(input.namespace !== undefined ? { namespace: input.namespace } : {}),
+        task: input.task,
+        required: input.required.map((req) => ({
+          selector: {
+            ...(req.selector.conversation_id !== undefined
+              ? { conversation_id: req.selector.conversation_id }
+              : {}),
+            ...(req.selector.title !== undefined ? { title: req.selector.title } : {}),
+            ...(req.selector.namespace !== undefined ? { namespace: req.selector.namespace } : {}),
+            ...(req.selector.tags !== undefined ? { tags: req.selector.tags } : {}),
+            tag_mode: req.selector.tag_mode,
+          },
+          mode: req.mode,
+          branch: req.branch,
+          priority: req.priority,
+          ...(req.tail_messages !== undefined ? { tail_messages: req.tail_messages } : {}),
+        })),
+        ...(input.retrieve !== undefined
+          ? {
+              retrieve: input.retrieve.map((ret) => ({
+                query: ret.query,
+                ...(ret.namespace !== undefined ? { namespace: ret.namespace } : {}),
+                ...(ret.tags !== undefined ? { tags: ret.tags } : {}),
+                tag_mode: ret.tag_mode,
+                limit: ret.limit,
+                context_before: ret.context_before,
+                context_after: ret.context_after,
+                priority: ret.priority,
+              })),
+            }
+          : {}),
+        budget: input.budget,
+        ...(input.options !== undefined ? { options: input.options } : {}),
+      };
+      return toolResult(await buildContext(env, tenant, buildInput));
     },
   );
 

@@ -344,6 +344,302 @@ Output:
 - `has_more`: `true` when more matches exist beyond the 50-match cap.
 - Deterministic and read-only: excludes tombstones (`deleted_at IS NULL`), requires a valid current revision head (`current_revision_id IS NOT NULL`), and never accesses R2, Vectorize, or Workers AI.
 
+## Context pack builder
+
+`memory_build_context` compiles a deterministic, revision-pinned context pack from required canonical
+conversations and optional hybrid-search evidence within explicit estimated-token and serialized-byte budgets.
+It replaces repeated client-side orchestration across exact owner resolution, batch canonical reads,
+hybrid search, context retrieval around chunks, structural deduplication, relevance/authority ordering,
+and budget fitting with a single server-side call.
+
+The tool is extractive-only and strictly read-only: it never uses an LLM to summarize, rewrite, or infer
+facts, never arbitrates canon, never persists context packs, and never writes to D1, R2, or Vectorize.
+
+### Annotations
+
+- `readOnlyHint`: `true`
+- `destructiveHint`: `false`
+- `openWorldHint`: `false`
+- `idempotentHint`: `true`
+
+### Inputs
+
+```json
+{
+  "namespace": "astara_alt_v2",
+  "task": "Continue the current scene after xxx reviews her resignation letter",
+  "required": [
+    {
+      "selector": {
+        "title": "CURRENT"
+      },
+      "mode": "full",
+      "branch": "active",
+      "priority": 100
+    },
+    {
+      "selector": {
+        "conversation_id": "0191f6e0-1234-7000-8000-000000000001"
+      },
+      "mode": "tail",
+      "tail_messages": 20,
+      "branch": "active",
+      "priority": 90
+    }
+  ],
+  "retrieve": [
+    {
+      "query": "xxx agency resignation letter Mia professional responsibility",
+      "namespace": "astara_alt_v2",
+      "tags": ["rp"],
+      "tag_mode": "all",
+      "limit": 8,
+      "context_before": 2,
+      "context_after": 3,
+      "priority": 70
+    }
+  ],
+  "budget": {
+    "max_estimated_tokens": 8000,
+    "max_serialized_bytes": 49152
+  },
+  "options": {
+    "deduplicate": true,
+    "include_provenance": true,
+    "include_compiled_text": true
+  }
+}
+```
+
+- `namespace`: optional; when omitted, scopes to all namespaces owned by the authenticated account. When provided, must be an account-owned namespace.
+- `task`: non-empty descriptive task string (1–1000 characters). Used as pack metadata and for deterministic pack identity; not silently converted to a search query.
+- `required`: array of 1–20 required conversation selectors:
+  - `selector`: object containing exactly one of:
+    - `conversation_id`: memory UUID or 64-character hexadecimal ID of an owned conversation.
+    - `title`: exact case-sensitive binary title string (1–500 characters, no whitespace trimming) to resolve in owned namespaces. Follows `memory_resolve_conversations` semantics and fails explicitly with an error if missing or ambiguous.
+    - Optional `namespace`, `tags` (up to 20), and `tag_mode` (`"all"` | `"any"`) to qualify title resolution.
+  - `mode`: `"full"` (include all messages in the selected branch) or `"tail"` (include trailing messages).
+  - `tail_messages`: positive integer (default 20, max 100) when `mode: "tail"`.
+  - `branch`: `"active"` (default, active linear timeline) or `"all"` (all graph nodes in canonical order).
+  - `priority`: integer priority for section ordering (higher values ordered first).
+- `retrieve`: optional array of 0–8 hybrid search retrieval requests:
+  - `query`: non-empty search query string.
+  - `namespace`: optional namespace scope for this query.
+  - `tags`: optional array of up to 20 normalized tags.
+  - `tag_mode`: `"all"` (default) or `"any"`.
+  - `limit`: number of search hits to retrieve (1–20, default 8).
+  - `context_before`: number of surrounding messages before each hit (0–10, default 1).
+  - `context_after`: number of surrounding messages after each hit (0–10, default 1).
+  - `priority`: integer priority for section ordering.
+- `budget`:
+  - `max_estimated_tokens`: positive integer upper bound for estimated tokens.
+  - `max_serialized_bytes`: positive integer upper bound for total serialized response bytes, at most `49152` (48 KiB) to guarantee response fits within the 64 KiB tool guard with envelope headroom.
+- `options`:
+  - `deduplicate`: boolean (default `true`). When `true`, deduplicates messages structurally by `(conversation_id, revision_id, source_node_id)`. Required placements take precedence, and overlapping retrieved evidence is attached to provenance rather than duplicating text.
+  - `include_provenance`: boolean (default `true`). When `true`, attaches detailed retrieval provenance (`kind`, `request_index`, `conversation_id`, `revision_id`, `source_node_id`, `chunk_ids`, `score`, `sources`) to messages. Core identity (`conversation_id`, `revision_id`, `source_node_id`) is always included on every message even if this option is `false`.
+  - `include_compiled_text`: boolean (default `true`). When `true`, generates a deterministic plain-text context projection.
+
+### Output
+
+#### Successful context pack (`status: "complete"`)
+
+```json
+{
+  "status": "complete",
+  "pack_id": "<deterministic-pack-id>",
+  "namespace": "astara_alt_v2",
+  "task": "Continue the current scene after xxx reviews her resignation letter",
+  "revision_pins": [
+    {
+      "conversation_id": "0191f6e0-1234-7000-8000-000000000001",
+      "revision_id": "<revision-id>",
+      "title": "CURRENT",
+      "namespace": "astara_alt_v2"
+    }
+  ],
+  "sections": [
+    {
+      "kind": "required",
+      "request_index": 0,
+      "title": "CURRENT",
+      "priority": 100,
+      "conversation_id": "0191f6e0-1234-7000-8000-000000000001",
+      "revision_id": "<revision-id>",
+      "messages": [
+        {
+          "source_node_id": "<source-node-id>",
+          "role": "assistant",
+          "created_at": "2026-09-17T00:00:00.000Z",
+          "updated_at": null,
+          "text": "Exact canonical message text",
+          "conversation_id": "0191f6e0-1234-7000-8000-000000000001",
+          "revision_id": "<revision-id>",
+          "provenance": {
+            "kind": "required",
+            "request_index": 0,
+            "conversation_id": "0191f6e0-1234-7000-8000-000000000001",
+            "revision_id": "<revision-id>",
+            "source_node_id": "<source-node-id>"
+          }
+        }
+      ],
+      "estimated_tokens": 1320,
+      "serialized_bytes": 6240
+    },
+    {
+      "kind": "retrieved",
+      "request_index": 0,
+      "title": "Mia Agency Resignation Context",
+      "priority": 70,
+      "conversation_id": "0191f6e0-5678-7000-8000-000000000002",
+      "revision_id": "<retrieved-revision-id>",
+      "messages": [
+        {
+          "source_node_id": "<retrieved-node-id>",
+          "role": "user",
+          "created_at": "2026-09-14T00:00:00.000Z",
+          "updated_at": null,
+          "text": "Mia submitted the resignation letter citing professional responsibility.",
+          "conversation_id": "0191f6e0-5678-7000-8000-000000000002",
+          "revision_id": "<retrieved-revision-id>",
+          "provenance": {
+            "kind": "retrieved",
+            "request_index": 0,
+            "conversation_id": "0191f6e0-5678-7000-8000-000000000002",
+            "revision_id": "<retrieved-revision-id>",
+            "source_node_id": "<retrieved-node-id>",
+            "chunk_ids": ["<chunk-id>"],
+            "score": 0.88,
+            "sources": ["bm25", "vector"]
+          }
+        }
+      ],
+      "estimated_tokens": 680,
+      "serialized_bytes": 3100,
+      "matched_chunk_ids": ["<chunk-id>"],
+      "matched_ranges": [
+        {
+          "source_node_id": "<retrieved-node-id>",
+          "char_start": 0,
+          "char_end": 74
+        }
+      ]
+    }
+  ],
+  "budget": {
+    "max_estimated_tokens": 8000,
+    "used_estimated_tokens": 2000,
+    "max_serialized_bytes": 49152,
+    "used_serialized_bytes": 10540,
+    "estimator": "mempersist-token-estimate-v1"
+  },
+  "omitted": [
+    {
+      "kind": "retrieved",
+      "conversation_id": "0191f6e0-9999-7000-8000-000000000003",
+      "revision_id": "<omitted-revision-id>",
+      "reason": "budget"
+    }
+  ],
+  "degraded": false,
+  "unavailable": [],
+  "warnings": [],
+  "compiled_text": "[REQUIRED MEMORY: CURRENT]\nconversation_id: 0191f6e0-1234-7000-8000-000000000001\nrevision_id: <revision-id>\n\nExact canonical message text\n\n[RETRIEVED EVIDENCE: Mia Agency Resignation Context]\nconversation_id: 0191f6e0-5678-7000-8000-000000000002\nrevision_id: <retrieved-revision-id>\nmatched_chunk_ids: <chunk-id>\n\nMia submitted the resignation letter citing professional responsibility."
+}
+```
+
+#### Required budget overflow (`status: "required_budget_exceeded"`)
+
+If the required content alone exceeds `max_estimated_tokens` or `max_serialized_bytes`, the tool
+returns a bounded diagnostic without leaking canonical text:
+
+```json
+{
+  "status": "required_budget_exceeded",
+  "required_estimated_tokens": 11420,
+  "required_serialized_bytes": 52800,
+  "suggested_minimum": {
+    "max_estimated_tokens": 12000,
+    "max_serialized_bytes": 54000
+  },
+  "warnings": [
+    {
+      "code": "REQUIRED_CONTENT_EXCEEDS_MCP_LIMIT",
+      "message": "Required content serialized bytes (52800) exceeds maximum MCP budget of 49152 bytes"
+    }
+  ],
+  "degraded": false,
+  "unavailable": []
+}
+```
+
+When `suggested_minimum.max_serialized_bytes` exceeds 49,152 bytes, the warning code
+`REQUIRED_CONTENT_EXCEEDS_MCP_LIMIT` advises the caller to switch required modes from `"full"` to `"tail"`
+or page the conversation using `memory_get_conversations` rather than requesting the entire conversation in a
+single context pack.
+
+### Semantics and Invariants
+
+1. **Exact selectors and revision pinning**:
+   - Every required selector is validated to have exactly one of `conversation_id` or `title`.
+   - Title selectors execute exact, case-sensitive binary string comparison against stored canonical titles
+     scoped to the tenant and owned namespaces. A title matching zero conversations returns a `NOT_FOUND`
+     error; matching multiple conversations returns an `AMBIGUOUS_TITLE` error. Titles are never resolved
+     by implicit heuristics like recency.
+   - All required conversations have their `current_revision_id` pinned in D1 before any canonical R2
+     loading begins. Concurrent appends, replacements, or restores cannot cause a pack to read mismatched
+     or half-updated revisions.
+   - Canonical revisions are loaded from R2 in bounded waves of 4 concurrent requests.
+2. **Branch and mode semantics**:
+   - `branch: "active"` (default) follows the conversation's linear active branch (`activeSourceNodeIds`).
+   - `branch: "all"` loads all nodes in the revision graph in canonical order.
+   - `mode: "full"` selects all messages in the branch.
+   - `mode: "tail"` selects the last `tail_messages` whole messages (default 20).
+3. **Revision-pinned retrieval and degradation**:
+   - Up to 8 hybrid search retrieval requests run concurrently after required revision pinning.
+   - Searches are strictly scoped to the tenant and owned namespaces.
+   - Retrieved chunks load context messages from the exact `revision_id` returned by the search result,
+     never from the current live head. Stale or unreadable retrieved revisions are recorded in `omitted`
+     with `reason: "stale_revision"` or `"unavailable"` rather than failing the pack.
+   - Required canonical loading does not depend on FTS, Vectorize, or Workers AI. Search degradation or
+     outage sets `degraded: true` and populates `unavailable` without reporting canonical data loss.
+4. **Structural deduplication**:
+   - Deduplication key is `(conversation_id, revision_id, source_node_id)`.
+   - Required messages always take precedence over retrieved messages.
+   - When a retrieved chunk overlaps an already-included required message, the message is retained in its
+     required section and retrieval evidence (`chunk_ids`, `score`, `sources`) is attached to its
+     provenance without duplicating the text.
+   - Two distinct source nodes with identical text are preserved as distinct messages.
+5. **Deterministic authority and ordering**:
+   - Required sections always outrank retrieved sections.
+   - Required sections are ordered by: `priority DESC`, `request_index ASC`, and canonical message order.
+   - Retrieved sections are ordered by: `priority DESC`, `score DESC`, `request_index ASC`, and stable
+     identifiers (`conversation_id`, `revision_id`, `chunk_id`, `source_node_id`).
+   - The ordering is 100% deterministic and reproducible across independent runs.
+6. **Dual token and byte budgeting**:
+   - Whole messages are greedily fitted into both `max_estimated_tokens` and `max_serialized_bytes`.
+     Messages are never truncated or sliced.
+   - The serialized-byte budget accounts for the entire JSON envelope, including message provenance,
+     revision pins, omissions, diagnostics, and optional compiled text.
+   - `max_serialized_bytes` is capped at `49152` (48 KiB).
+   - If required content fits, optional retrieved candidates that do not fit both budgets are placed in
+     `omitted` with `reason: "budget"`.
+   - If an individual message exceeds the entire budget, a structured diagnostic with its source identity
+     and byte size is emitted without leaking message text.
+7. **Deterministic pack identity (`pack_id`)**:
+   - `pack_id` is a deterministic domain hash (`domainId` SHA-256) computed over the builder version,
+     normalized inputs, pinned revision IDs, search generation, selected sections, and compiled text.
+   - The same inputs against the same revision state produce the identical `pack_id`.
+8. **Deterministic compiled text**:
+   - When `include_compiled_text: true`, produces a plain text projection containing section headers
+     (`[REQUIRED MEMORY: <title>]`, `[RETRIEVED EVIDENCE: <title>]`), conversation and revision IDs, and
+     verbatim message text.
+   - Contains no inferred prose, no synthetic summaries, and no content absent from the structured sections.
+9. **Extractive-only and no-write guarantee**:
+   - Completely read-only and ephemeral: performs no D1 writes, no R2 writes, no Vectorize operations,
+     and enqueues no indexing jobs.
+   - Does not invoke any LLM or generative model: purely extractive compilation.
+
 ## Verified writes
 
 `memory_store`, `memory_append`, and `memory_replace` accept `verify: true` (default false).

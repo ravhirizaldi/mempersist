@@ -7,19 +7,29 @@ across owners.
 
 ## Continue a scene
 
-1. When conversation IDs are not yet known, resolve canonical owners (CURRENT, CURRENT_SCENE,
-   EVENTS_INDEX) by exact title using `memory_resolve_conversations` (scoped to your project or
-   active namespace) without semantic search. Then batch the resolved conversation IDs with
-   `memory_get_conversations`. Use actual IDs discovered in your archive.
-2. Consume results in order, including later correction messages. Follow **every** non-null
-   `continuation` by placing that object in the next call's `requests` array. A deferred entry
-   has not delivered its prose. Keep `revision_id` when following a continuation.
-3. Resolve the active arc and relevant character/world owners from the complete first batch,
-   then batch those owners. Fetch archived arcs only when source context is needed.
-4. Treat individual read failures, oversized messages, and incomplete pages as missing context.
-   Never infer missing facts from a title, an index, or an earlier partial page.
+1. Prefer `memory_build_context` when task context needs to combine required owners (e.g. `CURRENT`,
+   `CURRENT_SCENE`, `EVENTS_INDEX`) and optional retrieval evidence into a single revision-pinned pack.
+   Specify required owners with exact `title` selectors (mode `"full"` or `"tail"`, branch `"active"`),
+   optional `retrieve` queries for thematic or world facts, and explicit token/byte budgets.
+   Use `options.include_compiled_text: true` for direct prompt injection.
+2. Fall back to `memory_resolve_conversations` and batch readback (`memory_get_conversations`) when:
+   - Required owners alone exceed the 48 KiB MCP response ceiling or return `status: "required_budget_exceeded"`.
+   - Complete transcripts require deep pagination or continuation cursors.
+   - Branch exploration, raw payload metadata, or non-active graph traversals (`format: "canonical"`) are needed.
+3. In the fallback workflow:
+   - When conversation IDs are not yet known, resolve canonical owners (CURRENT, CURRENT_SCENE,
+     EVENTS_INDEX) by exact title using `memory_resolve_conversations` (scoped to your project or
+     active namespace) without semantic search. Then batch the resolved conversation IDs with
+     `memory_get_conversations`. Use actual IDs discovered in your archive.
+   - Consume results in order, including later correction messages. Follow **every** non-null
+     `continuation` by placing that object in the next call's `requests` array. A deferred entry
+     has not delivered its prose. Keep `revision_id` when following a continuation.
+   - Resolve the active arc and relevant character/world owners from the complete first batch,
+     then batch those owners. Fetch archived arcs only when source context is needed.
+4. Treat individual read failures, oversized messages, incomplete pages, or `required_budget_exceeded`
+   diagnostics as missing context. Never infer missing facts from a title, an index, or an earlier partial page.
 
-Use `format: "compact"` for individual conversation/context reads. Compact responses preserve
+Use `format: "compact"` for individual conversation/context reads in fallback mode. Compact responses preserve
 original text and corrections; they are not generated summaries. Use canonical output when
 branch relationships, raw source fields, or multimodal references are needed.
 
@@ -54,8 +64,10 @@ This passage is a proposed maintenance edit, **not applied to any stored runtime
 Review it against the full current rules and their later corrections before replacing or
 appending anything. Preserve unrelated rules and owner references verbatim.
 
-> Ordinary RP remains read-only. Save only on explicit `simpan state`. Load known runtime
-> owners with compact batch reads and finish every page or deferred request before relying
+> Ordinary RP remains read-only. Save only on explicit `simpan state`. Prefer `memory_build_context`
+> to compile required runtime owners and task evidence into a single pinned context pack. Fall back to
+> `memory_resolve_conversations` and compact batch reads (`memory_get_conversations`) when individual owners
+> require deep pagination or exceed pack budgets. Finish every page or deferred request before relying
 > on those owners. Later corrective messages supersede earlier facts. Resolve the active arc
 > and relevant owners after runtime loading; archived arcs remain source-on-demand.
 >

@@ -2,7 +2,13 @@ import { Client } from "@modelcontextprotocol/client";
 import { InMemoryTransport } from "@modelcontextprotocol/server";
 import { afterEach, describe, expect, it } from "vitest";
 import type { AppEnv } from "../src/domain";
-import { createMemoryMcpServer } from "../src/mcp";
+import {
+  buildContextCompleteOutputSchema,
+  buildContextInputSchema,
+  buildContextOutputSchema,
+  buildContextRequiredBudgetExceededOutputSchema,
+  createMemoryMcpServer,
+} from "../src/mcp";
 
 describe("MCP server", () => {
   const connections: Array<{ client: Client; server: ReturnType<typeof createMemoryMcpServer> }> =
@@ -34,6 +40,7 @@ describe("MCP server", () => {
     const result = await client.listTools();
     expect(result.tools.map((tool) => tool.name).sort()).toEqual([
       "memory_append",
+      "memory_build_context",
       "memory_delete_conversations",
       "memory_empty_namespace",
       "memory_get_context",
@@ -58,6 +65,7 @@ describe("MCP server", () => {
       idempotentHint: true,
     };
     for (const name of [
+      "memory_build_context",
       "memory_search",
       "memory_get_context",
       "memory_get_conversation",
@@ -381,5 +389,223 @@ describe("MCP server", () => {
       const result = await client.callTool({ name: "memory_restore_revision", arguments: args });
       expect(result.isError, JSON.stringify(args)).toBe(true);
     }
+  });
+
+  it("validates context build request inputs and bounds", async () => {
+    const client = await connectedClient();
+    const validBase = {
+      task: "Build context",
+      required: [{ selector: { title: "CURRENT" } }],
+      budget: { max_estimated_tokens: 1000, max_serialized_bytes: 40000 },
+    };
+
+    const cases: Array<Record<string, unknown>> = [
+      {},
+      { task: "T" },
+      { required: [{ selector: { title: "T" } }] },
+      { budget: { max_estimated_tokens: 100, max_serialized_bytes: 1000 } },
+      { ...validBase, task: "" },
+      { ...validBase, task: "   " },
+      { ...validBase, task: "x".repeat(1001) },
+      { ...validBase, required: [] },
+      {
+        ...validBase,
+        required: Array.from({ length: 21 }, () => ({ selector: { title: "T" } })),
+      },
+      { ...validBase, required: [{ selector: {} }] },
+      {
+        ...validBase,
+        required: [
+          {
+            selector: {
+              conversation_id: crypto.randomUUID(),
+              title: "CURRENT",
+            },
+          },
+        ],
+      },
+      { ...validBase, required: [{ selector: { conversation_id: "not-a-uuid" } }] },
+      { ...validBase, required: [{ selector: { title: "" } }] },
+      { ...validBase, required: [{ selector: { title: "   " } }] },
+      { ...validBase, required: [{ selector: { title: "T" }, mode: "invalid" }] },
+      { ...validBase, required: [{ selector: { title: "T" }, branch: "invalid" }] },
+      { ...validBase, required: [{ selector: { title: "T" }, tail_messages: 0 }] },
+      { ...validBase, required: [{ selector: { title: "T" }, tail_messages: 101 }] },
+      {
+        ...validBase,
+        budget: { max_estimated_tokens: 0, max_serialized_bytes: 1000 },
+      },
+      {
+        ...validBase,
+        budget: { max_estimated_tokens: -1, max_serialized_bytes: 1000 },
+      },
+      {
+        ...validBase,
+        budget: { max_estimated_tokens: 1000, max_serialized_bytes: 0 },
+      },
+      {
+        ...validBase,
+        budget: { max_estimated_tokens: 1000, max_serialized_bytes: -1 },
+      },
+      {
+        ...validBase,
+        budget: { max_estimated_tokens: 1000, max_serialized_bytes: 49153 },
+      },
+      {
+        ...validBase,
+        retrieve: Array.from({ length: 9 }, () => ({ query: "Q" })),
+      },
+      { ...validBase, retrieve: [{ query: "" }] },
+      { ...validBase, retrieve: [{ query: "   " }] },
+      { ...validBase, retrieve: [{ query: "Q", limit: 0 }] },
+      { ...validBase, retrieve: [{ query: "Q", limit: 21 }] },
+      { ...validBase, retrieve: [{ query: "Q", context_before: -1 }] },
+      { ...validBase, retrieve: [{ query: "Q", context_before: 11 }] },
+      { ...validBase, retrieve: [{ query: "Q", context_after: -1 }] },
+      { ...validBase, retrieve: [{ query: "Q", context_after: 11 }] },
+    ];
+
+    for (const args of cases) {
+      const result = await client.callTool({ name: "memory_build_context", arguments: args });
+      expect(result.isError, JSON.stringify(args)).toBe(true);
+    }
+  });
+
+  it("accepts the issue sample shape for memory_build_context", () => {
+    const sampleInput = {
+      namespace: "astara_alt_v2",
+      task: "Continue the current scene after xxx reviews her resignation letter",
+      required: [
+        {
+          selector: {
+            title: "CURRENT",
+          },
+          mode: "full",
+          branch: "active",
+          priority: 100,
+        },
+        {
+          selector: {
+            title: "CURRENT_SCENE",
+          },
+          mode: "full",
+          branch: "active",
+          priority: 100,
+        },
+        {
+          selector: {
+            title: "EVENTS_INDEX",
+          },
+          mode: "full",
+          branch: "active",
+          priority: 90,
+        },
+      ],
+      retrieve: [
+        {
+          query: "xxx agency resignation letter Mia professional responsibility",
+          tags: ["rp"],
+          tag_mode: "all",
+          limit: 8,
+          context_before: 2,
+          context_after: 3,
+          priority: 70,
+        },
+      ],
+      budget: {
+        max_estimated_tokens: 8000,
+        max_serialized_bytes: 49152,
+      },
+      options: {
+        deduplicate: true,
+        include_provenance: true,
+        include_compiled_text: true,
+      },
+    };
+
+    const parsed = buildContextInputSchema.safeParse(sampleInput);
+    expect(parsed.success).toBe(true);
+
+    const sampleOutput = {
+      status: "complete",
+      pack_id: "test-pack-id",
+      namespace: "astara_alt_v2",
+      task: "Continue the current scene after xxx reviews her resignation letter",
+      revision_pins: [
+        {
+          conversation_id: crypto.randomUUID(),
+          revision_id: "a".repeat(64),
+          title: "CURRENT",
+          namespace: "astara_alt_v2",
+        },
+      ],
+      sections: [
+        {
+          kind: "required",
+          request_index: 0,
+          title: "CURRENT",
+          priority: 100,
+          conversation_id: crypto.randomUUID(),
+          revision_id: "a".repeat(64),
+          messages: [
+            {
+              source_node_id: "node-1",
+              role: "assistant",
+              created_at: "2026-09-17T00:00:00.000Z",
+              updated_at: null,
+              text: "Exact canonical message text",
+              conversation_id: crypto.randomUUID(),
+              revision_id: "a".repeat(64),
+            },
+          ],
+          estimated_tokens: 1320,
+          serialized_bytes: 6240,
+        },
+      ],
+      budget: {
+        max_estimated_tokens: 8000,
+        used_estimated_tokens: 7140,
+        max_serialized_bytes: 49152,
+        used_serialized_bytes: 38120,
+        estimator: "mempersist-token-estimate-v1",
+      },
+      omitted: [
+        {
+          kind: "retrieved",
+          conversation_id: crypto.randomUUID(),
+          revision_id: "a".repeat(64),
+          reason: "budget",
+        },
+      ],
+      degraded: false,
+      unavailable: [],
+      warnings: [],
+      compiled_text: "[MEMORY: CURRENT]\n...",
+    };
+    const parsedOutput = buildContextOutputSchema.safeParse(sampleOutput);
+    expect(parsedOutput.success).toBe(true);
+    expect(buildContextCompleteOutputSchema.safeParse(sampleOutput).success).toBe(true);
+
+    const exceededOutput = {
+      status: "required_budget_exceeded",
+      required_estimated_tokens: 11420,
+      required_serialized_bytes: 68100,
+      suggested_minimum: {
+        max_estimated_tokens: 12000,
+        max_serialized_bytes: 72000,
+      },
+      warnings: [
+        {
+          code: "REQUIRED_CONTENT_EXCEEDS_MCP_LIMIT",
+        },
+      ],
+      degraded: false,
+      unavailable: [],
+    };
+    const parsedExceeded = buildContextOutputSchema.safeParse(exceededOutput);
+    expect(parsedExceeded.success).toBe(true);
+    expect(buildContextRequiredBudgetExceededOutputSchema.safeParse(exceededOutput).success).toBe(
+      true,
+    );
   });
 });
