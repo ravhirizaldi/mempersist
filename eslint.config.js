@@ -6,6 +6,7 @@ export default tseslint.config(
     ignores: [
       "node_modules/**",
       ".wrangler/**",
+      ".omp/**",
       "dist/**",
       "coverage/**",
       "worker-configuration.d.ts",
