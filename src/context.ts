@@ -8,7 +8,7 @@ import {
 } from "./domain";
 import { AppError } from "./errors";
 import { estimateTokens } from "./chunking";
-import { jsonBytes } from "./retrieval";
+import { expandPointerNeighborhood, jsonBytes } from "./retrieval";
 import {
   loadCanonicalRevision,
   resolveConversations,
@@ -17,7 +17,7 @@ import {
 import { searchMemory } from "./search";
 import { scopeNamespaces, type Tenant } from "./tenant";
 
-export const BUILDER_VERSION = "mempersist-context-pack-v1";
+export const BUILDER_VERSION = "mempersist-context-pack-v2";
 export const ESTIMATOR_VERSION = "mempersist-token-estimate-v1";
 export const MAX_SERIALIZED_BYTES_LIMIT = 49152;
 const MAX_CONTEXT_WARNINGS = 20;
@@ -190,6 +190,7 @@ interface ChunkSourceRow {
   current_revision_id: string | null;
   namespace: string;
   title: string;
+  branch_key: string;
   source_node_id: string;
   source_sequence: number | null;
   char_start: number;
@@ -1040,7 +1041,7 @@ export async function buildContext(
       for (const hit of res.response.results) {
         // Query D1 for chunk sources and conversation head revision check
         const rowsResult = await env.MEMORY_DB.prepare(
-          `SELECT c.revision_id, cv.current_revision_id, c.namespace, c.title, s.source_node_id, s.source_sequence, s.char_start, s.char_end, s.ordinal
+          `SELECT c.revision_id, cv.current_revision_id, c.namespace, c.title, c.branch_key, s.source_node_id, s.source_sequence, s.char_start, s.char_end, s.ordinal
            FROM chunks c
            JOIN chunk_sources s ON s.chunk_id = c.id
            JOIN conversations cv ON cv.id = c.conversation_id
@@ -1140,21 +1141,24 @@ export async function buildContext(
         );
 
         let chunkMessages: CanonicalNode[];
-        if (activeSequences.length > 0) {
+        if (
+          firstRow.branch_key === "active" &&
+          activeSequences.length === rows.length &&
+          activeSequences.length > 0
+        ) {
           const start = Math.max(0, Math.min(...activeSequences) - before);
           const end = Math.min(active.length, Math.max(...activeSequences) + after + 1);
           chunkMessages = active
             .slice(start, end)
             .flatMap((id) => (byId.get(id) ? [byId.get(id)!] : []));
         } else {
-          const ids = new Set<string>();
-          for (const source of rows) {
-            ids.add(source.source_node_id);
-            const node = byId.get(source.source_node_id);
-            if (node?.parentSourceNodeId) ids.add(node.parentSourceNodeId);
-            node?.childSourceNodeIds?.forEach((id) => ids.add(id));
-          }
-          chunkMessages = [...ids].flatMap((id) => (byId.get(id) ? [byId.get(id)!] : []));
+          chunkMessages = expandPointerNeighborhood(
+            loadedRev.conversation,
+            rows.map((source) => source.source_node_id),
+            before,
+            after,
+            firstRow.branch_key,
+          );
         }
         chunkMessages = chunkMessages.filter((node) => node.text.length > 0);
 

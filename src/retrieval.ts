@@ -4,6 +4,7 @@ import { loadCanonicalRevision, loadConversationTags } from "./storage";
 
 interface ChunkSourceRow {
   revision_id: string;
+  branch_key: string;
   source_node_id: string;
   source_sequence: number | null;
   char_start: number;
@@ -11,6 +12,85 @@ interface ChunkSourceRow {
   ordinal: number;
 }
 
+// Deterministic pointer-neighborhood expansion for chunk sources. Reconstructs
+// the exact linear branch path (either the active branch timeline or the
+// alternate branch path from root down to its leaf), then slices by message count
+// around the matched chunk sources. Sibling branches are never included in after expansion.
+export function expandPointerNeighborhood(
+  conversation: CanonicalConversation,
+  sourceNodeIds: string[],
+  before: number,
+  after: number,
+  branchKey?: string,
+): CanonicalNode[] {
+  const byId = new Map(conversation.nodes.map((node) => [node.sourceNodeId, node]));
+  let branchNodes: CanonicalNode[] | null = null;
+
+  if (branchKey === "active") {
+    branchNodes = (conversation.activeSourceNodeIds ?? [])
+      .map((id) => byId.get(id))
+      .filter((node): node is CanonicalNode => node !== undefined && node.text.length > 0);
+  } else if (branchKey && branchKey.startsWith("alternate:")) {
+    const leafId = branchKey.slice("alternate:".length);
+    const leaf = byId.get(leafId);
+    if (leaf) {
+      const reversed: CanonicalNode[] = [];
+      const seen = new Set<string>();
+      let cursor: CanonicalNode | undefined = leaf;
+      while (cursor && !seen.has(cursor.sourceNodeId)) {
+        seen.add(cursor.sourceNodeId);
+        reversed.push(cursor);
+        cursor = cursor.parentSourceNodeId ? byId.get(cursor.parentSourceNodeId) : undefined;
+      }
+      branchNodes = reversed.reverse().filter((node) => node.text.length > 0);
+    }
+  }
+
+  if (!branchNodes) {
+    const seed = sourceNodeIds
+      .map((id) => byId.get(id))
+      .find((node): node is CanonicalNode => node !== undefined);
+    if (seed) {
+      const reversed: CanonicalNode[] = [];
+      const seen = new Set<string>();
+      let cursor: CanonicalNode | undefined = seed;
+      while (cursor && !seen.has(cursor.sourceNodeId)) {
+        seen.add(cursor.sourceNodeId);
+        reversed.push(cursor);
+        cursor = cursor.parentSourceNodeId ? byId.get(cursor.parentSourceNodeId) : undefined;
+      }
+      const ancestors = reversed.reverse();
+      const descendants: CanonicalNode[] = [];
+      let downCursor = seed.childSourceNodeIds[0]
+        ? byId.get(seed.childSourceNodeIds[0])
+        : undefined;
+      while (downCursor && !seen.has(downCursor.sourceNodeId)) {
+        seen.add(downCursor.sourceNodeId);
+        descendants.push(downCursor);
+        downCursor = downCursor.childSourceNodeIds[0]
+          ? byId.get(downCursor.childSourceNodeIds[0])
+          : undefined;
+      }
+      branchNodes = [...ancestors, ...descendants].filter((node) => node.text.length > 0);
+    } else {
+      branchNodes = conversation.nodes.filter((node) => node.text.length > 0);
+    }
+  }
+
+  const indices = sourceNodeIds
+    .map((id) => branchNodes.findIndex((node) => node.sourceNodeId === id))
+    .filter((idx) => idx >= 0);
+
+  if (indices.length === 0) {
+    return [];
+  }
+
+  const beforeSteps = Math.min(10, Math.max(0, Math.floor(before)));
+  const afterSteps = Math.min(10, Math.max(0, Math.floor(after)));
+  const start = Math.max(0, Math.min(...indices) - beforeSteps);
+  const end = Math.min(branchNodes.length, Math.max(...indices) + afterSteps + 1);
+  return branchNodes.slice(start, end);
+}
 export async function getChunkContext(
   env: AppEnv,
   chunkId: string,
@@ -25,7 +105,7 @@ export async function getChunkContext(
     : "";
   const userIdSql = expectedUserId ? " AND cv.user_id = ?" : "";
   const result = await env.MEMORY_DB.prepare(
-    `SELECT c.revision_id, s.source_node_id, s.source_sequence, s.char_start, s.char_end, s.ordinal
+    `SELECT c.revision_id, c.branch_key, s.source_node_id, s.source_sequence, s.char_start, s.char_end, s.ordinal
      FROM chunks c JOIN chunk_sources s ON s.chunk_id = c.id
      JOIN conversations cv ON cv.id = c.conversation_id
      WHERE c.id = ?${namespaceSql}${userIdSql} ORDER BY s.ordinal`,
@@ -41,7 +121,11 @@ export async function getChunkContext(
     source.source_sequence === null ? [] : [source.source_sequence],
   );
   let messages: CanonicalNode[];
-  if (activeSequences.length) {
+  if (
+    first.branch_key === "active" &&
+    activeSequences.length === result.results.length &&
+    activeSequences.length > 0
+  ) {
     const start = Math.max(0, Math.min(...activeSequences) - Math.min(10, Math.max(0, before)));
     const end = Math.min(
       active.length,
@@ -49,14 +133,13 @@ export async function getChunkContext(
     );
     messages = active.slice(start, end).flatMap((id) => (byId.get(id) ? [byId.get(id)!] : []));
   } else {
-    const ids = new Set<string>();
-    for (const source of result.results) {
-      ids.add(source.source_node_id);
-      const node = byId.get(source.source_node_id);
-      if (node?.parentSourceNodeId) ids.add(node.parentSourceNodeId);
-      node?.childSourceNodeIds.forEach((id) => ids.add(id));
-    }
-    messages = [...ids].flatMap((id) => (byId.get(id) ? [byId.get(id)!] : []));
+    messages = expandPointerNeighborhood(
+      loaded.conversation,
+      result.results.map((source) => source.source_node_id),
+      before,
+      after,
+      first.branch_key,
+    );
   }
   return {
     chunkId,

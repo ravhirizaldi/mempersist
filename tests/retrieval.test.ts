@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import { expandPointerNeighborhood } from "../src/retrieval";
 import {
   mergeSemanticCandidates,
   queryTerms,
@@ -1115,5 +1116,109 @@ describe("evidence-sensitive reranking generalizes beyond the photobox example",
     );
     expect(ranked[0]?.chunkId).toBe("target");
     expect(ranked[0]?.debug.semanticLift).toBeGreaterThan(0);
+  });
+});
+
+describe("pointer-aware deterministic expansion", () => {
+  const makeNode = (
+    sourceNodeId: string,
+    parentSourceNodeId: string | null,
+    childSourceNodeIds: string[],
+    text: string,
+  ) => ({
+    id: `id-${sourceNodeId}`,
+    sourceNodeId,
+    parentSourceNodeId,
+    childSourceNodeIds,
+    role: "user",
+    text,
+    content: { content_type: "text", parts: [text] },
+    createdAt: "2026-09-20T00:00:00.000Z",
+    updatedAt: null,
+    modelSlug: null,
+    metadata: {},
+    raw: {},
+  });
+
+  const conv = {
+    id: "conv-1",
+    sourceType: "chatgpt",
+    sourceId: "src-1",
+    title: "Branched tree",
+    namespace: "personal",
+    tags: [],
+    createdAt: "2026-09-20T00:00:00.000Z",
+    updatedAt: "2026-09-20T00:00:00.000Z",
+    currentSourceNodeId: "alt-2",
+    activeSourceNodeIds: ["root", "node-1", "node-2"],
+    nodes: [
+      makeNode("root", null, ["node-1", "alt-1"], "Root message"),
+      makeNode("node-1", "root", ["node-2"], "Active turn 1"),
+      makeNode("node-2", "node-1", [], "Active turn 2"),
+      makeNode("alt-1", "root", ["alt-2"], "Alternate branch turn 1"),
+      makeNode("alt-2", "alt-1", ["alt-3"], "Alternate branch turn 2"),
+      makeNode("alt-3", "alt-2", [], "Alternate branch turn 3"),
+    ],
+    metadata: {},
+    anomalies: [],
+    derivedFrom: null,
+  };
+
+  it("returns only seed nodes when before=0 and after=0", () => {
+    const result = expandPointerNeighborhood(conv, ["alt-2"], 0, 0, "alternate:alt-3");
+    expect(result.map((n) => n.sourceNodeId)).toEqual(["alt-2"]);
+  });
+
+  it("walks parent chain deterministically up to before hops along branch", () => {
+    const result = expandPointerNeighborhood(conv, ["alt-2"], 2, 0, "alternate:alt-3");
+    expect(result.map((n) => n.sourceNodeId)).toEqual(["root", "alt-1", "alt-2"]);
+  });
+
+  it("slices forward deterministically up to after messages along branch", () => {
+    const result = expandPointerNeighborhood(conv, ["alt-1"], 0, 2, "alternate:alt-3");
+    expect(result.map((n) => n.sourceNodeId)).toEqual(["alt-1", "alt-2", "alt-3"]);
+  });
+
+  it("combines both before and after with canonical message-count slicing", () => {
+    const result = expandPointerNeighborhood(conv, ["alt-2"], 1, 1, "alternate:alt-3");
+    expect(result.map((n) => n.sourceNodeId)).toEqual(["alt-1", "alt-2", "alt-3"]);
+  });
+
+  it("proves after: 1 does not include sibling branches in a fork", () => {
+    const forkedConv = {
+      ...conv,
+      activeSourceNodeIds: ["root", "fork-a", "leaf-a"],
+      nodes: [
+        makeNode("root", null, ["fork-a", "fork-b"], "Root prompt"),
+        makeNode("fork-a", "root", ["leaf-a"], "Branch A response"),
+        makeNode("leaf-a", "fork-a", [], "Branch A follow-up"),
+        makeNode("fork-b", "root", ["leaf-b"], "Branch B response"),
+        makeNode("leaf-b", "fork-b", [], "Branch B follow-up"),
+      ],
+    };
+
+    // On branch B (alternate:leaf-b), expanding from root with after=1 slices to fork-b and excludes fork-a
+    const resultB = expandPointerNeighborhood(forkedConv, ["root"], 0, 1, "alternate:leaf-b");
+    expect(resultB.map((n) => n.sourceNodeId)).toEqual(["root", "fork-b"]);
+    expect(resultB.map((n) => n.sourceNodeId)).not.toContain("fork-a");
+
+    // On branch A (active), expanding from root with after=1 slices to fork-a and excludes fork-b
+    const resultA = expandPointerNeighborhood(forkedConv, ["root"], 0, 1, "active");
+    expect(resultA.map((n) => n.sourceNodeId)).toEqual(["root", "fork-a"]);
+    expect(resultA.map((n) => n.sourceNodeId)).not.toContain("fork-b");
+  });
+
+  it("handles fallback when branchKey is absent gracefully", () => {
+    const result = expandPointerNeighborhood(conv, ["alt-2"], 1, 1);
+    expect(result.map((n) => n.sourceNodeId)).toEqual(["alt-1", "alt-2", "alt-3"]);
+  });
+
+  it("handles multiple seeds and cycle/dangling pointers gracefully", () => {
+    const cyclicalConv = {
+      ...conv,
+      nodes: [makeNode("c1", "c2", ["c2"], "Cycle 1"), makeNode("c2", "c1", ["c1"], "Cycle 2")],
+    };
+    const result = expandPointerNeighborhood(cyclicalConv, ["c1"], 5, 5);
+    expect(result.map((n) => n.sourceNodeId)).toEqual(["c2", "c1"]);
   });
 });

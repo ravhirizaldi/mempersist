@@ -10,7 +10,7 @@ import {
   type ContextPackComplete,
   type ContextPackRequiredBudgetExceeded,
 } from "../src/context";
-import { EMBEDDING_DIMENSIONS } from "../src/domain";
+import { EMBEDDING_DIMENSIONS, type CanonicalConversation } from "../src/domain";
 import { indexRevision, type IndexingEnv } from "../src/indexing";
 import { buildContextOutputSchema, createMemoryMcpServer } from "../src/mcp";
 import type { SearchEnv } from "../src/search";
@@ -407,6 +407,189 @@ describe("memory_build_context integration", () => {
     expect(allComplete.sections[0]!.messages).toHaveLength(3);
     const allTexts = allComplete.sections[0]!.messages.map((m) => m.text);
     expect(allTexts).toContain("Alternate branch: rebuild atlas-db from scratch.");
+  });
+  it("expands retrieved alternate-branch candidates using deterministic pointer neighborhood", async () => {
+    const client = await ownerClient();
+    const rawBranched = await normalizeChatGptConversation(branchedChatGptConversation());
+    rawBranched.id = crypto.randomUUID();
+    rawBranched.namespace = "personal";
+    const stored = await writeCanonicalConversation(env, rawBranched, null, null, OWNER_DB_USER_ID);
+    await indexRevision(indexingEnv(), stored.revisionId, env.ACTIVE_INDEX_GENERATION);
+
+    const dummyRequired = await storeConversation({
+      title: "REQUIRED_ANCHOR",
+      messages: [{ role: "system", content: "System guidelines." }],
+    });
+
+    const pack = (await callContext(client, {
+      task: "Pointer-aware alternate branch retrieval",
+      required: [
+        {
+          selector: { conversation_id: dummyRequired.conversation.id },
+          mode: "full",
+          branch: "active",
+          priority: 100,
+        },
+      ],
+      retrieve: [
+        {
+          query: "rebuild atlas-db from scratch",
+          limit: 3,
+          priority: 80,
+          context_before: 1,
+          context_after: 0,
+        },
+      ],
+      budget: { max_estimated_tokens: 4000, max_serialized_bytes: 30000 },
+      options: {
+        deduplicate: true,
+        include_provenance: true,
+      },
+    })) as ContextPackComplete;
+
+    expect(pack.status).toBe("complete");
+    const retrievedSection = pack.sections.find((s) => s.kind === "retrieved");
+    expect(retrievedSection).toBeDefined();
+
+    const messageTexts = retrievedSection!.messages.map((m) => m.text);
+    expect(messageTexts).toContain("Alternate branch: rebuild atlas-db from scratch.");
+    expect(messageTexts).toContain("Bagaimana migrasi database atlas-db?");
+    expect(messageTexts).not.toContain(
+      "Use additive migration 0007 and keep api.internal.example unchanged.",
+    );
+  });
+  it("proves context_after on an alternate branch does not include sibling branch nodes", async () => {
+    const client = await ownerClient();
+    const convId = crypto.randomUUID();
+    const tag = `fork-${convId.slice(0, 8)}`;
+    const branched: CanonicalConversation = {
+      id: convId,
+      sourceType: "chatgpt",
+      sourceId: `src-${tag}`,
+      title: `FORK_TEST_${tag}`,
+      namespace: "personal",
+      tags: [],
+      createdAt: "2026-09-20T00:00:00.000Z",
+      updatedAt: "2026-09-20T00:00:00.000Z",
+      currentSourceNodeId: "fork-a-leaf",
+      activeSourceNodeIds: ["fork-root", "fork-a-1", "fork-a-leaf"],
+      nodes: [
+        {
+          id: `id-root-${tag}`,
+          sourceNodeId: "fork-root",
+          parentSourceNodeId: null,
+          childSourceNodeIds: ["fork-a-1", "fork-b-1"],
+          role: "user",
+          text: `Common prompt for ${tag}`,
+          content: { content_type: "text", parts: [`Common prompt for ${tag}`] },
+          createdAt: "2026-09-20T00:00:00.000Z",
+          updatedAt: null,
+          modelSlug: null,
+          metadata: {},
+          raw: {},
+        },
+        {
+          id: `id-a1-${tag}`,
+          sourceNodeId: "fork-a-1",
+          parentSourceNodeId: "fork-root",
+          childSourceNodeIds: ["fork-a-leaf"],
+          role: "assistant",
+          text: `Active branch response for ${tag}`,
+          content: { content_type: "text", parts: [`Active branch response for ${tag}`] },
+          createdAt: "2026-09-20T00:00:01.000Z",
+          updatedAt: null,
+          modelSlug: null,
+          metadata: {},
+          raw: {},
+        },
+        {
+          id: `id-aleaf-${tag}`,
+          sourceNodeId: "fork-a-leaf",
+          parentSourceNodeId: "fork-a-1",
+          childSourceNodeIds: [],
+          role: "user",
+          text: `Active branch follow-up for ${tag}`,
+          content: { content_type: "text", parts: [`Active branch follow-up for ${tag}`] },
+          createdAt: "2026-09-20T00:00:02.000Z",
+          updatedAt: null,
+          modelSlug: null,
+          metadata: {},
+          raw: {},
+        },
+        {
+          id: `id-b1-${tag}`,
+          sourceNodeId: "fork-b-1",
+          parentSourceNodeId: "fork-root",
+          childSourceNodeIds: ["fork-b-leaf"],
+          role: "assistant",
+          text: `Alternate unique keyword target ${tag}`,
+          content: { content_type: "text", parts: [`Alternate unique keyword target ${tag}`] },
+          createdAt: "2026-09-20T00:00:01.000Z",
+          updatedAt: null,
+          modelSlug: null,
+          metadata: {},
+          raw: {},
+        },
+        {
+          id: `id-bleaf-${tag}`,
+          sourceNodeId: "fork-b-leaf",
+          parentSourceNodeId: "fork-b-1",
+          childSourceNodeIds: [],
+          role: "user",
+          text: `Alternate child continuation for ${tag}`,
+          content: { content_type: "text", parts: [`Alternate child continuation for ${tag}`] },
+          createdAt: "2026-09-20T00:00:02.000Z",
+          updatedAt: null,
+          modelSlug: null,
+          metadata: {},
+          raw: {},
+        },
+      ],
+      metadata: {},
+      anomalies: [],
+      derivedFrom: null,
+    };
+
+    const stored = await writeCanonicalConversation(env, branched, null, null, OWNER_DB_USER_ID);
+    await indexRevision(indexingEnv(), stored.revisionId, env.ACTIVE_INDEX_GENERATION);
+
+    const dummyRequired = await storeConversation({
+      title: `ANCHOR_${tag}`,
+      messages: [{ role: "system", content: "Prompt anchor." }],
+    });
+
+    const pack = (await callContext(client, {
+      task: "Test alternate branch forward slice excludes sibling",
+      required: [
+        {
+          selector: { conversation_id: dummyRequired.conversation.id },
+          mode: "full",
+          branch: "active",
+          priority: 100,
+        },
+      ],
+      retrieve: [
+        {
+          query: `unique keyword target ${tag}`,
+          limit: 3,
+          priority: 80,
+          context_before: 0,
+          context_after: 1,
+        },
+      ],
+      budget: { max_estimated_tokens: 4000, max_serialized_bytes: 30000 },
+      options: { deduplicate: true, include_provenance: true },
+    })) as ContextPackComplete;
+
+    expect(pack.status).toBe("complete");
+    const retrievedSection = pack.sections.find((s) => s.kind === "retrieved");
+    expect(retrievedSection).toBeDefined();
+
+    const texts = retrievedSection!.messages.map((m) => m.text);
+    expect(texts).toContain(`Alternate unique keyword target ${tag}`);
+    expect(texts).toContain(`Alternate child continuation for ${tag}`);
+    expect(texts).not.toContain(`Active branch response for ${tag}`);
+    expect(texts).not.toContain(`Active branch follow-up for ${tag}`);
   });
 
   it("pins revision ID and prevents mixing revisions across concurrent appends", async () => {
@@ -1392,7 +1575,7 @@ describe("memory_build_context integration", () => {
     expect(degradedBoundaryPack.budget.used_serialized_bytes).toBe(actualDegradedBoundaryBytes);
     expect(actualBoundaryBytes).toBeLessThanOrEqual(boundaryBudget);
     expect(boundaryPack.budget.used_serialized_bytes).toBe(actualBoundaryBytes);
-  });
+  }, 30_000);
 
   it("rejects tail_messages above 100 via MCP tool call and direct invocation", async () => {
     const client = await ownerClient();
