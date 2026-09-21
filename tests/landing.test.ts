@@ -34,8 +34,14 @@ describe("Minimalist public pages", () => {
     for (const [, id] of html.matchAll(/href="#([^"]+)"/g)) {
       expect(ids).toContain(id);
     }
-    expect(response.headers.get("content-security-policy")).toContain("frame-ancestors 'none'");
-    expect(response.headers.get("content-security-policy")).not.toContain("cdn.jsdelivr.net");
+    const csp = response.headers.get("content-security-policy") ?? "";
+    expect(csp).toContain("frame-ancestors 'none'");
+    expect(csp).toContain("font-src 'self'");
+    expect(csp).toContain("manifest-src 'self'");
+    expect(response.headers.get("permissions-policy")).toBe(
+      "camera=(), microphone=(), geolocation=()",
+    );
+    expect(csp).not.toContain("cdn.jsdelivr.net");
   });
 
   it("keeps setup content and examples usable without JavaScript", async () => {

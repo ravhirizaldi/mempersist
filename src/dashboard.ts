@@ -231,7 +231,7 @@ function htmlHeaders(locale: Locale, value: string): HeadersInit {
   return {
     "Cache-Control": "no-store, no-transform",
     "Content-Language": locale,
-    "Content-Security-Policy": `default-src 'none'; script-src 'nonce-${value}'; style-src 'nonce-${value}' https://fonts.googleapis.com; font-src https://fonts.gstatic.com; connect-src 'self'; img-src data:; base-uri 'none'; form-action 'self'; frame-ancestors 'none'`,
+    "Content-Security-Policy": `default-src 'none'; script-src 'self' 'nonce-${value}' https://static.cloudflareinsights.com; style-src 'self' 'nonce-${value}' https://fonts.googleapis.com; font-src 'self' https://fonts.gstatic.com; connect-src 'self' https://cloudflareinsights.com https://static.cloudflareinsights.com; manifest-src 'self'; img-src data:; base-uri 'none'; form-action 'self'; frame-ancestors 'none'`,
     "Content-Type": "text/html; charset=UTF-8",
     "Permissions-Policy": "camera=(), microphone=(), geolocation=()",
     "Referrer-Policy": "same-origin",

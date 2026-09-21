@@ -384,9 +384,13 @@ describe("dashboard authentication and isolation", () => {
     expect(response.status).toBe(200);
     const html = await response.text();
     const csp = response.headers.get("content-security-policy") ?? "";
-    expect(csp).toContain("script-src 'nonce-");
+    expect(csp).toContain("script-src 'self' 'nonce-");
+    expect(csp).toContain("font-src 'self'");
+    expect(csp).toContain("manifest-src 'self'");
     expect(csp).toContain("connect-src 'self'");
-    expect(csp).not.toContain("cdn.jsdelivr.net");
+    expect(response.headers.get("permissions-policy")).toBe(
+      "camera=(), microphone=(), geolocation=()",
+    );
     expect(html).not.toContain("cdn.jsdelivr.net");
     expect(html).toContain('id="memory-map" class="mindmap-canvas"');
     expect(html).toContain('id="map-tooltip"');
