@@ -186,103 +186,197 @@ export function landingPage(locale: Locale = "en"): Response {
 }
 
 function searchFlowDiagram(): string {
-  return `<div class="diagram"><svg viewBox="0 0 720 330" role="img" aria-label="Search pipeline diagram">
-    <g font-size="12" fill="#dceaff">
-      <rect x="40" y="10" width="300" height="44" rx="6" fill="#0d1d34" stroke="#29415f"/>
-      <text x="190" y="37" text-anchor="middle">query</text>
-    </g>
-    <path d="M190 54 L190 84" stroke="#48688f" fill="none"/>
-    <g font-size="11">
-      <rect x="30" y="84" width="200" height="52" rx="6" fill="#0d1d34" stroke="#29415f"/>
-      <text x="130" y="103" text-anchor="middle" fill="#b6d2f5">lexical · FTS</text>
-      <text x="130" y="121" text-anchor="middle" fill="#8294ad">chunked text match</text>
-      <rect x="260" y="84" width="220" height="52" rx="6" fill="#0d1d34" stroke="#29415f"/>
-      <text x="370" y="103" text-anchor="middle" fill="#b6d2f5">semantic</text>
-      <text x="370" y="121" text-anchor="middle" fill="#8294ad">Workers AI embed → Vectorize</text>
-      <rect x="510" y="84" width="180" height="52" rx="6" fill="#0d1d34" stroke="#29415f"/>
-      <text x="600" y="103" text-anchor="middle" fill="#b6d2f5">recent-canonical</text>
-      <text x="600" y="121" text-anchor="middle" fill="#8294ad">unindexed revisions</text>
-    </g>
-    <path d="M130 136 L190 176" stroke="#48688f" fill="none"/>
-    <path d="M370 136 L320 176" stroke="#48688f" fill="none"/>
-    <path d="M600 136 L510 176" stroke="#48688f" fill="none"/>
-    <g font-size="11">
-      <rect x="40" y="176" width="280" height="48" rx="6" fill="#0d1d34" stroke="#29415f"/>
-      <text x="180" y="196" text-anchor="middle" fill="#b6d2f5">candidate merge</text>
-      <text x="180" y="212" text-anchor="middle" fill="#8294ad">deterministic chunk identity</text>
-      <rect x="350" y="176" width="340" height="48" rx="6" fill="#0d1d34" stroke="#29415f"/>
-      <text x="520" y="196" text-anchor="middle" fill="#b6d2f5">scope + rank</text>
-      <text x="520" y="212" text-anchor="middle" fill="#8294ad">(user_id, namespace) check · hybrid score</text>
-    </g>
-    <path d="M320 200 L350 200" stroke="#48688f" fill="none"/>
-    <g font-size="12">
-      <rect x="180" y="254" width="360" height="44" rx="6" fill="#102746" stroke="#48688f"/>
-      <text x="360" y="281" text-anchor="middle" fill="#dceaff">ranked results + degradation state</text>
-    </g>
-    <path d="M520 224 L360 254" stroke="#48688f" fill="none"/>
-  </svg></div>`;
+  return `<div class="diagram">
+    <svg viewBox="0 0 900 500" role="img" aria-labelledby="search-diagram-title search-diagram-desc">
+      <title id="search-diagram-title">MemPersist hybrid search pipeline</title>
+      <desc id="search-diagram-desc">A query fans out to lexical, semantic, and recent-canonical sources, then candidates are merged, scoped, ranked, and returned with degradation state.</desc>
+      <defs>
+        <marker id="search-diagram-arrow" markerWidth="9" markerHeight="9" refX="7" refY="4.5" orient="auto">
+          <path d="M0 0L9 4.5L0 9Z" />
+        </marker>
+        <pattern id="search-diagram-grid" width="24" height="24" patternUnits="userSpaceOnUse">
+          <path d="M24 0H0V24" />
+        </pattern>
+      </defs>
+      <rect class="diagram-bg" x="0" y="0" width="900" height="500" rx="16" />
+      <rect class="diagram-grid" x="1" y="1" width="898" height="498" rx="15" />
+
+      <g class="diagram-header">
+        <text x="40" y="36">RETRIEVAL PIPELINE</text>
+        <text x="860" y="36" text-anchor="end">DETERMINISTIC + HYBRID</text>
+      </g>
+      <g class="diagram-node diagram-node--edge">
+        <rect x="260" y="60" width="380" height="70" rx="10" />
+        <circle cx="284" cy="84" r="5" />
+        <text class="diagram-node-title" x="300" y="88">Query</text>
+        <text class="diagram-node-meta" x="284" y="111">authenticated request · normalized terms · namespace</text>
+      </g>
+
+      <g class="diagram-band">
+        <text x="40" y="164">01 / CANDIDATE SOURCES</text>
+        <path d="M190 160H860" />
+      </g>
+      <g class="diagram-node diagram-node--durable">
+        <rect x="40" y="184" width="250" height="84" rx="10" />
+        <text class="diagram-node-kicker" x="64" y="210">LEXICAL</text>
+        <text class="diagram-node-title" x="64" y="238">FTS5</text>
+        <text class="diagram-node-meta" x="64" y="257">chunked text match</text>
+      </g>
+      <g class="diagram-node diagram-node--derived">
+        <rect x="325" y="184" width="250" height="84" rx="10" />
+        <text class="diagram-node-kicker" x="349" y="210">SEMANTIC</text>
+        <text class="diagram-node-title" x="349" y="238">Workers AI → Vectorize</text>
+        <text class="diagram-node-meta" x="349" y="257">embedding similarity</text>
+      </g>
+      <g class="diagram-node diagram-node--queue">
+        <rect x="610" y="184" width="250" height="84" rx="10" />
+        <text class="diagram-node-kicker" x="634" y="210">RECENT-CANONICAL</text>
+        <text class="diagram-node-title" x="634" y="238">Fresh revisions</text>
+        <text class="diagram-node-meta" x="634" y="257">unindexed coverage</text>
+      </g>
+      <path class="diagram-flow" d="M450 130V150H165V184" marker-end="url(#search-diagram-arrow)" />
+      <path class="diagram-flow" d="M450 130V184" marker-end="url(#search-diagram-arrow)" />
+      <path class="diagram-flow" d="M450 130V150H735V184" marker-end="url(#search-diagram-arrow)" />
+
+      <g class="diagram-band">
+        <text x="40" y="300">02 / MERGE + GOVERN</text>
+        <path d="M174 296H860" />
+      </g>
+      <g class="diagram-node diagram-node--durable">
+        <rect x="100" y="320" width="330" height="78" rx="10" />
+        <text class="diagram-node-kicker" x="124" y="346">MERGE</text>
+        <text class="diagram-node-title" x="124" y="374">Candidate set</text>
+        <text class="diagram-node-meta" x="124" y="391">stable chunk identity · deduplication</text>
+      </g>
+      <g class="diagram-node diagram-node--auth">
+        <rect x="470" y="320" width="330" height="78" rx="10" />
+        <text class="diagram-node-kicker" x="494" y="346">SCOPE + RANK</text>
+        <text class="diagram-node-title" x="494" y="374">Hybrid ordering</text>
+        <text class="diagram-node-meta" x="494" y="391">(user_id, namespace) · score + boosts</text>
+      </g>
+      <path class="diagram-flow" d="M165 268V292L265 320" marker-end="url(#search-diagram-arrow)" />
+      <path class="diagram-flow" d="M450 268V320" marker-end="url(#search-diagram-arrow)" />
+      <path class="diagram-flow" d="M735 268V292L635 320" marker-end="url(#search-diagram-arrow)" />
+      <path class="diagram-flow" d="M430 359H470" marker-end="url(#search-diagram-arrow)" />
+
+      <g class="diagram-node diagram-node--edge">
+        <rect x="220" y="430" width="460" height="48" rx="10" />
+        <text class="diagram-node-title" x="450" y="459" text-anchor="middle">Ranked results + degradation state</text>
+      </g>
+      <path class="diagram-flow" d="M635 398V414L450 430" marker-end="url(#search-diagram-arrow)" />
+    </svg>
+  </div>`;
 }
 
 function architectureDiagram(): string {
-  return `<div class="diagram"><svg viewBox="0 0 760 470" role="img" aria-label="Cloudflare architecture diagram">
-    <g font-size="11">
-      <rect x="40" y="12" width="360" height="46" rx="6" fill="#0d1d34" stroke="#29415f"/>
-      <text x="220" y="30" text-anchor="middle" fill="#b6d2f5" font-size="12">clients</text>
-      <text x="220" y="46" text-anchor="middle" fill="#8294ad">ChatGPT · Codex · Claude · Cursor</text>
-      <rect x="560" y="12" width="160" height="46" rx="6" fill="#0d1d34" stroke="#29415f"/>
-      <text x="640" y="30" text-anchor="middle" fill="#b6d2f5" font-size="12">KV</text>
-      <text x="640" y="46" text-anchor="middle" fill="#8294ad">OAuth grants + CSRF</text>
-    </g>
-    <path d="M220 58 L220 96" stroke="#48688f" fill="none"/>
-    <path d="M640 58 L640 96" stroke="#48688f" fill="none"/>
-    <path d="M560 58 C480 70 470 96 430 108" stroke="#48688f" fill="none"/>
-    <g font-size="12">
-      <rect x="40" y="96" width="390" height="58" rx="6" fill="#0d1d34" stroke="#48688f"/>
-      <text x="235" y="118" text-anchor="middle" fill="#dceaff">Worker · mempersist</text>
-      <text x="235" y="136" text-anchor="middle" fill="#8294ad" font-size="11">Hono · MCP SDK v2 · OAuth 2.1 · Zod</text>
-      <rect x="560" y="96" width="160" height="58" rx="6" fill="#0d1d34" stroke="#29415f"/>
-      <text x="640" y="118" text-anchor="middle" fill="#b6d2f5" font-size="12">Queues</text>
-      <text x="640" y="136" text-anchor="middle" fill="#8294ad" font-size="11">import · index · DLQ</text>
-    </g>
-    <path d="M430 125 L560 125" stroke="#48688f" fill="none"/>
-    <path d="M560 154 L430 176" stroke="#48688f" fill="none"/>
-    <g font-size="12">
-      <rect x="40" y="200" width="210" height="58" rx="6" fill="#0d1d34" stroke="#29415f"/>
-      <text x="145" y="222" text-anchor="middle" fill="#b6d2f5">R2</text>
-      <text x="145" y="240" text-anchor="middle" fill="#8294ad" font-size="11">canonical archive</text>
-      <rect x="275" y="200" width="210" height="58" rx="6" fill="#0d1d34" stroke="#29415f"/>
-      <text x="380" y="222" text-anchor="middle" fill="#b6d2f5">D1</text>
-      <text x="380" y="240" text-anchor="middle" fill="#8294ad" font-size="11">catalog + namespaces</text>
-      <rect x="510" y="200" width="210" height="58" rx="6" fill="#0d1d34" stroke="#29415f"/>
-      <text x="615" y="222" text-anchor="middle" fill="#b6d2f5">Vectorize</text>
-      <text x="615" y="240" text-anchor="middle" fill="#8294ad" font-size="11">semantic index</text>
-    </g>
-    <path d="M145 154 L145 200" stroke="#48688f" fill="none"/>
-    <path d="M380 154 L380 200" stroke="#48688f" fill="none"/>
-    <path d="M615 154 L615 200" stroke="#48688f" fill="none"/>
-    <path d="M615 258 L615 320" stroke="#48688f" fill="none"/>
-    <g font-size="12">
-      <rect x="40" y="320" width="210" height="58" rx="6" fill="#0d1d34" stroke="#29415f"/>
-      <text x="145" y="342" text-anchor="middle" fill="#b6d2f5">Workers AI</text>
-      <text x="145" y="360" text-anchor="middle" fill="#8294ad" font-size="11">bge-m3 embeddings</text>
-      <rect x="275" y="320" width="210" height="58" rx="6" fill="#0d1d34" stroke="#29415f"/>
-      <text x="380" y="342" text-anchor="middle" fill="#b6d2f5">FTS</text>
-      <text x="380" y="360" text-anchor="middle" fill="#8294ad" font-size="11">lexical index in D1</text>
-    </g>
-    <path d="M380 320 L380 258" stroke="#48688f" fill="none"/>
-    <path d="M145 258 L145 320" stroke="#48688f" fill="none"/>
-    <g font-size="11">
-      <rect x="510" y="320" width="210" height="58" rx="6" fill="#0d1d34" stroke="#29415f"/>
-      <text x="615" y="338" text-anchor="middle" fill="#b6d2f5">100% Cloudflare</text>
-      <text x="615" y="356" text-anchor="middle" fill="#8294ad">no external infrastructure</text>
-    </g>
-    <path d="M640 154 L640 200" stroke="#48688f" fill="none"/>
-    <g font-size="11">
-      <rect x="40" y="410" width="680" height="40" rx="6" fill="#0a1930" stroke="#22395a"/>
-      <text x="380" y="428" text-anchor="middle" fill="#8294ad">Workers runtime · D1 · R2 · Vectorize · Workers AI · Queues · KV — all Cloudflare bindings</text>
-      <text x="380" y="442" text-anchor="middle" fill="#7d92af" font-size="10">canonical writes → catalog → index queue → derived FTS/vectors (rebuildable)</text>
-    </g>
-  </svg></div>`;
+  return `<div class="diagram">
+    <svg viewBox="0 0 900 570" role="img" aria-labelledby="architecture-diagram-title architecture-diagram-desc">
+      <title id="architecture-diagram-title">MemPersist request, storage, and indexing flow</title>
+      <desc id="architecture-diagram-desc">Clients connect to the MCP Worker. The Worker writes canonical data to R2 and the D1 catalog, then queues rebuildable lexical and semantic indexing work.</desc>
+      <defs>
+        <marker id="diagram-arrow" markerWidth="9" markerHeight="9" refX="7" refY="4.5" orient="auto">
+          <path d="M0 0L9 4.5L0 9Z" />
+        </marker>
+        <pattern id="diagram-grid" width="24" height="24" patternUnits="userSpaceOnUse">
+          <path d="M24 0H0V24" />
+        </pattern>
+      </defs>
+      <rect class="diagram-bg" x="0" y="0" width="900" height="570" rx="16" />
+      <rect class="diagram-grid" x="1" y="1" width="898" height="568" rx="15" />
+
+      <g class="diagram-header">
+        <text x="40" y="36">REQUEST + STORAGE FLOW</text>
+        <text x="860" y="36" text-anchor="end">CLOUDFLARE / MEMPERSIST</text>
+      </g>
+
+      <g class="diagram-band">
+        <text x="40" y="78">01 / EDGE</text>
+        <path d="M112 74H860" />
+      </g>
+      <g class="diagram-node diagram-node--clients">
+        <rect x="40" y="104" width="230" height="78" rx="10" />
+        <circle cx="62" cy="128" r="5" />
+        <text class="diagram-node-title" x="78" y="132">Clients</text>
+        <text class="diagram-node-meta" x="62" y="157">ChatGPT · Codex · Claude · Cursor</text>
+      </g>
+      <g class="diagram-node diagram-node--edge">
+        <rect x="325" y="104" width="340" height="78" rx="10" />
+        <circle cx="347" cy="128" r="5" />
+        <text class="diagram-node-title" x="363" y="132">MCP edge / Worker</text>
+        <text class="diagram-node-meta" x="347" y="157">Hono · OAuth 2.1 · MCP SDK v2</text>
+      </g>
+      <g class="diagram-node diagram-node--auth">
+        <rect x="720" y="104" width="140" height="78" rx="10" />
+        <circle cx="742" cy="128" r="5" />
+        <text class="diagram-node-title" x="758" y="132">KV</text>
+        <text class="diagram-node-meta" x="742" y="157">grants · PKCE · CSRF</text>
+      </g>
+      <path class="diagram-flow" d="M270 143H325" marker-end="url(#diagram-arrow)" />
+      <path class="diagram-flow diagram-flow--auth" d="M720 143H665" marker-end="url(#diagram-arrow)" />
+
+      <g class="diagram-band">
+        <text x="40" y="222">02 / DURABLE PATH</text>
+        <path d="M162 218H860" />
+      </g>
+      <g class="diagram-node diagram-node--durable">
+        <rect x="40" y="248" width="250" height="90" rx="10" />
+        <text class="diagram-node-kicker" x="64" y="276">CANONICAL</text>
+        <text class="diagram-node-title" x="64" y="304">R2</text>
+        <text class="diagram-node-meta" x="64" y="324">immutable archive</text>
+      </g>
+      <g class="diagram-node diagram-node--durable">
+        <rect x="325" y="248" width="250" height="90" rx="10" />
+        <text class="diagram-node-kicker" x="349" y="276">CATALOG</text>
+        <text class="diagram-node-title" x="349" y="304">D1</text>
+        <text class="diagram-node-meta" x="349" y="324">namespaces · revisions · jobs</text>
+      </g>
+      <g class="diagram-node diagram-node--queue">
+        <rect x="610" y="248" width="250" height="90" rx="10" />
+        <text class="diagram-node-kicker" x="634" y="276">ORCHESTRATION</text>
+        <text class="diagram-node-title" x="634" y="304">Queues</text>
+        <text class="diagram-node-meta" x="634" y="324">import · index · dead letter</text>
+      </g>
+      <path class="diagram-flow" d="M430 182V220L165 248" marker-end="url(#diagram-arrow)" />
+      <path class="diagram-flow" d="M500 182V248" marker-end="url(#diagram-arrow)" />
+      <path class="diagram-flow" d="M290 293H325" marker-end="url(#diagram-arrow)" />
+      <path class="diagram-flow" d="M575 293H610" marker-end="url(#diagram-arrow)" />
+
+      <g class="diagram-band">
+        <text x="40" y="378">03 / REBUILDABLE INDEXES</text>
+        <path d="M210 374H860" />
+      </g>
+      <g class="diagram-node diagram-node--derived">
+        <rect x="40" y="404" width="250" height="90" rx="10" />
+        <text class="diagram-node-kicker" x="64" y="432">EMBEDDINGS</text>
+        <text class="diagram-node-title" x="64" y="460">Workers AI</text>
+        <text class="diagram-node-meta" x="64" y="480">bge-m3 generation</text>
+      </g>
+      <g class="diagram-node diagram-node--derived">
+        <rect x="325" y="404" width="250" height="90" rx="10" />
+        <text class="diagram-node-kicker" x="349" y="432">LEXICAL</text>
+        <text class="diagram-node-title" x="349" y="460">FTS5 / D1</text>
+        <text class="diagram-node-meta" x="349" y="480">text search channel</text>
+      </g>
+      <g class="diagram-node diagram-node--derived">
+        <rect x="610" y="404" width="250" height="90" rx="10" />
+        <text class="diagram-node-kicker" x="634" y="432">SEMANTIC</text>
+        <text class="diagram-node-title" x="634" y="460">Vectorize</text>
+        <text class="diagram-node-meta" x="634" y="480">disposable vector index</text>
+      </g>
+      <path class="diagram-flow diagram-flow--derived" d="M675 338V360H165V404" marker-end="url(#diagram-arrow)" />
+      <path class="diagram-flow diagram-flow--derived" d="M735 338V404" marker-end="url(#diagram-arrow)" />
+      <path class="diagram-flow diagram-flow--derived" d="M795 338V360H735V404" marker-end="url(#diagram-arrow)" />
+      <path class="diagram-flow diagram-flow--derived" d="M290 449H610" marker-end="url(#diagram-arrow)" />
+
+      <g class="diagram-footer">
+        <circle cx="48" cy="538" r="4" />
+        <text x="62" y="542">canonical first</text>
+        <path d="M210 538H250" />
+        <text x="264" y="542">derived data is rebuildable</text>
+        <text x="860" y="542" text-anchor="end">all services remain inside Cloudflare</text>
+      </g>
+    </svg>
+  </div>`;
 }
 
 function whitepaperPage(locale: Locale = "en"): Response {

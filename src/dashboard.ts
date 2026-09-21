@@ -67,6 +67,8 @@ const copy = {
     recent: "Recent conversations",
     empty: "Empty namespace",
     emptyHelp: "Type the exact namespace. It stays available after its memories are erased.",
+    deleteNamespace: "Delete namespace",
+    deleteHelp: "Type the exact namespace. This removes the namespace and all of its memories.",
     accountDeletion: "Delete account",
     accountHelp: "Type your normalized email. Erasure starts after a seven-day grace period.",
     schedule: "Schedule deletion",
@@ -117,6 +119,8 @@ const copy = {
     recent: "Percakapan terbaru",
     empty: "Kosongkan namespace",
     emptyHelp: "Ketik namespace persis. Namespace tetap tersedia setelah memorinya dihapus.",
+    deleteNamespace: "Hapus namespace",
+    deleteHelp: "Ketik namespace persis. Namespace dan semua memorinya akan dihapus.",
     accountDeletion: "Hapus akun",
     accountHelp:
       "Ketik email yang dinormalisasi. Penghapusan dimulai setelah masa tenggang tujuh hari.",
@@ -158,6 +162,17 @@ function renderTagLinks(tags: string[]): string {
         `<a href="/dashboard/mindmap?q=${encodeURIComponent(tag)}"><span class="truncate">${escapeHtml(tag)}</span></a>`,
     )
     .join("");
+}
+
+function namespaceMutationForm(
+  csrf: string,
+  namespace: string,
+  action: "empty" | "delete",
+  label: string,
+  help: string,
+): string {
+  const endpoint = `/dashboard/namespaces/${action}`;
+  return `<details class="ns-empty${action === "delete" ? " ns-delete" : ""}"><summary>${escapeHtml(label)}</summary><form method="post" action="${endpoint}"><input type="hidden" name="csrf" value="${escapeHtml(csrf)}"><input type="hidden" name="namespace" value="${escapeHtml(namespace)}"><label><span>${escapeHtml(help)}</span><input name="confirm_namespace" required autocomplete="off" placeholder="${escapeHtml(namespace)}"></label><button class="button danger" type="submit">${escapeHtml(label)}</button></form></details>`;
 }
 
 function randomToken(): string {
@@ -556,13 +571,13 @@ async function namespacePage(
     : `<li><div class="empty-state"><strong>${t.noMemories}</strong></div></li>`;
   const previous = offset > 0 ? Math.max(0, offset - 20) : null;
   const next = offset + 20 < data.total ? offset + 20 : null;
-  const emptyForm = nsRow.deletion_job_id
+  const namespaceActions = nsRow.deletion_job_id
     ? `<p class="ns-meta"><span>${t.pending}</span></p>`
-    : `<details class="ns-empty"><summary>${t.empty}</summary><form method="post" action="/dashboard/namespaces/empty"><input type="hidden" name="csrf" value="${session.csrf}"><input type="hidden" name="namespace" value="${escapeHtml(namespace)}"><label><span>${t.emptyHelp}</span><input name="confirm_namespace" required autocomplete="off" placeholder="${escapeHtml(namespace)}"></label><button class="button danger" type="submit">${t.empty}</button></form></details>`;
+    : `<div class="namespace-actions">${namespaceMutationForm(session.csrf, namespace, "empty", t.empty, t.emptyHelp)}${namespaceMutationForm(session.csrf, namespace, "delete", t.deleteNamespace, t.deleteHelp)}</div>`;
 
   return page(
     namespace,
-    `<p class="dash-back"><a href="/dashboard">← ${t.back}</a></p><header class="dash-head"><div><span class="dash-badge">${t.namespaces}</span><h1 class="truncate">${escapeHtml(namespace)}</h1><p>${data.total} ${t.conversations.toLowerCase()}</p></div></header><section class="card"><ul class="recent-list">${rows}</ul></section>${emptyForm}<nav class="pagination" aria-label="Pagination">${previous === null ? "" : `<a class="button secondary" href="?offset=${previous}">${t.previous}</a>`}${next === null ? "" : `<a class="button secondary" href="?offset=${next}">${t.next}</a>`}</nav>`,
+    `<p class="dash-back"><a href="/dashboard">← ${t.back}</a></p><header class="dash-head"><div><span class="dash-badge">${t.namespaces}</span><h1 class="truncate">${escapeHtml(namespace)}</h1><p>${data.total} ${t.conversations.toLowerCase()}</p></div></header><section class="card"><ul class="recent-list">${rows}</ul></section>${namespaceActions}<nav class="pagination" aria-label="Pagination">${previous === null ? "" : `<a class="button secondary" href="?offset=${previous}">${t.previous}</a>`}${next === null ? "" : `<a class="button secondary" href="?offset=${next}">${t.next}</a>`}</nav>`,
     locale,
     url.pathname + url.search,
     { session },
@@ -585,10 +600,12 @@ async function overview(
     { conversations: 0, messages: 0 },
   );
   const namespaceRows = data.namespaces
-    .map(
-      (row) =>
-        `<li><a class="ns-link" href="/dashboard/namespaces/${encodeURIComponent(row.namespace)}"><span class="ns-icon" aria-hidden="true"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"></path></svg></span><div class="ns-meta"><strong class="truncate">${escapeHtml(row.namespace)}</strong><span>${row.conversations} ${t.conversations.toLowerCase()} · ${row.messages} ${t.messages.toLowerCase()}${row.deletion_job_id ? ` · ${t.pending}` : ""}</span></div></a>${row.deletion_job_id ? "" : `<details class="ns-empty"><summary>${t.empty}</summary><form method="post" action="/dashboard/namespaces/empty"><input type="hidden" name="csrf" value="${session.csrf}"><input type="hidden" name="namespace" value="${escapeHtml(row.namespace)}"><label><span>${t.emptyHelp}</span><input name="confirm_namespace" required autocomplete="off" placeholder="${escapeHtml(row.namespace)}"></label><button class="button danger" type="submit">${t.empty}</button></form></details>`}</li>`,
-    )
+    .map((row) => {
+      const actions = row.deletion_job_id
+        ? `<p class="ns-meta ns-pending"><span>${t.pending}</span></p>`
+        : `<div class="namespace-actions">${namespaceMutationForm(session.csrf, row.namespace, "empty", t.empty, t.emptyHelp)}${namespaceMutationForm(session.csrf, row.namespace, "delete", t.deleteNamespace, t.deleteHelp)}</div>`;
+      return `<li><a class="ns-link" href="/dashboard/namespaces/${encodeURIComponent(row.namespace)}"><span class="ns-icon" aria-hidden="true"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"></path></svg></span><div class="ns-meta"><strong class="truncate">${escapeHtml(row.namespace)}</strong><span>${row.conversations} ${t.conversations.toLowerCase()} · ${row.messages} ${t.messages.toLowerCase()}</span></div></a>${actions}</li>`;
+    })
     .join("");
   const recent = data.recent.length
     ? data.recent
@@ -715,7 +732,7 @@ async function mindmap(
   });
   return page(
     t.memoryMap,
-    `<header class="hero"><p class="eyebrow">${t.memoryMap}</p><h1>${t.memoryMap}</h1><p>${t.mapHint}</p></header><form id="map-search" class="search-form"><label for="map-query">${t.search}</label><div><input id="map-query" name="q" maxlength="100"><button class="button" type="submit">${t.searchButton}</button></div></form><section class="map-panel" aria-labelledby="map-status"><div class="map-toolbar" role="toolbar" aria-label="${escapeHtml(t.memoryMap)}"><div class="map-actions"><button id="map-collapse-all" class="chip-button" type="button">${t.collapseAll}</button><button id="map-expand-all" class="chip-button" type="button">${t.expandAll}</button><button id="map-reset-view" class="chip-button" type="button">${t.resetView}</button></div><div class="map-actions"><button id="map-zoom-out" class="chip-button" type="button" aria-label="Zoom out">−</button><button id="map-zoom-in" class="chip-button" type="button" aria-label="Zoom in">+</button></div></div><div id="map-viewport" class="map-viewport"><p id="map-status" role="status">${t.loading}</p><div id="memory-map" class="mindmap-canvas" aria-hidden="true" tabindex="0"></div><div id="map-tooltip" class="map-tooltip" hidden></div></div><button id="load-more" class="button secondary" type="button" hidden>${t.loadMore}</button></section><section class="card"><h2>${t.accessibleTree}</h2>${accessibleTree(initial, locale)}</section>`,
+    `<header class="hero"><p class="eyebrow">${t.memoryMap}</p><h1>${t.memoryMap}</h1><p>${t.mapHint}</p></header><form id="map-search" class="search-form"><label for="map-query">${t.search}</label><div><input id="map-query" name="q" maxlength="100"><button class="button" type="submit">${t.searchButton}</button></div></form><section class="map-panel" aria-labelledby="map-status"><div class="map-toolbar" role="toolbar" aria-label="${escapeHtml(t.memoryMap)}"><div class="map-actions"><button id="map-collapse-all" class="chip-button" type="button">${t.collapseAll}</button><button id="map-expand-all" class="chip-button" type="button">${t.expandAll}</button><button id="map-reset-view" class="chip-button" type="button">${t.resetView}</button></div><div class="map-actions"><button id="map-zoom-out" class="chip-button" type="button" aria-label="Zoom out">−</button><button id="map-zoom-in" class="chip-button" type="button" aria-label="Zoom in">+</button></div></div><div class="map-legend" aria-label="${escapeHtml(t.memoryMap)}"><span><i class="map-dot account" aria-hidden="true"></i>${escapeHtml(accountLabel)}</span><span><i class="map-dot namespace" aria-hidden="true"></i>${escapeHtml(t.namespaces)}</span><span><i class="map-dot conversation" aria-hidden="true"></i>${escapeHtml(t.conversations)}</span></div><div id="map-viewport" class="map-viewport"><p id="map-status" role="status">${t.loading}</p><div id="memory-map" class="mindmap-canvas" aria-hidden="true" tabindex="0"></div><div id="map-tooltip" class="map-tooltip" hidden></div></div><button id="load-more" class="button secondary" type="button" hidden>${t.loadMore}</button></section><section class="card"><h2>${t.accessibleTree}</h2>${accessibleTree(initial, locale)}</section>`,
     locale,
     "/dashboard/mindmap",
     { session, script },
@@ -924,14 +941,22 @@ export async function handleDashboardRequest(request: Request, env: AppEnv): Pro
         .run();
       return redirect("/dashboard");
     }
-    if (url.pathname === "/dashboard/namespaces/empty") {
+    if (
+      url.pathname === "/dashboard/namespaces/empty" ||
+      url.pathname === "/dashboard/namespaces/delete"
+    ) {
       const namespace = form.get("namespace");
       const confirmation = form.get("confirm_namespace");
       if (typeof namespace !== "string" || confirmation !== namespace) {
         throw new AppError("VALIDATION", "Namespace confirmation must match exactly", 400);
       }
       await assertAccountWritable(env, session.user.id, namespace);
-      await scheduleNamespaceDeletion(env, session.user.id, namespace);
+      await scheduleNamespaceDeletion(
+        env,
+        session.user.id,
+        namespace,
+        url.pathname.endsWith("/delete") ? "delete" : "empty",
+      );
       return redirect("/dashboard");
     }
     if (url.pathname === "/dashboard/account/delete") {
@@ -1008,7 +1033,10 @@ input:focus-visible{outline:0;border-color:var(--accent);box-shadow:0 0 0 3px rg
 .ns-meta strong{display:block;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:14px;font-weight:500;color:var(--ink);font-family:var(--mono);min-width:0;max-width:100%}
 .ns-meta span{display:block;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:12px;color:var(--muted);font-family:var(--mono);min-width:0;max-width:100%}
 .ns-empty{flex-shrink:0}
+.namespace-actions{display:flex;align-items:center;justify-content:flex-end;gap:6px;flex-wrap:wrap;flex-shrink:0}
+.ns-pending{flex-shrink:0}
 .ns-empty summary{cursor:pointer;font-size:12px;color:var(--muted);padding:4px 10px;border-radius:5px;border:1px solid var(--line);background:var(--canvas);transition:all .18s}
+.ns-delete summary{color:#8d322f;border-color:#eccdcc;background:#fbf1f0}
 .ns-empty:hover summary,.ns-empty[open] summary{color:#8d322f;border-color:#eccdcc;background:#fbf1f0}
 .ns-empty form{display:grid;gap:10px;margin-top:10px;padding:14px;border:1px solid #eccdcc;border-radius:6px;background:#fbf1f0;min-width:min(280px,70vw);max-width:100%;box-sizing:border-box}
 .ns-empty label span{font-size:11px;color:#8d322f;text-transform:none;font-family:inherit;letter-spacing:normal}
@@ -1065,18 +1093,23 @@ input:focus-visible{outline:0;border-color:var(--accent);box-shadow:0 0 0 3px rg
 .pagination{display:flex;justify-content:space-between;gap:16px;margin-top:28px}
 .search-form{display:grid;gap:10px;margin-bottom:24px}
 .search-form>div{display:flex;gap:10px}
-.map-panel{overflow:hidden;margin-bottom:28px}
-.map-toolbar{display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap;margin:0 0 16px}
+.map-panel{overflow:hidden;margin-bottom:28px;background:#1b211c;border-color:#3a493c;box-shadow:0 16px 40px -22px rgba(22,35,25,.5)}
+.map-toolbar{display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap;margin:0 0 12px}
 .map-actions{display:flex;align-items:center;gap:8px;flex-wrap:wrap}
-.chip-button{min-height:34px;padding:6px 14px;border:1px solid var(--line);border-radius:999px;background:var(--surface);color:var(--ink);font:500 11px var(--mono);transition:all .18s var(--ease);cursor:pointer}
-.chip-button:hover{background:var(--tint);border-color:var(--accent);color:var(--accent);transform:translateY(-1px)}
-.map-viewport{position:relative}
-.map-viewport>p{font:11px var(--mono);color:var(--muted);margin:0 0 10px}
-.mindmap-canvas{display:block;width:100%;height:620px;background:radial-gradient(circle at 20% 10%,#fffefa,var(--canvas) 65%);border:1px solid var(--line);border-radius:8px;outline-offset:2px;touch-action:none}
+.chip-button{min-height:34px;padding:6px 14px;border:1px solid #536351;border-radius:6px;background:#253027;color:#dce8d5;font:500 11px var(--mono);transition:all .18s var(--ease);cursor:pointer}
+.chip-button:hover{background:#324334;border-color:#9ebd8e;color:#f0f6eb;transform:translateY(-1px)}
+.map-legend{display:flex;align-items:center;gap:16px;flex-wrap:wrap;margin:0 0 12px;font:10px var(--mono);color:#9ead9b}
+.map-legend span{display:inline-flex;align-items:center;gap:7px}
+.map-dot{display:inline-block;width:9px;height:9px;border-radius:50%;border:1px solid #a9c49a}
+.map-dot.account{width:11px;height:11px;background:#42634a}
+.map-dot.namespace{background:#b9d2aa;border-color:#7e9f70}
+.map-dot.conversation{background:#eef3e8;border-color:#9eaf9a}
+.map-viewport>p{font:11px var(--mono);color:#9ead9b;margin:0 0 10px}
+.mindmap-canvas{display:block;width:100%;height:620px;background-color:#171d18;background-image:radial-gradient(circle at 50% 50%,rgba(128,165,113,.12),transparent 42%),radial-gradient(circle,#526452 1px,transparent 1px);background-size:100% 100%,24px 24px;border:1px solid #3a493c;border-radius:6px;outline-offset:2px;touch-action:none}
 .mindmap-canvas canvas{cursor:grab}
-.map-tooltip{position:absolute;z-index:2;display:grid;gap:2px;max-width:260px;padding:10px 14px;border:1px solid var(--line);border-radius:6px;background:var(--surface);box-shadow:0 12px 28px -18px rgba(40,42,37,.55);pointer-events:none;font:11px/1.5 var(--mono);color:var(--muted)}
+.map-tooltip{position:absolute;z-index:2;display:grid;gap:2px;max-width:260px;padding:10px 14px;border:1px solid #536351;border-radius:6px;background:#eef3e8;box-shadow:0 12px 28px -18px rgba(0,0,0,.75);pointer-events:none;font:11px/1.5 var(--mono);color:#4f5f50}
 .map-tooltip>*{min-width:0;max-width:100%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-.map-tooltip strong{font:500 13px/1.4 Outfit,sans-serif;color:var(--ink);min-width:0;max-width:100%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.map-tooltip strong{font:500 13px/1.4 Outfit,sans-serif;color:#1f2b21;min-width:0;max-width:100%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .map-tooltip span,.map-tooltip p{min-width:0;max-width:100%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .tree-list ul{margin:8px 0 16px}
 .tree-list li{min-width:0;max-width:100%}
@@ -1125,6 +1158,7 @@ input:focus-visible{outline:0;border-color:var(--accent);box-shadow:0 0 0 3px rg
   .mindmap-canvas{height:460px}
   .message{padding:18px}
   .namespace-list>li{flex-wrap:wrap;gap:12px}
+  .namespace-actions{width:100%;justify-content:flex-start}
   .ns-empty[open]{width:100%;margin-top:4px}
   .ns-empty form{width:100%;min-width:0;max-width:100%;box-sizing:border-box}
   .recent-list a{flex-direction:column;align-items:flex-start;gap:6px;width:100%}

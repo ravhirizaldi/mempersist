@@ -22,29 +22,42 @@ interface GraphPointerEvent extends GraphEvent {
 }
 
 const ACCOUNT_STYLE = {
-  shape: "round-rectangle",
-  width: 176,
-  height: 50,
-  "background-color": "#282a25",
-  "border-color": "#282a25",
+  shape: "ellipse",
+  width: 86,
+  height: 86,
+  "background-color": "#42634a",
+  "border-color": "#c2d9b5",
+  "border-width": 3,
   color: "#fffefa",
+  "font-size": "12px",
+  "text-valign": "center",
+  "text-margin-y": 0,
 } as const;
 
 const NAMESPACE_STYLE = {
-  shape: "round-rectangle",
-  width: 190,
-  height: 52,
-  "background-color": "#e9eee4",
-  "border-color": "#42634a",
+  shape: "ellipse",
+  width: 58,
+  height: 58,
+  "background-color": "#b9d2aa",
+  "border-color": "#7e9f70",
   "border-width": 2,
+  color: "#1f2b21",
+  "font-size": "10px",
+  "text-valign": "bottom",
+  "text-margin-y": 12,
 } as const;
 
 const CONVERSATION_STYLE = {
-  shape: "round-rectangle",
-  width: 186,
-  height: 46,
-  "background-color": "#fffefa",
-  "border-color": "#bdc4b8",
+  shape: "ellipse",
+  width: 24,
+  height: 24,
+  "background-color": "#eef3e8",
+  "border-color": "#9eaf9a",
+  "border-width": 1.5,
+  color: "#dce8d5",
+  "font-size": "10px",
+  "text-valign": "bottom",
+  "text-margin-y": 9,
 } as const;
 
 function readCopy(): MindmapClientCopy | null {
@@ -101,11 +114,13 @@ function init(): void {
           label: "data(label)",
           "font-family": "JetBrains Mono, ui-monospace, SFMono-Regular, Menlo, Consolas, monospace",
           "font-size": "11px",
-          color: "#282a25",
+          color: "#dce8d5",
           "text-wrap": "ellipsis",
-          "text-max-width": "156px",
-          "text-valign": "center",
+          "text-max-width": "170px",
+          "text-valign": "bottom",
           "text-halign": "center",
+          "text-margin-y": 12,
+          "min-zoomed-font-size": 8,
           "border-width": 1.5,
           "overlay-opacity": 0,
         },
@@ -113,14 +128,17 @@ function init(): void {
       { selector: "node[kind = 'account']", style: ACCOUNT_STYLE },
       { selector: "node[kind = 'namespace']", style: NAMESPACE_STYLE },
       { selector: "node[kind = 'conversation']", style: CONVERSATION_STYLE },
-      { selector: "node:selected", style: { "border-color": "#42634a", "border-width": 3 } },
+      {
+        selector: "node:selected",
+        style: { "background-color": "#94b985", "border-color": "#e0f0d8", "border-width": 3 },
+      },
       {
         selector: "edge",
         style: {
-          width: 1.6,
-          "line-color": "#bdc4b8",
+          width: 1.1,
+          "line-color": "#728371",
           "curve-style": "bezier",
-          opacity: 0.95,
+          opacity: 0.62,
         },
       },
     ],
@@ -143,11 +161,17 @@ function init(): void {
       cy.add([...graph.nodes, ...graph.edges]);
     });
     cy.layout({
-      name: "concentric",
-      minNodeSpacing: 34,
-      spacingFactor: 1.1,
+      name: "cose",
       animate: !reducedMotion,
-      animationDuration: 420,
+      animationDuration: 520,
+      idealEdgeLength: 120,
+      nodeRepulsion: 7200,
+      edgeElasticity: 110,
+      gravity: 0.55,
+      numIter: 600,
+      componentSpacing: 100,
+      padding: 64,
+      fit: true,
     }).run();
     status.textContent =
       rows.length > 0

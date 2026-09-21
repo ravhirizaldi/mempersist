@@ -451,6 +451,38 @@ describe("asynchronous destructive jobs", () => {
     ).toEqual({ count: 0 });
   });
 
+  it("locks and removes a namespace after dashboard deletion", async () => {
+    const test = dashboardEnv();
+    const user = await getOrCreateUser(test.env, "delete-namespace@example.com");
+    const auth = await signIn(test.env, test.sent, user.email);
+    await grantNamespace(test.env, user.id, "discarded");
+
+    const response = await handleDashboardRequest(
+      formRequest(
+        "/dashboard/namespaces/delete",
+        { csrf: auth.csrf, namespace: "discarded", confirm_namespace: "discarded" },
+        auth.cookie,
+      ),
+      test.env,
+    );
+    expect(response.status).toBe(303);
+    const jobId = test.queued.at(-1)?.body.job_id;
+    expect(jobId).toBeTruthy();
+
+    await processDeletionJobMessage(
+      test.env,
+      { version: 1, job_id: jobId! },
+      { listUserGrants: vi.fn(), revokeGrant: vi.fn() },
+    );
+    expect(
+      await test.env.MEMORY_DB.prepare(
+        "SELECT 1 FROM user_namespaces WHERE user_id = ? AND namespace = ?",
+      )
+        .bind(user.id, "discarded")
+        .first(),
+    ).toBeNull();
+  });
+
   it("supports grace-period cancellation and fully erases a due account", async () => {
     const test = dashboardEnv();
     const cancelUser = await getOrCreateUser(test.env, "cancel-delete@example.com");

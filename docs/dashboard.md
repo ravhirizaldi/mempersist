@@ -8,15 +8,16 @@ only in the `Secure`, `HttpOnly`, `SameSite=Lax`, host-only cookie.
 The server-rendered `/dashboard` shows profile and archive totals in a compact two-column
 layout: profile and the collapsed danger zone on the side, namespaces and recent
 conversations in the main column. Namespaces link to `/dashboard/namespaces/:namespace`
-to browse all conversations within that namespace ordered by recency, with pagination and
-namespace emptying controls. Conversation pages include back links to both the overview
-and their parent namespace. Per-namespace emptying and account deletion stay behind
-collapsed native disclosures so the overview fits roughly one viewport. Session pages include
-a responsive CSS-only hamburger menu under 720px. `/dashboard/mindmap` is an
-organizational account → namespace → conversation → tag view, not a semantic or AI-generated map.
-Its interactive view is Cytoscape.js, bundled locally and inlined behind the existing script nonce,
-with an accessible nested-list equivalent that carries the same content. Conversation pages pin
-pagination to the revision loaded on the first page.
+to browse all conversations within that namespace ordered by recency, with pagination,
+namespace emptying, and namespace deletion controls. Conversation pages include back links
+to both the overview and their parent namespace. Per-namespace emptying, namespace deletion,
+and account deletion stay behind collapsed native disclosures so the overview fits roughly
+one viewport. Session pages include a responsive CSS-only hamburger menu under 720px.
+`/dashboard/mindmap` is an organizational account → namespace → conversation → tag view,
+not a semantic or AI-generated map. Its interactive view is Cytoscape.js, bundled locally
+and inlined behind the existing script nonce, with an accessible nested-list equivalent
+that carries the same content. Conversation pages pin pagination to the revision loaded on
+the first page.
 
 Conversation tags link to the memory map with that tag prefilled in the title-and-tag filter.
 `/dashboard/export` streams `mempersist.account-export.v1`. It contains the profile, namespace
@@ -38,7 +39,8 @@ bundled by `yarn build:mindmap` into the generated `src/mindmap-bundle.ts`. Run 
 after editing it, and `yarn check:mindmap` (part of `yarn verify`) fails when the checked-in bundle
 no longer matches the sources. Prettier and ESLint skip the generated file.
 
-Namespace emptying is asynchronous and preserves the namespace record. Account deletion creates a
-seven-day grace period: reads, export, logout, and cancellation remain available, while writes
-return `409 DELETION_PENDING`. Cancellation succeeds only while the account deletion job is still
-pending.
+Namespace emptying is asynchronous and preserves the namespace record. Namespace deletion is
+asynchronous, removes all of its conversations and derived data, then removes the namespace
+record. Account deletion creates a seven-day grace period: reads, export, logout, and
+cancellation remain available, while writes return `409 DELETION_PENDING`. Cancellation
+succeeds only while the account deletion job is still pending.

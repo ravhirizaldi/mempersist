@@ -267,12 +267,39 @@ td{color:var(--muted);line-height:1.7}
 td:first-child{color:var(--ink)}
 tr:last-child td{border-bottom:0}
 tbody tr:hover{background:var(--canvas)}
-.diagram{margin:32px 0;padding:24px;border:1px solid var(--line);border-radius:6px;overflow-x:auto;background:var(--surface)}
-.diagram svg{display:block;width:100%;min-width:580px;height:auto;margin:auto}
+.diagram{position:relative;margin:40px 0;padding:12px;border:1px solid var(--line);border-radius:12px;overflow-x:auto;background:var(--surface);box-shadow:0 14px 34px rgba(66,99,74,.06)}
+.diagram svg{display:block;width:100%;min-width:680px;height:auto;margin:auto}
 .diagram text{font-family:var(--mono);fill:var(--ink)}
-.diagram rect{fill:var(--canvas);stroke:var(--line)}
-.diagram path{stroke:#8b9884}
-.diagram g:last-of-type rect{fill:var(--tint)}
+.diagram path{fill:none;stroke:#a8b3a2;stroke-width:1.5}
+.diagram .diagram-bg{fill:var(--surface);stroke:var(--line);stroke-width:1}
+.diagram .diagram-grid{fill:url(#diagram-grid);stroke:none;opacity:.42}
+.diagram .diagram-header text{font-size:9px;letter-spacing:.16em;fill:var(--muted)}
+.diagram .diagram-band text{font-size:9px;letter-spacing:.12em;fill:var(--accent)}
+.diagram .diagram-band path{stroke:var(--line);stroke-width:1}
+.diagram .diagram-node rect{fill:var(--canvas);stroke:var(--line);stroke-width:1.2}
+.diagram .diagram-node--edge rect{fill:var(--ink);stroke:var(--ink)}
+.diagram .diagram-node--edge text{fill:var(--surface)}
+.diagram .diagram-node--edge .diagram-node-meta{fill:#c8d1c5}
+.diagram .diagram-node--auth rect{fill:var(--tint);stroke:#cbd8c5}
+.diagram .diagram-node--durable rect{fill:#f1f4ed;stroke:#cbd8c5}
+.diagram .diagram-node--queue rect{fill:#f5f0e7;stroke:#dfd2bb}
+.diagram .diagram-node--derived rect{fill:var(--surface);stroke:var(--line)}
+.diagram .diagram-node circle{fill:var(--accent)}
+.diagram .diagram-node--edge circle{fill:#c4d7b9}
+.diagram .diagram-node--auth circle{fill:#9b7e50}
+.diagram .diagram-node--queue circle{fill:#9b7e50}
+.diagram .diagram-node-title{font:500 16px/1 var(--mono);letter-spacing:-.04em}
+.diagram .diagram-node-meta{font-size:10px;fill:var(--muted)}
+.diagram .diagram-node-kicker{font-size:8px;letter-spacing:.14em;fill:var(--accent)}
+.diagram #diagram-arrow path{fill:#80957b;stroke:none}
+.diagram #search-diagram-arrow path{fill:#80957b;stroke:none}
+.diagram .diagram-flow{stroke:#80957b;stroke-width:1.6}
+.diagram .diagram-flow--auth{stroke:#9b7e50;stroke-dasharray:3 4}
+.diagram .diagram-flow--derived{stroke:#9a9b88;stroke-dasharray:6 5}
+.diagram .diagram-flow marker-end{fill:#80957b}
+.diagram .diagram-footer text{font-size:9px;fill:var(--muted)}
+.diagram .diagram-footer circle{fill:var(--accent)}
+.diagram .diagram-footer path{stroke:var(--line);stroke-width:1}
 .filter-bar{display:grid;grid-template-columns:1fr auto;gap:12px;align-items:end;margin-top:40px}
 .filter-bar label{font-size:12px;display:block;margin-bottom:8px}
 .filter-bar input{width:100%;min-height:46px;border:1px solid var(--line);border-radius:5px;background:var(--surface);padding:10px 14px;color:var(--ink)}

@@ -13,6 +13,7 @@ type DeletionOAuth = Pick<OAuthHelpers, "listUserGrants" | "revokeGrant">;
 interface DeletionJob {
   id: string;
   kind: "namespace" | "account";
+  mode: "empty" | "delete";
   user_id: string;
   namespace: string | null;
   status: "pending" | "running" | "failed";
@@ -35,6 +36,7 @@ export async function scheduleNamespaceDeletion(
   env: AppEnv,
   userId: string,
   namespace: string,
+  mode: "empty" | "delete" = "empty",
   now = new Date(),
 ): Promise<string> {
   const jobId = crypto.randomUUID();
@@ -42,20 +44,20 @@ export async function scheduleNamespaceDeletion(
   const results = await env.MEMORY_DB.batch([
     env.MEMORY_DB.prepare(
       `INSERT INTO deletion_jobs
-       (id, kind, user_id, namespace, status, phase, due_at, created_at, updated_at)
-       SELECT ?, 'namespace', ?, ?, 'pending', 'delete', ?, ?, ?
+       (id, kind, mode, user_id, namespace, status, phase, due_at, created_at, updated_at)
+       SELECT ?, 'namespace', ?, ?, ?, 'pending', 'delete', ?, ?, ?
        WHERE EXISTS (
          SELECT 1 FROM user_namespaces
          WHERE user_id = ? AND namespace = ? AND deletion_job_id IS NULL
        )`,
-    ).bind(jobId, userId, namespace, timestamp, timestamp, timestamp, userId, namespace),
+    ).bind(jobId, mode, userId, namespace, timestamp, timestamp, timestamp, userId, namespace),
     env.MEMORY_DB.prepare(
       `UPDATE user_namespaces SET deletion_job_id = ?
        WHERE user_id = ? AND namespace = ? AND deletion_job_id IS NULL`,
     ).bind(jobId, userId, namespace),
   ]);
   if (results[0]?.meta.changes !== 1 || results[1]?.meta.changes !== 1) {
-    throw new Error("Namespace is missing or already being emptied");
+    throw new Error("Namespace is missing or already being changed");
   }
   await enqueue(env, jobId);
   return jobId;
@@ -121,7 +123,7 @@ async function claimJob(env: AppEnv, jobId: string, now: Date): Promise<Deletion
     .run();
   if (result.meta.changes !== 1) return null;
   return env.MEMORY_DB.prepare(
-    "SELECT id, kind, user_id, namespace, status, phase, due_at FROM deletion_jobs WHERE id = ?",
+    "SELECT id, kind, mode, user_id, namespace, status, phase, due_at FROM deletion_jobs WHERE id = ?",
   )
     .bind(jobId)
     .first<DeletionJob>();
@@ -203,9 +205,13 @@ async function processClaimed(env: AppEnv, job: DeletionJob, oauth: DeletionOAut
       throw new Error(result.failed[0]?.message ?? "Namespace deletion failed");
     if (!result.complete) return continueJob(env, job, "delete");
     await env.MEMORY_DB.batch([
-      env.MEMORY_DB.prepare(
-        "UPDATE user_namespaces SET deletion_job_id = NULL WHERE user_id = ? AND namespace = ? AND deletion_job_id = ?",
-      ).bind(job.user_id, job.namespace, job.id),
+      job.mode === "delete"
+        ? env.MEMORY_DB.prepare(
+            "DELETE FROM user_namespaces WHERE user_id = ? AND namespace = ? AND deletion_job_id = ?",
+          ).bind(job.user_id, job.namespace, job.id)
+        : env.MEMORY_DB.prepare(
+            "UPDATE user_namespaces SET deletion_job_id = NULL WHERE user_id = ? AND namespace = ? AND deletion_job_id = ?",
+          ).bind(job.user_id, job.namespace, job.id),
       env.MEMORY_DB.prepare("DELETE FROM deletion_jobs WHERE id = ?").bind(job.id),
     ]);
     return;
@@ -244,7 +250,7 @@ export async function processDeletionJobMessage(
   now = new Date(),
 ): Promise<boolean> {
   const pending = await env.MEMORY_DB.prepare(
-    "SELECT id, kind, user_id, namespace, status, phase, due_at FROM deletion_jobs WHERE id = ?",
+    "SELECT id, kind, mode, user_id, namespace, status, phase, due_at FROM deletion_jobs WHERE id = ?",
   )
     .bind(message.job_id)
     .first<DeletionJob>();
