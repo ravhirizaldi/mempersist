@@ -620,7 +620,7 @@ async function overview(
     : `<section class="card danger-zone"><details><summary><strong>${t.accountDeletion}</strong></summary><p>${t.accountHelp}</p><form method="post" action="/dashboard/account/delete"><input type="hidden" name="csrf" value="${session.csrf}"><label>${t.email}<input name="confirm_email" type="email" required autocomplete="off" placeholder="${escapeHtml(session.user.email)}"></label><button class="button danger" type="submit">${t.schedule}</button></form></details></section>`;
   return page(
     t.dashboard,
-    `<header class="dash-head"><div><span class="dash-badge">${t.dashboard}</span><h1 class="truncate">${escapeHtml(session.user.display_name ?? session.user.email)}</h1><p>${t.overview}</p></div><div class="dash-actions"><a class="button secondary" href="/dashboard/mindmap">${t.memoryMap} <span aria-hidden="true">↗</span></a><a class="button secondary" href="/dashboard/export">${t.export} <span aria-hidden="true">↓</span></a></div></header>${data.deletion ? account : ""}<section class="stats"><article class="stat-card"><span>${t.namespaces}</span><strong>${data.namespaces.length}</strong></article><article class="stat-card"><span>${t.conversations}</span><strong>${totals.conversations}</strong></article><article class="stat-card"><span>${t.messages}</span><strong>${totals.messages}</strong></article></section><div class="dash-main"><div class="dash-side"><section class="card"><h2>${t.profile}</h2><form method="post" action="/dashboard/profile"><input type="hidden" name="csrf" value="${session.csrf}"><label>${t.displayName}<input name="display_name" maxlength="80" required value="${escapeHtml(session.user.display_name ?? "")}" placeholder="${escapeHtml(session.user.email)}"></label><button class="button" type="submit"${data.deletion ? " disabled" : ""}>${t.save}</button></form></section>${data.deletion ? "" : account}</div><div class="dash-content"><section class="card"><div class="section-heading"><h2>${t.namespaces}</h2><a class="action-link" href="/dashboard/mindmap">${t.memoryMap} <span aria-hidden="true">→</span></a></div><ul class="namespace-list">${namespaceRows}</ul></section><section class="card"><div class="section-heading"><h2>${t.recent}</h2></div><ul class="recent-list">${recent}</ul></section></div></div>`,
+    `<header class="dash-head dash-hero"><div class="dash-intro"><span class="dash-badge">${t.dashboard}</span><h1 class="truncate">${escapeHtml(session.user.display_name ?? session.user.email)}</h1><p>${t.overview}</p></div><div class="dash-hero-rail"><div class="dash-actions"><a class="button secondary" href="/dashboard/mindmap">${t.memoryMap} <span aria-hidden="true">↗</span></a><a class="button secondary" href="/dashboard/export">${t.export} <span aria-hidden="true">↓</span></a></div><div class="dash-metrics" aria-label="${escapeHtml(t.dashboard)}"><div class="dash-metric"><strong>${data.namespaces.length}</strong><span>${t.namespaces}</span></div><div class="dash-metric"><strong>${totals.conversations}</strong><span>${t.conversations}</span></div><div class="dash-metric"><strong>${totals.messages}</strong><span>${t.messages}</span></div></div></div></header>${data.deletion ? account : ""}<div class="dash-main"><div class="dash-side"><section class="card"><h2>${t.profile}</h2><form method="post" action="/dashboard/profile"><input type="hidden" name="csrf" value="${session.csrf}"><label>${t.displayName}<input name="display_name" maxlength="80" required value="${escapeHtml(session.user.display_name ?? "")}" placeholder="${escapeHtml(session.user.email)}"></label><button class="button" type="submit"${data.deletion ? " disabled" : ""}>${t.save}</button></form></section>${data.deletion ? "" : account}</div><div class="dash-content"><section class="card"><div class="section-heading"><h2>${t.namespaces}</h2><a class="action-link" href="/dashboard/mindmap">${t.memoryMap} <span aria-hidden="true">→</span></a></div><ul class="namespace-list">${namespaceRows}</ul></section><section class="card"><div class="section-heading"><h2>${t.recent}</h2></div><ul class="recent-list">${recent}</ul></section></div></div>`,
     locale,
     new URL(request.url).pathname,
     { session },
@@ -999,17 +999,20 @@ summary.nav-toggle::-webkit-details-marker{display:none}
 .dashboard-shell{width:min(1200px,calc(100% - 48px));margin:0 auto;padding:32px 0 64px}
 .dash-head{display:flex;align-items:flex-end;justify-content:space-between;gap:20px;flex-wrap:wrap;margin-bottom:28px;padding-bottom:22px;border-bottom:1px solid var(--line);min-width:0;max-width:100%}
 .dash-head>div{min-width:0;max-width:100%;flex:1}
-.dash-head h1{font-size:clamp(28px,3.8vw,40px);font-weight:500;letter-spacing:-.04em;line-height:1.15;margin:0;color:var(--ink);text-wrap:balance;min-width:0;max-width:100%}
+.dash-hero{display:grid;grid-template-columns:minmax(0,1fr) minmax(360px,460px);align-items:end;gap:40px;min-height:190px;padding:20px 0 26px;position:relative}
+.dash-intro{align-self:center}
+.dash-head h1{font-size:clamp(40px,6vw,72px);font-weight:500;letter-spacing:-.065em;line-height:.98;margin:0;color:var(--ink);text-wrap:balance;min-width:0;max-width:100%}
 .dash-head h1.truncate{text-wrap:nowrap}
-.dash-head p{margin:6px 0 0;font-size:14px;color:var(--muted);min-width:0;max-width:100%}
-.dash-badge{display:inline-flex;align-items:center;justify-content:center;height:24px;padding:0 12px;border-radius:999px;background:var(--tint);border:1px solid rgba(66,99,74,.2);font:500 10px/1 var(--mono);color:var(--accent);letter-spacing:.08em;text-transform:uppercase;margin:0 0 10px;box-sizing:border-box;vertical-align:middle}
-.dash-actions{display:flex;align-items:center;gap:10px;flex-wrap:wrap;flex-shrink:0}
+.dash-head p{margin:10px 0 0;font-size:16px;color:var(--muted);min-width:0;max-width:100%}
+.dash-badge{display:inline-flex;align-items:center;justify-content:center;height:24px;padding:0 12px;border-radius:999px;background:var(--tint);border:1px solid rgba(66,99,74,.2);font:500 10px/1 var(--mono);color:var(--accent);letter-spacing:.08em;text-transform:uppercase;margin:0 0 12px;box-sizing:border-box;vertical-align:middle}
+.dash-hero-rail{display:grid;gap:20px;align-self:stretch;align-content:end;min-width:0;padding-left:28px;border-left:1px solid var(--line)}
+.dash-actions{display:flex;align-items:center;justify-content:flex-end;gap:10px;flex-wrap:wrap;flex-shrink:0}
 .dash-actions .button{min-height:38px;padding:8px 16px;font-size:13px}
-.stats{display:grid;grid-template-columns:repeat(3,1fr);gap:16px;margin-bottom:28px}
-.stats article,.stat-card{display:flex;flex-direction:column;justify-content:space-between;gap:10px;padding:22px 24px;background:var(--surface);border:1px solid var(--line);border-radius:8px;box-shadow:0 1px 3px rgba(40,42,37,.03);transition:transform .2s var(--ease),border-color .2s,box-shadow .2s;min-width:0}
-.stats article:hover,.stat-card:hover{transform:translateY(-1px);border-color:#c8cebf;box-shadow:0 4px 14px -4px rgba(40,42,37,.06)}
-.stats span{font:500 11px var(--mono);color:var(--muted);text-transform:uppercase;letter-spacing:.08em}
-.stats strong{font-family:var(--mono);font-size:clamp(26px,3vw,34px);font-weight:500;color:var(--ink);letter-spacing:-.035em;line-height:1;font-variant-numeric:tabular-nums}
+.dash-metrics{display:grid;grid-template-columns:repeat(3,minmax(72px,1fr));border-top:1px solid var(--line);border-bottom:1px solid var(--line);min-width:0}
+.dash-metric{display:grid;gap:5px;padding:13px 14px;min-width:0}
+.dash-metric+.dash-metric{border-left:1px solid var(--line)}
+.dash-metric strong{font:500 clamp(24px,3vw,34px)/1 var(--mono);color:var(--ink);letter-spacing:-.04em;font-variant-numeric:tabular-nums}
+.dash-metric span{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font:500 10px var(--mono);color:var(--muted);text-transform:uppercase;letter-spacing:.08em}
 .dash-main{display:grid;grid-template-columns:320px minmax(0,1fr);gap:24px;align-items:start;margin-bottom:28px}
 .dash-side,.dash-content{display:flex;flex-direction:column;gap:20px;min-width:0;max-width:100%}
 .card,.map-panel{padding:24px 28px;border:1px solid var(--line);background:var(--surface);border-radius:8px;box-shadow:0 1px 3px rgba(40,42,37,.03);min-width:0;max-width:100%}
@@ -1150,7 +1153,9 @@ input:focus-visible{outline:0;border-color:var(--accent);box-shadow:0 0 0 3px rg
   .dashboard-menu[open] .nav-panel form{margin:0;width:100%}
   .dashboard-shell{width:min(100% - 32px,1200px);padding-top:20px}
   .dash-head{flex-direction:column;align-items:flex-start}
-  .stats{grid-template-columns:1fr;gap:10px}
+  .dash-hero{grid-template-columns:1fr;gap:24px;min-height:0;padding-top:20px}
+  .dash-hero-rail{align-self:stretch;padding:18px 0 0;border-left:0;border-top:1px solid var(--line)}
+  .dash-actions{justify-content:flex-start}
   .dash-main{grid-template-columns:minmax(0,1fr);gap:20px}
   .card,.map-panel{padding:20px 18px}
   .auth-card{padding:28px 20px;margin-top:4vh}
