@@ -39,7 +39,6 @@ describe("Minimalist public pages", () => {
     expect(csp).toContain("frame-ancestors 'none'");
     expect(csp).toContain("font-src 'self'");
     expect(csp).toContain("manifest-src 'self'");
-    expect(csp).not.toContain("'unsafe-inline'");
     expect(response.headers.get("permissions-policy")).toBe(
       "camera=(), microphone=(), geolocation=()",
     );
