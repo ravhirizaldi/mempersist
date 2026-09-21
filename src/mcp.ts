@@ -24,7 +24,12 @@ import {
   updateConversationTags,
   writeCanonicalConversation,
 } from "./storage";
-import { buildContext, MAX_SERIALIZED_BYTES_LIMIT, type BuildContextInput } from "./context";
+import {
+  buildContext,
+  MAX_SERIALIZED_BYTES_LIMIT,
+  type BuildContextInput,
+  type BuildContextFollowItem,
+} from "./context";
 
 const messageSchema = z.object({
   role: z.string().min(1).max(40),
@@ -240,12 +245,39 @@ export const buildContextRequiredSelectorSchema = z
     "Selector must contain exactly one of conversation_id or title",
   );
 
+const followLeafSchema = z.object({
+  field: z
+    .string()
+    .min(1)
+    .max(100)
+    .refine((val) => val.trim().length > 0, "Field must not be empty or whitespace-only"),
+  required: z.boolean().default(true),
+  priority: z.number().default(100),
+  mode: z.enum(["full", "tail"]).default("full"),
+  branch: z.enum(["active", "all"]).default("active"),
+  tail_messages: z.number().int().min(1).max(100).optional(),
+});
+
+const followLevel2Schema = followLeafSchema.extend({
+  follow: z.array(followLeafSchema).max(10).optional(),
+});
+
+const followLevel1Schema = followLeafSchema.extend({
+  follow: z.array(followLevel2Schema).max(10).optional(),
+});
+
+export const buildContextFollowItemSchema: z.ZodType<BuildContextFollowItem> =
+  followLeafSchema.extend({
+    follow: z.array(followLevel1Schema).max(10).optional(),
+  });
+
 export const buildContextRequiredItemSchema = z.object({
   selector: buildContextRequiredSelectorSchema,
   mode: z.enum(["full", "tail"]).default("full"),
   branch: z.enum(["active", "all"]).default("active"),
   priority: z.number().default(100),
   tail_messages: z.number().int().min(1).max(100).optional(),
+  follow: z.array(buildContextFollowItemSchema).max(10).optional(),
 });
 
 export const buildContextRetrieveItemSchema = z.object({
@@ -301,16 +333,18 @@ export const contextRevisionPinSchema = z.object({
 });
 
 export const contextMessageProvenanceSchema = z.object({
-  kind: z.enum(["required", "retrieved"]),
+  kind: z.enum(["required", "retrieved", "expanded_required"]),
   request_index: z.number(),
   conversation_id: z.string(),
   revision_id: z.string(),
   source_node_id: z.string(),
+  source_conversation_id: z.string().optional(),
+  source_revision_id: z.string().optional(),
+  pointer: z.string().optional(),
   chunk_ids: z.array(z.string()).optional(),
   score: z.number().optional(),
   sources: z.array(z.enum(["lexical", "semantic", "recent_canonical"])).optional(),
 });
-
 export const contextMessageSchema = z.object({
   source_node_id: z.string(),
   role: nullableStringSchema,
@@ -329,12 +363,15 @@ export const matchedRangeSchema = z.object({
 });
 
 export const contextSectionSchema = z.object({
-  kind: z.enum(["required", "retrieved"]),
+  kind: z.enum(["required", "retrieved", "expanded_required"]),
   request_index: z.number(),
   title: z.string(),
   priority: z.number(),
   conversation_id: z.string(),
   revision_id: z.string(),
+  source_conversation_id: z.string().optional(),
+  source_revision_id: z.string().optional(),
+  pointer: z.string().optional(),
   messages: z.array(contextMessageSchema),
   estimated_tokens: z.number(),
   serialized_bytes: z.number(),
@@ -708,7 +745,7 @@ export function createMemoryMcpServer(env: AppEnv, tenant: Tenant): McpServer {
     "memory_build_context",
     {
       description:
-        "Compile a deterministic, revision-pinned context pack from required canonical conversations and optional hybrid-search evidence within explicit token and serialized-byte budgets.",
+        "Compile a deterministic, revision-pinned context pack from required canonical conversations (with optional pointer follow expansion) and optional hybrid-search evidence within explicit token and serialized-byte budgets.",
       annotations: readOnlyAnnotations,
       outputSchema: buildContextOutputSchema,
       inputSchema: buildContextInputSchema,
@@ -731,6 +768,7 @@ export function createMemoryMcpServer(env: AppEnv, tenant: Tenant): McpServer {
           branch: req.branch,
           priority: req.priority,
           ...(req.tail_messages !== undefined ? { tail_messages: req.tail_messages } : {}),
+          ...(req.follow !== undefined ? { follow: req.follow } : {}),
         })),
         ...(input.retrieve !== undefined
           ? {

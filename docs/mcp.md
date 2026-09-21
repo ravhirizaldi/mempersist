@@ -591,6 +591,19 @@ facts, never arbitrates canon, never persists context packs, and never writes to
   - `tail_messages`: positive integer (default 20, max 100) when `mode: "tail"`.
   - `branch`: `"active"` (default, active linear timeline) or `"all"` (all graph nodes in canonical order).
   - `priority`: integer priority for section ordering (higher values ordered first).
+  - `follow`: optional array of 1–10 pointer follow configurations for deterministic cross-conversation expansion:
+    - `field`: string field path in structured text (e.g. `"current_scene"`, `"active_arc.owner"`). Matches structured line key-value patterns (case-insensitive) or JSON properties. The newest occurrence on the active timeline is strictly authoritative: if a newer message explicitly clears the field (`none`, `null`, `cleared`, `""`) or contains an invalid ID, it will not resurrect an older pointer from earlier messages.
+    - `required`: boolean (default `true`); when `true`, missing, cleared, malformed, or inaccessible pointer targets fail the request; when `false`, records a diagnostic warning and omits the section gracefully under budget pressure.
+    - `priority`: integer priority for section ordering (default 100).
+    - `mode`: `"full"` | `"tail"` (default `"full"`).
+    - `branch`: `"active"` | `"all"` (default `"active"`).
+    - `tail_messages`: positive integer (1–100, default 20) when `mode: "tail"`.
+    - `follow`: optional nested follow array (up to 3 levels deep). Total follow targets across the entire request must not exceed 20.
+  - **Budget tiers and authority ordering**:
+    1. Tier 1: Explicit required conversations (non-evictable, participate in `required_budget_exceeded` checks).
+    2. Tier 2: Required expanded conversations (`required: true`) (non-evictable, participate in `required_budget_exceeded` checks).
+    3. Tier 3: Optional expanded conversations (`required: false`) (admitted into remaining budget; omitted with warning if budget is exceeded).
+    4. Tier 4: Optional hybrid search retrieval evidence (admitted into remaining budget after expanded sections; evictable under budget pressure).
 - `retrieve`: optional array of 0–8 hybrid search retrieval requests:
   - `query`: non-empty search query string.
   - `namespace`: optional namespace scope for this query.

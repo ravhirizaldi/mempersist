@@ -67,14 +67,15 @@ for explicit `simpan state` and existing owner boundaries.
 When preparing context for a prompt or complex task, call `memory_build_context` instead of
 manually chaining resolution, batch reads, search, context retrieval, deduplication, and budget fitting.
 Pass 1–20 `required` memory selectors (exact `title` or `conversation_id`, with `mode: "full" | "tail"`,
-`branch: "active" | "all"`, `priority`, and optional `tail_messages` defaulting to 20), up to 8 optional
-`retrieve` queries with context windows, explicit token and serialized byte budgets (`max_serialized_bytes`
-up to 49,152), and options (`deduplicate`, `include_provenance`, `include_compiled_text`). The server pins
-all required current revisions before loading R2 canonical bodies, loads search hits from their pinned
-revision IDs, structurally deduplicates overlapping nodes, enforces deterministic priority/score/identifier
-ordering, greedily fits whole messages, and returns a deterministic `pack_id`. If required content alone
-exceeds either budget, it returns a bounded diagnostic with suggested minimums without leaking text. The tool
-is strictly read-only and extractive: it never invokes generative models or writes to memory.
+`branch: "active" | "all"`, `priority`, optional `tail_messages` defaulting to 20, and optional `follow` pointer-expansion
+fields like `current_scene` or `active_arc.owner`), up to 8 optional `retrieve` queries with context windows, explicit token
+and serialized byte budgets (`max_serialized_bytes` up to 49,152), and options (`deduplicate`, `include_provenance`,
+`include_compiled_text`). The server pins all required and pointer-expanded current revisions before loading R2 canonical
+bodies, follows exact structured pointers deterministically without semantic search fallback, loads search hits from their
+pinned revision IDs, structurally deduplicates overlapping nodes, enforces deterministic priority/score/identifier ordering
+(explicit required, then required expanded, then optional expanded, then retrieved), greedily fits whole messages, and
+returns a deterministic `pack_id`. If required content alone exceeds either budget, it returns a bounded diagnostic with
+suggested minimums without leaking text. The tool is strictly read-only and extractive: it never invokes generative models or writes to memory.
 
 ## Discovery
 

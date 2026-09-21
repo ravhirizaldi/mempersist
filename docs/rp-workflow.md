@@ -9,8 +9,10 @@ across owners.
 
 1. Prefer `memory_build_context` when task context needs to combine required owners (e.g. `CURRENT`,
    `CURRENT_SCENE`, `EVENTS_INDEX`) and optional retrieval evidence into a single revision-pinned pack.
-   Specify required owners with exact `title` selectors (mode `"full"` or `"tail"`, branch `"active"`),
-   optional `retrieve` queries for thematic or world facts, and explicit token/byte budgets.
+   Specify required owners with exact `title` selectors (mode `"full"` or `"tail"`, branch `"active"`).
+   To eliminate client-side round trips and avoid stale semantic search pollution, specify `follow` on `CURRENT`
+   to deterministically expand pointers (e.g. `follow: [{ field: "current_scene" }, { field: "active_arc.owner" }]`).
+   Add optional `retrieve` queries for thematic or world facts, and explicit token/byte budgets.
    Use `options.include_compiled_text: true` for direct prompt injection.
 2. Fall back to `memory_resolve_conversations` and batch readback (`memory_get_conversations`) when:
    - Required owners alone exceed the 48 KiB MCP response ceiling or return `status: "required_budget_exceeded"`.

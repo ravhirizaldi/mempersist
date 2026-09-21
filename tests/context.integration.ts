@@ -13,6 +13,7 @@ import {
 import { EMBEDDING_DIMENSIONS, type CanonicalConversation } from "../src/domain";
 import { indexRevision, type IndexingEnv } from "../src/indexing";
 import { buildContextOutputSchema, createMemoryMcpServer } from "../src/mcp";
+import * as search from "../src/search";
 import type { SearchEnv } from "../src/search";
 import * as storage from "../src/storage";
 import { appendConversation, writeCanonicalConversation } from "../src/storage";
@@ -97,6 +98,7 @@ async function callContext(client: Client, args: Record<string, unknown>) {
 }
 
 async function storeConversation(options: {
+  id?: string;
   title: string;
   namespace?: string;
   tags?: string[];
@@ -107,6 +109,7 @@ async function storeConversation(options: {
   const namespace = options.namespace ?? "personal";
   await grantNamespace(env, userId, namespace);
   const conversation = await createMcpConversation({
+    ...(options.id ? { id: options.id } : {}),
     title: options.title,
     namespace,
     tags: options.tags ?? ["runtime"],
@@ -1271,22 +1274,13 @@ describe("memory_build_context integration", () => {
       messages: [{ role: "user", content: "Concise prompt." }],
     });
 
-    // Stale candidate: indexed at revision 1, then appended to revision 2
+    // Advance the head only after search returns the indexed revision, proving a non-vacuous stale hit.
     const staleQuery = `STALE_KEY_${tag}`;
     const staleConv = await storeConversation({
       title: `STALE_SOURCE_${tag}`,
       messages: [{ role: "user", content: `${staleQuery}: Initial version before update.` }],
     });
     await indexRevision(indexingEnv(), staleConv.stored.revisionId, env.ACTIVE_INDEX_GENERATION);
-    await appendConversation(
-      env,
-      staleConv.conversation.id,
-      staleConv.stored.revisionId,
-      [{ role: "assistant", content: "Second version head advance." }],
-      undefined,
-      ["personal"],
-      OWNER_DB_USER_ID,
-    );
 
     // Overflow candidate with substantial text
     const overflowQuery = `OVERFLOW_KEY_${tag}`;
@@ -1300,6 +1294,30 @@ describe("memory_build_context integration", () => {
       ],
     });
     await indexRevision(indexingEnv(), overflowConv.stored.revisionId, env.ACTIVE_INDEX_GENERATION);
+    const originalSearch = search.searchMemory;
+    let staleSearchHitCount = 0;
+    let staleHeadAdvanced = false;
+    vi.spyOn(search, "searchMemory").mockImplementation(async (...args) => {
+      const response = await originalSearch(...args);
+      if (args[1].query === staleQuery && !staleHeadAdvanced) {
+        staleSearchHitCount = response.results.filter(
+          (hit) =>
+            hit.conversationId === staleConv.conversation.id &&
+            hit.revisionId === staleConv.stored.revisionId,
+        ).length;
+        await appendConversation(
+          env,
+          staleConv.conversation.id,
+          staleConv.stored.revisionId,
+          [{ role: "assistant", content: "Second version head advance." }],
+          undefined,
+          ["personal"],
+          OWNER_DB_USER_ID,
+        );
+        staleHeadAdvanced = true;
+      }
+      return response;
+    });
 
     // Set budget tight enough for required content, but excluding retrieval candidates and forcing diagnostic bounds
     const maxBytes = 3000;
@@ -1333,10 +1351,26 @@ describe("memory_build_context integration", () => {
     expect(pack.sections).toHaveLength(1);
     expect(pack.sections[0]!.conversation_id).toBe(requiredConv.conversation.id);
 
-    // Omitted list contains rejected candidates with bounded diagnostics
-    expect(pack.omitted.length).toBeGreaterThanOrEqual(1);
-    expect(pack.omitted.some((o) => o.reason === "stale_revision" || o.reason === "budget")).toBe(
-      true,
+    expect(staleSearchHitCount).toBeGreaterThan(0);
+    // The exact stale source must have been retrieved before it could be rejected.
+    expect(pack.omitted).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          kind: "retrieved",
+          conversation_id: staleConv.conversation.id,
+          revision_id: staleConv.stored.revisionId,
+          reason: "stale_revision",
+        }),
+      ]),
+    );
+    expect(pack.warnings).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          code: "STALE_REVISION",
+          conversation_id: staleConv.conversation.id,
+          revision_id: staleConv.stored.revisionId,
+        }),
+      ]),
     );
   });
 
@@ -1638,5 +1672,1137 @@ describe("memory_build_context integration", () => {
       budget: { max_estimated_tokens: 2000, max_serialized_bytes: 20000 },
     });
     expect(validBoundaryResult.status).toBe("complete");
+  });
+});
+
+describe("pointer-aware deterministic expansion", () => {
+  const NS = "test_runtime";
+
+  const CURRENT_ID = "0191f6e0-1111-7000-8000-000000000001";
+  const SCENE_ID = "0191f6e0-2222-7000-8000-000000000002";
+  const ARC_ID = "0191f6e0-3333-7000-8000-000000000003";
+
+  async function seedPointerScenario() {
+    const client = await ownerClient([NS, "personal", "work"]);
+
+    const arcConv = await storeConversation({
+      id: ARC_ID,
+      title: "SYNTHETIC_ACTIVE_ARC",
+      namespace: NS,
+      tags: ["state", "rp", "arc"],
+      messages: [
+        {
+          role: "assistant",
+          content:
+            "Arc SYNTHETIC ACTIVE ARC: Active storyline covering operations and work review.",
+        },
+      ],
+    });
+
+    const sceneConv = await storeConversation({
+      id: SCENE_ID,
+      title: "SYNTHETIC_CURRENT_SCENE",
+      namespace: NS,
+      tags: ["state", "rp", "scene"],
+      messages: [
+        {
+          role: "assistant",
+          content: "Headquarters Monday morning; POV Operator; Operations review in progress.",
+        },
+      ],
+    });
+
+    const currentConv = await storeConversation({
+      id: CURRENT_ID,
+      title: "SYNTHETIC_CURRENT",
+      namespace: NS,
+      tags: ["state", "rp"],
+      messages: [
+        {
+          role: "assistant",
+          content: [
+            "[CURRENT / SYNTHETIC EPISODE 1]",
+            `active_arc: SYNTHETIC ACTIVE ARC; owner ${ARC_ID}; status OPEN`,
+            `current_scene: ${SCENE_ID}; status OPEN; Headquarters Monday morning; POV Operator; Operations review`,
+          ].join("\n"),
+        },
+      ],
+    });
+
+    return { client, currentConv, sceneConv, arcConv };
+  }
+
+  it("follows current_scene and active_arc.owner exact pointers with revision pins and provenance", async () => {
+    const { client, currentConv, sceneConv, arcConv } = await seedPointerScenario();
+
+    // 17 & 18. Public MCP tool request validation preserves follow through to handler
+    const result = await callContext(client, {
+      namespace: NS,
+      task: "Continue the current scene after work review",
+      required: [
+        {
+          selector: {
+            title: "SYNTHETIC_CURRENT",
+            namespace: NS,
+          },
+          mode: "full",
+          priority: 100,
+          follow: [
+            {
+              field: "current_scene",
+              required: true,
+              priority: 100,
+            },
+            {
+              field: "active_arc.owner",
+              required: true,
+              priority: 95,
+            },
+          ],
+        },
+      ],
+      budget: {
+        max_estimated_tokens: 9000,
+        max_serialized_bytes: 47000,
+      },
+      options: {
+        include_provenance: true,
+        include_compiled_text: true,
+      },
+    });
+
+    expect(result.status).toBe("complete");
+    if (result.status !== "complete") return;
+
+    // 3. Both expanded owners appear in revision_pins alongside CURRENT
+    expect(result.revision_pins).toHaveLength(3);
+    const pinIds = result.revision_pins.map((p) => p.conversation_id);
+    expect(pinIds).toContain(CURRENT_ID);
+    expect(pinIds).toContain(SCENE_ID);
+    expect(pinIds).toContain(ARC_ID);
+
+    const currentPin = result.revision_pins.find((p) => p.conversation_id === CURRENT_ID);
+    expect(currentPin?.revision_id).toBe(currentConv.stored.revisionId);
+    const scenePin = result.revision_pins.find((p) => p.conversation_id === SCENE_ID);
+    expect(scenePin?.revision_id).toBe(sceneConv.stored.revisionId);
+    const arcPin = result.revision_pins.find((p) => p.conversation_id === ARC_ID);
+    expect(arcPin?.revision_id).toBe(arcConv.stored.revisionId);
+
+    // 1 & 2. Follows current_scene and active_arc.owner exact pointers
+    expect(result.sections).toHaveLength(3);
+
+    const reqSection = result.sections[0]!;
+    expect(reqSection.kind).toBe("required");
+    expect(reqSection.conversation_id).toBe(CURRENT_ID);
+    expect(reqSection.title).toBe("SYNTHETIC_CURRENT");
+    expect(reqSection.priority).toBe(100);
+
+    const sceneSection = result.sections[1]!;
+    expect(sceneSection.kind).toBe("expanded_required");
+    expect(sceneSection.conversation_id).toBe(SCENE_ID);
+    expect(sceneSection.title).toBe("SYNTHETIC_CURRENT_SCENE");
+    expect(sceneSection.priority).toBe(100);
+    expect(sceneSection.source_conversation_id).toBe(CURRENT_ID);
+    expect(sceneSection.pointer).toBe("current_scene");
+
+    // 19. Provenance contains source + pointer path
+    expect(sceneSection.messages[0]!.provenance).toBeDefined();
+    expect(sceneSection.messages[0]!.provenance?.kind).toBe("expanded_required");
+    expect(sceneSection.messages[0]!.provenance?.source_conversation_id).toBe(CURRENT_ID);
+    expect(sceneSection.messages[0]!.provenance?.source_revision_id).toBe(
+      currentConv.stored.revisionId,
+    );
+    expect(sceneSection.messages[0]!.provenance?.pointer).toBe("current_scene");
+
+    const arcSection = result.sections[2]!;
+    expect(arcSection.kind).toBe("expanded_required");
+    expect(arcSection.conversation_id).toBe(ARC_ID);
+    expect(arcSection.title).toBe("SYNTHETIC_ACTIVE_ARC");
+    expect(arcSection.priority).toBe(95);
+    expect(arcSection.source_conversation_id).toBe(CURRENT_ID);
+    expect(arcSection.pointer).toBe("active_arc.owner");
+    expect(arcSection.messages[0]!.provenance?.pointer).toBe("active_arc.owner");
+
+    // Compiled text format verification
+    expect(result.compiled_text).toContain("[REQUIRED MEMORY: SYNTHETIC_CURRENT]");
+    expect(result.compiled_text).toContain("[EXPANDED REQUIRED MEMORY: SYNTHETIC_CURRENT_SCENE]");
+    expect(result.compiled_text).toContain(`pointer: current_scene`);
+    expect(result.compiled_text).toContain("[EXPANDED REQUIRED MEMORY: SYNTHETIC_ACTIVE_ARC]");
+    expect(result.compiled_text).toContain(`pointer: active_arc.owner`);
+
+    // 20. Deterministic pack generation returns stable ordering and identity
+    const result2 = await callContext(client, {
+      namespace: NS,
+      task: "Continue the current scene after work review",
+      required: [
+        {
+          selector: {
+            title: "SYNTHETIC_CURRENT",
+            namespace: NS,
+          },
+          mode: "full",
+          priority: 100,
+          follow: [
+            { field: "current_scene", required: true, priority: 100 },
+            { field: "active_arc.owner", required: true, priority: 95 },
+          ],
+        },
+      ],
+      budget: {
+        max_estimated_tokens: 9000,
+        max_serialized_bytes: 47000,
+      },
+      options: {
+        include_provenance: true,
+        include_compiled_text: true,
+      },
+    });
+    if (result2.status === "complete") {
+      expect(result2.pack_id).toBe(result.pack_id);
+    }
+  });
+
+  it("ensures stale semantic matches (scene and arc) cannot displace exact pointer targets, and expanded required appears before retrieval", async () => {
+    const { client } = await seedPointerScenario();
+
+    // Create a misleading semantic search candidate for arc
+    const staleArc = await storeConversation({
+      title: "SYNTHETIC_COMPETING_ARC",
+      namespace: NS,
+      tags: ["rp", "arc"],
+      messages: [
+        {
+          role: "assistant",
+          content: "Active arc latest current unresolved beat in competing storyline.",
+        },
+      ],
+    });
+    await indexRevision(indexingEnv(), staleArc.stored.revisionId, "bge-m3-chat-turn-v2");
+
+    // Create a misleading semantic search candidate for scene
+    const staleScene = await storeConversation({
+      title: "SYNTHETIC_COMPETING_SCENE",
+      namespace: NS,
+      tags: ["rp", "scene"],
+      messages: [
+        {
+          role: "assistant",
+          content:
+            "Current scene active cursor exact present characters location latest beat in competing scene.",
+        },
+      ],
+    });
+    await indexRevision(indexingEnv(), staleScene.stored.revisionId, "bge-m3-chat-turn-v2");
+
+    const result = await callContext(client, {
+      namespace: NS,
+      task: "Retrieve active arc and scene beats",
+      required: [
+        {
+          selector: {
+            title: "SYNTHETIC_CURRENT",
+            namespace: NS,
+          },
+          mode: "full",
+          priority: 100,
+          follow: [
+            { field: "current_scene", required: true, priority: 100 },
+            { field: "active_arc.owner", required: true, priority: 95 },
+          ],
+        },
+      ],
+      retrieve: [
+        {
+          query: "active arc latest current unresolved beat",
+          namespace: NS,
+          limit: 5,
+          context_before: 1,
+          context_after: 1,
+          priority: 50,
+        },
+        {
+          query: "current scene active cursor exact present characters location",
+          namespace: NS,
+          limit: 5,
+          context_before: 1,
+          context_after: 1,
+          priority: 50,
+        },
+      ],
+      budget: {
+        max_estimated_tokens: 9000,
+        max_serialized_bytes: 47000,
+      },
+    });
+
+    expect(result.status).toBe("complete");
+    if (result.status !== "complete") return;
+
+    // 4. Expanded required owners appear before optional retrieval
+    const kinds = result.sections.map((s) => s.kind);
+    const lastExpandedIdx = kinds.lastIndexOf("expanded_required");
+    const firstRetrievedIdx = kinds.indexOf("retrieved");
+    if (firstRetrievedIdx >= 0) {
+      expect(lastExpandedIdx).toBeLessThan(firstRetrievedIdx);
+    }
+
+    // 5 & 6. Stale semantic results cannot replace exact scene and arc pointer targets
+    const sceneSec = result.sections.find((s) => s.conversation_id === SCENE_ID);
+    expect(sceneSec).toBeDefined();
+    expect(sceneSec?.kind).toBe("expanded_required");
+    expect(sceneSec?.title).toBe("SYNTHETIC_CURRENT_SCENE");
+
+    const arcSec = result.sections.find((s) => s.conversation_id === ARC_ID);
+    expect(arcSec).toBeDefined();
+    expect(arcSec?.kind).toBe("expanded_required");
+    expect(arcSec?.title).toBe("SYNTHETIC_ACTIVE_ARC");
+  });
+
+  it("authoritatively uses newest pointer value and does not resurrect older pointers when newest is cleared or invalid", async () => {
+    const client = await ownerClient([NS]);
+
+    const convCleared = await storeConversation({
+      title: "CURRENT_WITH_CLEARED_POINTER",
+      namespace: NS,
+      messages: [
+        { role: "assistant", content: `current_scene: ${SCENE_ID}; status OPEN` },
+        { role: "assistant", content: "current_scene: none; status CLOSED" },
+      ],
+    });
+
+    // Newest is "none" (cleared), so required pointer should fail as missing
+    const rawResult1 = await callRaw(client, "memory_build_context", {
+      namespace: NS,
+      task: "Cleared pointer test",
+      required: [
+        {
+          selector: { conversation_id: convCleared.conversation.id },
+          mode: "full",
+          priority: 100,
+          follow: [{ field: "current_scene", required: true }],
+        },
+      ],
+      budget: { max_estimated_tokens: 5000, max_serialized_bytes: 30000 },
+    });
+    expect(rawResult1.isError).toBe(true);
+    expect(rawResult1.text).toContain('Required pointer "current_scene" was not found');
+
+    const convInvalid = await storeConversation({
+      title: "CURRENT_WITH_INVALID_POINTER",
+      namespace: NS,
+      messages: [
+        { role: "assistant", content: `current_scene: ${SCENE_ID}; status OPEN` },
+        { role: "assistant", content: "current_scene: malformed-uuid-xyz; status OPEN" },
+      ],
+    });
+
+    // Newest is malformed, so required pointer must fail with validation error, not fall back
+    const rawResult2 = await callRaw(client, "memory_build_context", {
+      namespace: NS,
+      task: "Invalid pointer test",
+      required: [
+        {
+          selector: { conversation_id: convInvalid.conversation.id },
+          mode: "full",
+          priority: 100,
+          follow: [{ field: "current_scene", required: true }],
+        },
+      ],
+      budget: { max_estimated_tokens: 5000, max_serialized_bytes: 30000 },
+    });
+    expect(rawResult2.isError).toBe(true);
+    expect(rawResult2.text).toContain('Invalid conversation ID "malformed-uuid-xyz"');
+  });
+
+  it("rejects requests exceeding the global follow targets cap of 20", async () => {
+    const client = await ownerClient([NS]);
+    const conv = await storeConversation({
+      title: "CONV_CAP_TEST",
+      namespace: NS,
+      messages: [{ role: "assistant", content: "Content" }],
+    });
+
+    const rawResult = await callRaw(client, "memory_build_context", {
+      namespace: NS,
+      task: "Global cap test",
+      required: [
+        {
+          selector: { conversation_id: conv.conversation.id },
+          mode: "full",
+          priority: 100,
+          follow: Array.from({ length: 8 }, (_, i) => ({ field: `f1_${i}`, required: false })),
+        },
+        {
+          selector: { conversation_id: conv.conversation.id },
+          mode: "full",
+          priority: 100,
+          follow: Array.from({ length: 8 }, (_, i) => ({ field: `f2_${i}`, required: false })),
+        },
+        {
+          selector: { conversation_id: conv.conversation.id },
+          mode: "full",
+          priority: 100,
+          follow: Array.from({ length: 8 }, (_, i) => ({ field: `f3_${i}`, required: false })),
+        },
+      ],
+      budget: { max_estimated_tokens: 5000, max_serialized_bytes: 30000 },
+    });
+
+    expect(rawResult.isError).toBe(true);
+    expect(rawResult.text).toContain("exceeds maximum allowed limit of 20");
+  });
+
+  it("handles optional expanded sections (required: false) gracefully under budget pressure", async () => {
+    const { client } = await seedPointerScenario();
+
+    // Get exact baseline budget for required CURRENT and CURRENT_SCENE only
+    const reqOnlyResult = await callContext(client, {
+      namespace: NS,
+      task: "Optional tier baseline",
+      required: [
+        {
+          selector: { title: "SYNTHETIC_CURRENT", namespace: NS },
+          mode: "full",
+          priority: 100,
+          follow: [{ field: "current_scene", required: true, priority: 100 }],
+        },
+      ],
+      budget: { max_estimated_tokens: 9000, max_serialized_bytes: 47000 },
+    });
+    expect(reqOnlyResult.status).toBe("complete");
+    if (reqOnlyResult.status !== "complete") return;
+    expect(reqOnlyResult.sections).toHaveLength(2);
+
+    // Set budget to cover required content + warning metadata + 400 bytes (not enough for active_arc section)
+    const tightBudgetBytes = reqOnlyResult.budget.used_serialized_bytes + 400;
+    const tightResult = await callContext(client, {
+      namespace: NS,
+      task: "Optional tier tight budget test",
+      required: [
+        {
+          selector: { title: "SYNTHETIC_CURRENT", namespace: NS },
+          mode: "full",
+          priority: 100,
+          follow: [
+            { field: "current_scene", required: true, priority: 100 },
+            { field: "active_arc.owner", required: false, priority: 50 },
+          ],
+        },
+      ],
+      budget: { max_estimated_tokens: 9000, max_serialized_bytes: tightBudgetBytes },
+    });
+
+    expect(tightResult.status).toBe("complete");
+    if (tightResult.status !== "complete") return;
+    // Required CURRENT and CURRENT_SCENE remain, optional active_arc omitted gracefully without failure!
+    expect(tightResult.sections).toHaveLength(2);
+    expect(tightResult.sections.map((s) => s.conversation_id)).toEqual([CURRENT_ID, SCENE_ID]);
+    expect(tightResult.warnings.some((w) => w.code === "OPTIONAL_EXPANSION_OMITTED_BUDGET")).toBe(
+      true,
+    );
+  });
+
+  it("deduplicates duplicate pointer references cleanly", async () => {
+    const { client } = await seedPointerScenario();
+
+    const result = await callContext(client, {
+      namespace: NS,
+      task: "Duplicate pointer check",
+      required: [
+        {
+          selector: { title: "SYNTHETIC_CURRENT", namespace: NS },
+          mode: "full",
+          priority: 100,
+          follow: [
+            { field: "current_scene", required: true },
+            { field: "current_scene", required: true },
+          ],
+        },
+      ],
+      budget: { max_estimated_tokens: 9000, max_serialized_bytes: 47000 },
+    });
+
+    expect(result.status).toBe("complete");
+    if (result.status !== "complete") return;
+
+    // 7. Duplicate references are deduplicated
+    const sceneSections = result.sections.filter((s) => s.conversation_id === SCENE_ID);
+    expect(sceneSections).toHaveLength(1);
+    const scenePins = result.revision_pins.filter((p) => p.conversation_id === SCENE_ID);
+    expect(scenePins).toHaveLength(1);
+  });
+
+  it("promotes an optional duplicate target to required using the highest-priority mode and resolves duplicate nested follows once", async () => {
+    const client = await ownerClient([NS]);
+    const tag = crypto.randomUUID().slice(0, 8);
+    const leaf = await storeConversation({
+      title: `PROMOTED_LEAF_${tag}`,
+      namespace: NS,
+      messages: [{ role: "assistant", content: `Nested leaf ${tag}` }],
+    });
+    const target = await storeConversation({
+      title: `PROMOTED_TARGET_${tag}`,
+      namespace: NS,
+      messages: [
+        { role: "assistant", content: `Target history one ${tag}` },
+        { role: "assistant", content: `Target history two ${tag}` },
+        {
+          role: "assistant",
+          content: JSON.stringify({ leaf: leaf.conversation.id, marker: `target-tail-${tag}` }),
+        },
+      ],
+    });
+    const root = await storeConversation({
+      title: `PROMOTION_ROOT_${tag}`,
+      namespace: NS,
+      messages: [
+        {
+          role: "assistant",
+          content: JSON.stringify({
+            optional_target: target.conversation.id,
+            required_target: target.conversation.id,
+          }),
+        },
+      ],
+    });
+
+    const result = await callContext(client, {
+      namespace: NS,
+      task: "Promote duplicate pointer target",
+      required: [
+        {
+          selector: { conversation_id: root.conversation.id },
+          mode: "full",
+          priority: 100,
+          follow: [
+            {
+              field: "optional_target",
+              required: false,
+              priority: 10,
+              mode: "full",
+              follow: [{ field: "leaf", required: true, priority: 70 }],
+            },
+            {
+              field: "required_target",
+              required: true,
+              priority: 90,
+              mode: "tail",
+              tail_messages: 1,
+              follow: [{ field: "leaf", required: true, priority: 70 }],
+            },
+          ],
+        },
+      ],
+      budget: { max_estimated_tokens: 9000, max_serialized_bytes: 47000 },
+      options: { include_provenance: true, include_compiled_text: false },
+    });
+
+    expect(result.status).toBe("complete");
+    if (result.status !== "complete") return;
+
+    const targetSections = result.sections.filter(
+      (section) => section.conversation_id === target.conversation.id,
+    );
+    expect(targetSections).toHaveLength(1);
+    expect(targetSections[0]).toEqual(
+      expect.objectContaining({
+        kind: "expanded_required",
+        priority: 90,
+        pointer: "required_target",
+        source_conversation_id: root.conversation.id,
+        source_revision_id: root.stored.revisionId,
+      }),
+    );
+    expect(targetSections[0]!.messages.map((message) => message.text)).toEqual([
+      JSON.stringify({ leaf: leaf.conversation.id, marker: `target-tail-${tag}` }),
+    ]);
+    expect(targetSections[0]!.messages[0]!.provenance).toEqual(
+      expect.objectContaining({
+        kind: "expanded_required",
+        pointer: "required_target",
+        source_conversation_id: root.conversation.id,
+        source_revision_id: root.stored.revisionId,
+      }),
+    );
+    expect(
+      result.revision_pins.filter((pin) => pin.conversation_id === target.conversation.id),
+    ).toHaveLength(1);
+    expect(
+      result.sections.filter((section) => section.conversation_id === leaf.conversation.id),
+    ).toHaveLength(1);
+    expect(
+      result.revision_pins.filter((pin) => pin.conversation_id === leaf.conversation.id),
+    ).toHaveLength(1);
+  });
+
+  it("restores expanded pointer provenance and evidence arrays when later retrieval evidence is rejected", async () => {
+    const client = await ownerClient([NS]);
+    const tag = crypto.randomUUID().slice(0, 8);
+    const acceptedQuery = `ACCEPTED_POINTER_EVIDENCE_${tag}`;
+    const rejectedQuery = `REJECTED_POINTER_EVIDENCE_${tag}`;
+    const target = await storeConversation({
+      title: `ROLLBACK_TARGET_${tag}`,
+      namespace: NS,
+      messages: [
+        {
+          role: "assistant",
+          content: `${rejectedQuery} ${"large optional evidence ".repeat(250)}`,
+        },
+        { role: "assistant", content: `${acceptedQuery} retained pointer message` },
+      ],
+    });
+    const root = await storeConversation({
+      title: `ROLLBACK_ROOT_${tag}`,
+      namespace: NS,
+      messages: [
+        {
+          role: "assistant",
+          content: JSON.stringify({ target: target.conversation.id }),
+        },
+      ],
+    });
+    await indexRevision(indexingEnv(), target.stored.revisionId, env.ACTIVE_INDEX_GENERATION);
+
+    const required = [
+      {
+        selector: { conversation_id: root.conversation.id },
+        mode: "full",
+        priority: 100,
+        follow: [
+          {
+            field: "target",
+            required: true,
+            priority: 90,
+            mode: "tail",
+            tail_messages: 1,
+          },
+        ],
+      },
+    ];
+    const baseline = await callContext(client, {
+      namespace: NS,
+      task: "Rollback provenance baseline",
+      required,
+      budget: { max_estimated_tokens: 9000, max_serialized_bytes: 47000 },
+      options: { include_provenance: true, include_compiled_text: false },
+    });
+    expect(baseline.status).toBe("complete");
+    if (baseline.status !== "complete") return;
+
+    const firstEvidence = await callContext(client, {
+      namespace: NS,
+      task: "Rollback provenance first evidence",
+      required,
+      retrieve: [
+        {
+          query: acceptedQuery,
+          namespace: NS,
+          limit: 3,
+          context_before: 0,
+          context_after: 0,
+          priority: 100,
+        },
+      ],
+      budget: {
+        max_estimated_tokens: baseline.budget.used_estimated_tokens,
+        max_serialized_bytes: 47000,
+      },
+      options: { deduplicate: true, include_provenance: true, include_compiled_text: false },
+    });
+    expect(firstEvidence.status).toBe("complete");
+    if (firstEvidence.status !== "complete") return;
+    const firstEvidenceSection = firstEvidence.sections.find(
+      (section) => section.conversation_id === target.conversation.id,
+    )!;
+    const firstEvidenceMessage = firstEvidenceSection.messages[0]!;
+    expect(firstEvidenceMessage.provenance?.chunk_ids?.length).toBeGreaterThan(0);
+    expect(firstEvidenceMessage.provenance?.sources?.length).toBeGreaterThan(0);
+
+    const result = await callContext(client, {
+      namespace: NS,
+      task: "Rollback provenance after rejection",
+      required,
+      retrieve: [
+        {
+          query: acceptedQuery,
+          namespace: NS,
+          limit: 3,
+          context_before: 0,
+          context_after: 0,
+          priority: 100,
+        },
+        {
+          query: rejectedQuery,
+          namespace: NS,
+          limit: 3,
+          context_before: 0,
+          context_after: 1,
+          priority: 50,
+        },
+      ],
+      budget: {
+        max_estimated_tokens: baseline.budget.used_estimated_tokens,
+        max_serialized_bytes: 47000,
+      },
+      options: { deduplicate: true, include_provenance: true, include_compiled_text: false },
+    });
+
+    expect(result.status).toBe("complete");
+    if (result.status !== "complete") return;
+    expect(result.omitted).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          kind: "retrieved",
+          conversation_id: target.conversation.id,
+          revision_id: target.stored.revisionId,
+          reason: "budget",
+        }),
+      ]),
+    );
+    const restoredSection = result.sections.find(
+      (section) => section.conversation_id === target.conversation.id,
+    )!;
+    const restoredMessage = restoredSection.messages[0]!;
+    expect(restoredMessage.provenance).toEqual(firstEvidenceMessage.provenance);
+    expect(restoredMessage.provenance).toEqual(
+      expect.objectContaining({
+        kind: "expanded_required",
+        source_conversation_id: root.conversation.id,
+        source_revision_id: root.stored.revisionId,
+        pointer: "target",
+        chunk_ids: firstEvidenceMessage.provenance!.chunk_ids,
+        sources: firstEvidenceMessage.provenance!.sources,
+      }),
+    );
+    expect(restoredSection.matched_chunk_ids).toEqual(firstEvidenceSection.matched_chunk_ids);
+    expect(restoredSection.matched_ranges).toEqual(firstEvidenceSection.matched_ranges);
+    expect(restoredSection.serialized_bytes).toBe(firstEvidenceSection.serialized_bytes);
+  });
+
+  it("excludes optional expansion pins and messages from the required budget floor until admitted", async () => {
+    const client = await ownerClient([NS]);
+    const tag = crypto.randomUUID().slice(0, 8);
+    const optionalTarget = await storeConversation({
+      title: `OPTIONAL_FLOOR_TARGET_${tag}`,
+      namespace: NS,
+      messages: [{ role: "assistant", content: `optional-${tag}-${"O".repeat(8000)}` }],
+    });
+    const root = await storeConversation({
+      title: `OPTIONAL_FLOOR_ROOT_${tag}`,
+      namespace: NS,
+      messages: [
+        {
+          role: "assistant",
+          content: JSON.stringify({
+            optional_target: optionalTarget.conversation.id,
+            required_payload: "R".repeat(1200),
+          }),
+        },
+      ],
+    });
+    const baseRequired = {
+      selector: { conversation_id: root.conversation.id },
+      mode: "full",
+      priority: 100,
+    };
+    const optionalRequired = {
+      ...baseRequired,
+      follow: [{ field: "optional_target", required: false, priority: 50 }],
+    };
+
+    const requiredOnlyFloor = await callContext(client, {
+      namespace: NS,
+      task: "Optional expansion required floor",
+      required: [baseRequired],
+      budget: { max_estimated_tokens: 9000, max_serialized_bytes: 200 },
+      options: { include_provenance: true, include_compiled_text: false },
+    });
+    const withOptionalFloor = await callContext(client, {
+      namespace: NS,
+      task: "Optional expansion required floor",
+      required: [optionalRequired],
+      budget: { max_estimated_tokens: 9000, max_serialized_bytes: 200 },
+      options: { include_provenance: true, include_compiled_text: false },
+    });
+
+    expect(requiredOnlyFloor.status).toBe("required_budget_exceeded");
+    expect(withOptionalFloor.status).toBe("required_budget_exceeded");
+    const requiredExceeded = requiredOnlyFloor as ContextPackRequiredBudgetExceeded;
+    const optionalExceeded = withOptionalFloor as ContextPackRequiredBudgetExceeded;
+    expect(optionalExceeded.required_estimated_tokens).toBe(
+      requiredExceeded.required_estimated_tokens,
+    );
+    expect(optionalExceeded.required_serialized_bytes).toBe(
+      requiredExceeded.required_serialized_bytes,
+    );
+    expect(optionalExceeded.suggested_minimum).toEqual(requiredExceeded.suggested_minimum);
+
+    const tightResult = await callContext(client, {
+      namespace: NS,
+      task: "Optional expansion required floor",
+      required: [optionalRequired],
+      budget: {
+        max_estimated_tokens: 9000,
+        max_serialized_bytes: requiredExceeded.required_serialized_bytes + 1000,
+      },
+      options: { include_provenance: true, include_compiled_text: false },
+    });
+    expect(tightResult.status).toBe("complete");
+    if (tightResult.status !== "complete") return;
+    expect(
+      tightResult.sections.some(
+        (section) => section.conversation_id === optionalTarget.conversation.id,
+      ),
+    ).toBe(false);
+    expect(
+      tightResult.revision_pins.some(
+        (pin) => pin.conversation_id === optionalTarget.conversation.id,
+      ),
+    ).toBe(false);
+    expect(
+      tightResult.warnings.some(
+        (warning) =>
+          warning.code === "OPTIONAL_EXPANSION_OMITTED_BUDGET" &&
+          warning.conversation_id === optionalTarget.conversation.id,
+      ),
+    ).toBe(true);
+
+    const admittedResult = await callContext(client, {
+      namespace: NS,
+      task: "Optional expansion required floor",
+      required: [optionalRequired],
+      budget: { max_estimated_tokens: 9000, max_serialized_bytes: 47000 },
+      options: { include_provenance: true, include_compiled_text: false },
+    });
+    expect(admittedResult.status).toBe("complete");
+    if (admittedResult.status !== "complete") return;
+    expect(
+      admittedResult.sections.filter(
+        (section) => section.conversation_id === optionalTarget.conversation.id,
+      ),
+    ).toHaveLength(1);
+    expect(
+      admittedResult.revision_pins.filter(
+        (pin) => pin.conversation_id === optionalTarget.conversation.id,
+      ),
+    ).toHaveLength(1);
+  });
+
+  it("terminates safely when pointers form a cycle (A -> B -> A)", async () => {
+    const client = await ownerClient([NS]);
+
+    const idA = crypto.randomUUID();
+    const idB = crypto.randomUUID();
+
+    await storeConversation({
+      id: idA,
+      title: "CYCLE_A",
+      namespace: NS,
+      messages: [{ role: "assistant", content: `next_node: ${idB}; status OPEN` }],
+    });
+
+    await storeConversation({
+      id: idB,
+      title: "CYCLE_B",
+      namespace: NS,
+      messages: [{ role: "assistant", content: `next_node: ${idA}; status OPEN` }],
+    });
+
+    // 8. Cycles terminate safely without infinite recursion
+    const result = await callContext(client, {
+      namespace: NS,
+      task: "Cycle test",
+      required: [
+        {
+          selector: { conversation_id: idA },
+          mode: "full",
+          priority: 100,
+          follow: [
+            {
+              field: "next_node",
+              required: true,
+              follow: [{ field: "next_node", required: true }],
+            },
+          ],
+        },
+      ],
+      budget: { max_estimated_tokens: 5000, max_serialized_bytes: 30000 },
+    });
+
+    expect(result.status).toBe("complete");
+    if (result.status !== "complete") return;
+    expect(result.sections).toHaveLength(2);
+    expect(result.revision_pins).toHaveLength(2);
+  });
+
+  it("fails clearly when a required pointer field is missing", async () => {
+    const client = await ownerClient([NS]);
+    const conv = await storeConversation({
+      title: "NO_POINTERS",
+      namespace: NS,
+      messages: [{ role: "assistant", content: "No pointers in this message" }],
+    });
+
+    // 9. Missing required pointer fails clearly
+    const rawResult = await callRaw(client, "memory_build_context", {
+      namespace: NS,
+      task: "Missing pointer test",
+      required: [
+        {
+          selector: { conversation_id: conv.conversation.id },
+          mode: "full",
+          priority: 100,
+          follow: [{ field: "current_scene", required: true }],
+        },
+      ],
+      budget: { max_estimated_tokens: 5000, max_serialized_bytes: 30000 },
+    });
+
+    expect(rawResult.isError).toBe(true);
+    expect(rawResult.text).toContain('Required pointer "current_scene" was not found');
+  });
+
+  it("fails clearly when pointer contains an invalid UUID", async () => {
+    const client = await ownerClient([NS]);
+    const conv = await storeConversation({
+      title: "INVALID_UUID_CONV",
+      namespace: NS,
+      messages: [
+        { role: "assistant", content: "current_scene: not-a-valid-uuid-123; status OPEN" },
+      ],
+    });
+
+    // 10. Invalid UUID fails clearly
+    const rawResult = await callRaw(client, "memory_build_context", {
+      namespace: NS,
+      task: "Invalid UUID test",
+      required: [
+        {
+          selector: { conversation_id: conv.conversation.id },
+          mode: "full",
+          priority: 100,
+          follow: [{ field: "current_scene", required: true }],
+        },
+      ],
+      budget: { max_estimated_tokens: 5000, max_serialized_bytes: 30000 },
+    });
+
+    expect(rawResult.isError).toBe(true);
+    expect(rawResult.text).toContain('Invalid conversation ID "not-a-valid-uuid-123"');
+  });
+
+  it("prevents traversing inaccessible foreign conversations", async () => {
+    const client = await ownerClient([NS]);
+    const foreignUser = await getOrCreateUser(env, "foreign_external_user");
+
+    const foreignConv = await storeConversation({
+      title: "FOREIGN_CONV",
+      namespace: "foreign_ns",
+      userId: foreignUser.id,
+      messages: [{ role: "assistant", content: "Secret foreign conversation" }],
+    });
+
+    const conv = await storeConversation({
+      title: "ATTACKER_CONV",
+      namespace: NS,
+      messages: [{ role: "assistant", content: `target: ${foreignConv.conversation.id}` }],
+    });
+
+    // 11. Inaccessible foreign conversation cannot be traversed
+    const rawResult = await callRaw(client, "memory_build_context", {
+      namespace: NS,
+      task: "Foreign traversal attack",
+      required: [
+        {
+          selector: { conversation_id: conv.conversation.id },
+          mode: "full",
+          priority: 100,
+          follow: [{ field: "target", required: true }],
+        },
+      ],
+      budget: { max_estimated_tokens: 5000, max_serialized_bytes: 30000 },
+    });
+
+    expect(rawResult.isError).toBe(true);
+    expect(rawResult.text).toContain("not found");
+  });
+
+  it("handles deleted target conversations correctly", async () => {
+    const client = await ownerClient([NS]);
+    const target = await storeConversation({
+      title: "TARGET_TO_DELETE",
+      namespace: NS,
+      messages: [{ role: "assistant", content: "Will be deleted" }],
+    });
+
+    // Soft-delete the target in D1
+    await env.MEMORY_DB.prepare(
+      "UPDATE conversations SET deleted_at = CURRENT_TIMESTAMP WHERE id = ?",
+    )
+      .bind(target.conversation.id)
+      .run();
+
+    const conv = await storeConversation({
+      title: "POINTER_TO_DELETED",
+      namespace: NS,
+      messages: [{ role: "assistant", content: `target: ${target.conversation.id}` }],
+    });
+
+    // 12. Deleted target handled correctly
+    const rawResult = await callRaw(client, "memory_build_context", {
+      namespace: NS,
+      task: "Deleted target test",
+      required: [
+        {
+          selector: { conversation_id: conv.conversation.id },
+          mode: "full",
+          priority: 100,
+          follow: [{ field: "target", required: true }],
+        },
+      ],
+      budget: { max_estimated_tokens: 5000, max_serialized_bytes: 30000 },
+    });
+
+    expect(rawResult.isError).toBe(true);
+    expect(rawResult.text).toContain("not found");
+  });
+
+  it("enforces budget calculation and prevents eviction of expanded required content", async () => {
+    const { client } = await seedPointerScenario();
+
+    // 13. Expanded required content participates in budget calculation
+    const result = await callContext(client, {
+      namespace: NS,
+      task: "Budget test",
+      required: [
+        {
+          selector: { title: "SYNTHETIC_CURRENT", namespace: NS },
+          mode: "full",
+          priority: 100,
+          follow: [
+            { field: "current_scene", required: true, priority: 100 },
+            { field: "active_arc.owner", required: true, priority: 95 },
+          ],
+        },
+      ],
+      budget: { max_estimated_tokens: 9000, max_serialized_bytes: 47000 },
+    });
+
+    expect(result.status).toBe("complete");
+    if (result.status !== "complete") return;
+    expect(result.budget.used_estimated_tokens).toBeGreaterThan(0);
+    expect(result.budget.used_serialized_bytes).toBeGreaterThan(0);
+
+    // 14. Optional retrieval cannot evict expanded required content
+    const tightTokens = result.budget.used_estimated_tokens + 5;
+    const tightBytes = result.budget.used_serialized_bytes + 200;
+
+    const tightResult = await callContext(client, {
+      namespace: NS,
+      task: "Tight budget test",
+      required: [
+        {
+          selector: { title: "SYNTHETIC_CURRENT", namespace: NS },
+          mode: "full",
+          priority: 100,
+          follow: [
+            { field: "current_scene", required: true, priority: 100 },
+            { field: "active_arc.owner", required: true, priority: 95 },
+          ],
+        },
+      ],
+      retrieve: [
+        {
+          query: "some large retrieval query",
+          namespace: NS,
+          limit: 5,
+          context_before: 2,
+          context_after: 2,
+          priority: 10,
+        },
+      ],
+      budget: { max_estimated_tokens: tightTokens, max_serialized_bytes: tightBytes },
+    });
+
+    expect(tightResult.status).toBe("complete");
+    if (tightResult.status !== "complete") return;
+    // All 3 required + expanded sections remain intact!
+    expect(tightResult.sections).toHaveLength(3);
+    const ids = tightResult.sections.map((s) => s.conversation_id);
+    expect(ids).toContain(CURRENT_ID);
+    expect(ids).toContain(SCENE_ID);
+    expect(ids).toContain(ARC_ID);
+  });
+
+  it("fails explicitly with REQUIRED_CONTENT_EXCEEDS_MCP_LIMIT when required pointer expansion exceeds 49152 byte limit", async () => {
+    const client = await ownerClient([NS]);
+
+    const hugeTargetId = crypto.randomUUID();
+    // Store a target conversation with large messages exceeding 49,152 bytes
+    await storeConversation({
+      id: hugeTargetId,
+      title: "HUGE_EXPANDED_TARGET",
+      namespace: NS,
+      messages: Array.from({ length: 40 }, (_, i) => ({
+        role: "assistant",
+        content:
+          `Paragraph ${i}: ` +
+          "Large content block filling byte buffer for limit test. ".repeat(70),
+      })),
+    });
+
+    const currentConv = await storeConversation({
+      title: "CURRENT_HUGE",
+      namespace: NS,
+      messages: [{ role: "assistant", content: `target: ${hugeTargetId}` }],
+    });
+
+    // 15. Required pointer expansion exceeding hard MCP limit of 49152 bytes
+    const result = await callContext(client, {
+      namespace: NS,
+      task: "Exceed MCP 48 KiB limit test",
+      required: [
+        {
+          selector: { conversation_id: currentConv.conversation.id },
+          mode: "full",
+          priority: 100,
+          follow: [{ field: "target", required: true }],
+        },
+      ],
+      budget: { max_estimated_tokens: 20000, max_serialized_bytes: 49152 },
+    });
+
+    expect(result.status).toBe("required_budget_exceeded");
+    if (result.status === "required_budget_exceeded") {
+      expect(result.required_serialized_bytes).toBeGreaterThan(49152);
+      expect(result.warnings.some((w) => w.code === "REQUIRED_CONTENT_EXCEEDS_MCP_LIMIT")).toBe(
+        true,
+      );
+    }
+  });
+
+  it("preserves exact existing behavior when follow is omitted", async () => {
+    const { client, currentConv } = await seedPointerScenario();
+
+    // 16. Calls without follow behave exactly as before
+    const result = await callContext(client, {
+      namespace: NS,
+      task: "No follow test",
+      required: [
+        {
+          selector: { title: "SYNTHETIC_CURRENT", namespace: NS },
+          mode: "full",
+          priority: 100,
+        },
+      ],
+      budget: { max_estimated_tokens: 5000, max_serialized_bytes: 30000 },
+    });
+
+    expect(result.status).toBe("complete");
+    if (result.status !== "complete") return;
+    expect(result.revision_pins).toHaveLength(1);
+    expect(result.revision_pins[0]!.conversation_id).toBe(currentConv.conversation.id);
+    expect(result.sections).toHaveLength(1);
+    expect(result.sections[0]!.kind).toBe("required");
   });
 });

@@ -538,6 +538,24 @@ describe("MCP server", () => {
       { ...validBase, retrieve: [{ query: "Q", context_before: 11 }] },
       { ...validBase, retrieve: [{ query: "Q", context_after: -1 }] },
       { ...validBase, retrieve: [{ query: "Q", context_after: 11 }] },
+      { ...validBase, required: [{ selector: { title: "T" }, follow: [{ field: "" }] }] },
+      { ...validBase, required: [{ selector: { title: "T" }, follow: [{ field: "   " }] }] },
+      {
+        ...validBase,
+        required: [{ selector: { title: "T" }, follow: [{ field: "f", tail_messages: 0 }] }],
+      },
+      {
+        ...validBase,
+        required: [{ selector: { title: "T" }, follow: [{ field: "f", tail_messages: 101 }] }],
+      },
+      {
+        ...validBase,
+        required: [{ selector: { title: "T" }, follow: [{ field: "f", mode: "invalid" }] }],
+      },
+      {
+        ...validBase,
+        required: [{ selector: { title: "T" }, follow: [{ field: "f", branch: "invalid" }] }],
+      },
     ];
 
     for (const args of cases) {
@@ -682,5 +700,199 @@ describe("MCP server", () => {
     expect(buildContextRequiredBudgetExceededOutputSchema.safeParse(exceededOutput).success).toBe(
       true,
     );
+  });
+
+  it("exposes follow in memory_build_context inputSchema and accepts pointer-expansion requests", async () => {
+    const client = await connectedClient();
+    const tools = await client.listTools();
+    const tool = tools.tools.find((t) => t.name === "memory_build_context");
+    expect(tool).toBeDefined();
+
+    // Verify that the public JSON Schema exposes follow inside required array items
+    const schema = tool!.inputSchema as {
+      properties?: {
+        required?: {
+          items?: {
+            properties?: {
+              follow?: unknown;
+            };
+          };
+        };
+      };
+    };
+    expect(schema.properties?.required?.items?.properties?.follow).toBeDefined();
+
+    const ID_1 = "0191f6e0-1111-7000-8000-000000000001";
+    const ID_2 = "0191f6e0-2222-7000-8000-000000000002";
+    const ID_3 = "0191f6e0-3333-7000-8000-000000000003";
+
+    // Preferred pointer expansion shape
+    const expansionInput = {
+      namespace: "test_runtime",
+      task: "Continue the active scene",
+      required: [
+        {
+          selector: {
+            title: "SYNTHETIC_CURRENT",
+            namespace: "test_runtime",
+          },
+          mode: "full",
+          priority: 100,
+          follow: [
+            {
+              field: "current_scene",
+              required: true,
+              priority: 100,
+            },
+            {
+              field: "active_arc.owner",
+              required: true,
+              priority: 95,
+            },
+          ],
+        },
+      ],
+      budget: {
+        max_estimated_tokens: 9000,
+        max_serialized_bytes: 47000,
+      },
+    };
+
+    const parsedInput = buildContextInputSchema.safeParse(expansionInput);
+    expect(parsedInput.success).toBe(true);
+
+    // Output with expanded_required sections and provenance
+    const expansionOutput = {
+      status: "complete",
+      pack_id: "pack-with-pointer-expansion",
+      namespace: "test_runtime",
+      task: "Continue the active scene",
+      revision_pins: [
+        {
+          conversation_id: ID_1,
+          revision_id: "rev-current",
+          title: "SYNTHETIC_CURRENT",
+          namespace: "test_runtime",
+        },
+        {
+          conversation_id: ID_2,
+          revision_id: "rev-scene",
+          title: "SYNTHETIC_CURRENT_SCENE",
+          namespace: "test_runtime",
+        },
+        {
+          conversation_id: ID_3,
+          revision_id: "rev-arc",
+          title: "SYNTHETIC_ACTIVE_ARC",
+          namespace: "test_runtime",
+        },
+      ],
+      sections: [
+        {
+          kind: "required",
+          request_index: 0,
+          title: "SYNTHETIC_CURRENT",
+          priority: 100,
+          conversation_id: ID_1,
+          revision_id: "rev-current",
+          messages: [
+            {
+              source_node_id: "node-current-1",
+              role: "assistant",
+              created_at: "2026-09-20T00:00:00.000Z",
+              updated_at: null,
+              text: `active_arc: SYNTHETIC ACTIVE ARC; owner ${ID_3}; status OPEN\ncurrent_scene: ${ID_2}; status OPEN`,
+              conversation_id: ID_1,
+              revision_id: "rev-current",
+            },
+          ],
+          estimated_tokens: 100,
+          serialized_bytes: 500,
+        },
+        {
+          kind: "expanded_required",
+          request_index: 0,
+          title: "SYNTHETIC_CURRENT_SCENE",
+          priority: 100,
+          conversation_id: ID_2,
+          revision_id: "rev-scene",
+          source_conversation_id: ID_1,
+          source_revision_id: "rev-current",
+          pointer: "current_scene",
+          messages: [
+            {
+              source_node_id: "node-scene-1",
+              role: "assistant",
+              created_at: "2026-09-20T00:00:00.000Z",
+              updated_at: null,
+              text: "Scene content",
+              conversation_id: ID_2,
+              revision_id: "rev-scene",
+              provenance: {
+                kind: "expanded_required",
+                request_index: 0,
+                conversation_id: ID_2,
+                revision_id: "rev-scene",
+                source_node_id: "node-scene-1",
+                source_conversation_id: ID_1,
+                source_revision_id: "rev-current",
+                pointer: "current_scene",
+              },
+            },
+          ],
+          estimated_tokens: 200,
+          serialized_bytes: 800,
+        },
+        {
+          kind: "expanded_required",
+          request_index: 1,
+          title: "SYNTHETIC_ACTIVE_ARC",
+          priority: 95,
+          conversation_id: ID_3,
+          revision_id: "rev-arc",
+          source_conversation_id: ID_1,
+          source_revision_id: "rev-current",
+          pointer: "active_arc.owner",
+          messages: [
+            {
+              source_node_id: "node-arc-1",
+              role: "assistant",
+              created_at: "2026-09-20T00:00:00.000Z",
+              updated_at: null,
+              text: "Arc content",
+              conversation_id: ID_3,
+              revision_id: "rev-arc",
+              provenance: {
+                kind: "expanded_required",
+                request_index: 1,
+                conversation_id: ID_3,
+                revision_id: "rev-arc",
+                source_node_id: "node-arc-1",
+                source_conversation_id: ID_1,
+                source_revision_id: "rev-current",
+                pointer: "active_arc.owner",
+              },
+            },
+          ],
+          estimated_tokens: 300,
+          serialized_bytes: 900,
+        },
+      ],
+      budget: {
+        max_estimated_tokens: 9000,
+        used_estimated_tokens: 600,
+        max_serialized_bytes: 47000,
+        used_serialized_bytes: 2500,
+        estimator: "mempersist-token-estimate-v1",
+      },
+      omitted: [],
+      degraded: false,
+      unavailable: [],
+      warnings: [],
+    };
+
+    const parsedOutput = buildContextOutputSchema.safeParse(expansionOutput);
+    expect(parsedOutput.success).toBe(true);
+    expect(buildContextCompleteOutputSchema.safeParse(expansionOutput).success).toBe(true);
   });
 });

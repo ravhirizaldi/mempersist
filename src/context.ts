@@ -20,6 +20,7 @@ import { scopeNamespaces, type Tenant } from "./tenant";
 export const BUILDER_VERSION = "mempersist-context-pack-v2";
 export const ESTIMATOR_VERSION = "mempersist-token-estimate-v1";
 export const MAX_SERIALIZED_BYTES_LIMIT = 49152;
+export const MAX_FOLLOW_TARGETS_LIMIT = 20;
 const MAX_CONTEXT_WARNINGS = 20;
 
 export interface BuildContextRequiredSelector {
@@ -30,12 +31,23 @@ export interface BuildContextRequiredSelector {
   tag_mode?: "any" | "all";
 }
 
+export interface BuildContextFollowItem {
+  field: string;
+  required?: boolean | undefined;
+  priority?: number | undefined;
+  mode?: "full" | "tail" | undefined;
+  branch?: "active" | "all" | undefined;
+  tail_messages?: number | undefined;
+  follow?: BuildContextFollowItem[] | undefined;
+}
+
 export interface BuildContextRequiredItem {
   selector: BuildContextRequiredSelector;
   mode: "full" | "tail";
   branch: "active" | "all";
   priority: number;
-  tail_messages?: number;
+  tail_messages?: number | undefined;
+  follow?: BuildContextFollowItem[] | undefined;
 }
 
 export interface BuildContextRetrieveItem {
@@ -77,16 +89,18 @@ export interface ContextRevisionPin {
 }
 
 export interface ContextMessageProvenance {
-  kind: "required" | "retrieved";
+  kind: "required" | "retrieved" | "expanded_required";
   request_index: number;
   conversation_id: string;
   revision_id: string;
   source_node_id: string;
+  source_conversation_id?: string;
+  source_revision_id?: string;
+  pointer?: string;
   chunk_ids?: string[];
   score?: number;
   sources?: Array<"lexical" | "semantic" | "recent_canonical">;
 }
-
 export interface ContextMessage {
   source_node_id: string;
   role: string | null;
@@ -105,12 +119,15 @@ export interface MatchedRange {
 }
 
 export interface ContextSection {
-  kind: "required" | "retrieved";
+  kind: "required" | "retrieved" | "expanded_required";
   request_index: number;
   title: string;
   priority: number;
   conversation_id: string;
   revision_id: string;
+  source_conversation_id?: string;
+  source_revision_id?: string;
+  pointer?: string;
   messages: ContextMessage[];
   estimated_tokens: number;
   serialized_bytes: number;
@@ -183,6 +200,7 @@ interface PinnedResolvedItem {
   branch: "active" | "all";
   priority: number;
   tailMessages: number;
+  follow?: BuildContextFollowItem[] | undefined;
 }
 
 interface ChunkSourceRow {
@@ -231,6 +249,63 @@ function resolveItemNamespaces(
   return tenant.namespaces;
 }
 
+function validateFollow(follow: unknown, path: string, depth = 0): void {
+  if (depth > 5) {
+    throw new AppError("VALIDATION", `${path} exceeds maximum nesting depth of 5`, 400);
+  }
+  if (!Array.isArray(follow)) {
+    throw new AppError("VALIDATION", `${path} must be an array`, 400);
+  }
+  if (follow.length > 10) {
+    throw new AppError("VALIDATION", `${path} must not exceed 10 entries`, 400);
+  }
+  const items = follow as unknown[];
+  for (let i = 0; i < items.length; i++) {
+    const raw: unknown = items[i];
+    const itemPath = `${path}[${i}]`;
+    if (!raw || typeof raw !== "object") {
+      throw new AppError("VALIDATION", `${itemPath} must be an object`, 400);
+    }
+    const item = raw as Record<string, unknown>;
+    if (typeof item["field"] !== "string" || !item["field"].trim()) {
+      throw new AppError("VALIDATION", `${itemPath}.field must be a non-empty string`, 400);
+    }
+    if (item["required"] !== undefined && typeof item["required"] !== "boolean") {
+      throw new AppError("VALIDATION", `${itemPath}.required must be a boolean`, 400);
+    }
+    if (
+      item["priority"] !== undefined &&
+      (typeof item["priority"] !== "number" || !Number.isFinite(item["priority"]))
+    ) {
+      throw new AppError("VALIDATION", `${itemPath}.priority must be a finite number`, 400);
+    }
+    if (item["mode"] !== undefined && item["mode"] !== "full" && item["mode"] !== "tail") {
+      throw new AppError("VALIDATION", `${itemPath}.mode must be "full" or "tail"`, 400);
+    }
+    if (item["branch"] !== undefined && item["branch"] !== "active" && item["branch"] !== "all") {
+      throw new AppError("VALIDATION", `${itemPath}.branch must be "active" or "all"`, 400);
+    }
+    const tailMessages = item["tail_messages"];
+    if (tailMessages !== undefined) {
+      if (
+        typeof tailMessages !== "number" ||
+        !Number.isInteger(tailMessages) ||
+        tailMessages < 1 ||
+        tailMessages > 100
+      ) {
+        throw new AppError(
+          "VALIDATION",
+          `${itemPath}.tail_messages must be an integer between 1 and 100`,
+          400,
+        );
+      }
+    }
+    if (item["follow"] !== undefined) {
+      validateFollow(item["follow"], `${itemPath}.follow`, depth + 1);
+    }
+  }
+}
+
 function validateInput(tenant: Tenant, input: BuildContextInput): void {
   if (!input || typeof input !== "object") {
     throw new AppError("VALIDATION", "Input must be an object", 400);
@@ -240,6 +315,25 @@ function validateInput(tenant: Tenant, input: BuildContextInput): void {
   }
   if (!Array.isArray(input.required) || input.required.length < 1 || input.required.length > 20) {
     throw new AppError("VALIDATION", "required must contain 1-20 entries", 400);
+  }
+  let totalFollowItems = 0;
+  function countFollow(followItems?: BuildContextFollowItem[]): number {
+    if (!followItems) return 0;
+    let count = followItems.length;
+    for (const it of followItems) {
+      count += countFollow(it.follow);
+    }
+    return count;
+  }
+  for (const req of input.required) {
+    totalFollowItems += countFollow(req.follow);
+  }
+  if (totalFollowItems > MAX_FOLLOW_TARGETS_LIMIT) {
+    throw new AppError(
+      "VALIDATION",
+      `Total follow targets (${totalFollowItems}) exceeds maximum allowed limit of ${MAX_FOLLOW_TARGETS_LIMIT}`,
+      400,
+    );
   }
 
   // Validate top-level namespace if provided
@@ -308,6 +402,9 @@ function validateInput(tenant: Tenant, input: BuildContextInput): void {
           400,
         );
       }
+    }
+    if (item.follow !== undefined) {
+      validateFollow(item.follow, `required[${i}].follow`);
     }
   }
 
@@ -400,9 +497,16 @@ function cloneProvenance(provenance: ContextMessageProvenance): ContextMessagePr
     conversation_id: provenance.conversation_id,
     revision_id: provenance.revision_id,
     source_node_id: provenance.source_node_id,
-    ...(provenance.chunk_ids ? { chunk_ids: [...provenance.chunk_ids] } : {}),
+    ...(provenance.source_conversation_id !== undefined
+      ? { source_conversation_id: provenance.source_conversation_id }
+      : {}),
+    ...(provenance.source_revision_id !== undefined
+      ? { source_revision_id: provenance.source_revision_id }
+      : {}),
+    ...(provenance.pointer !== undefined ? { pointer: provenance.pointer } : {}),
+    ...(provenance.chunk_ids !== undefined ? { chunk_ids: [...provenance.chunk_ids] } : {}),
     ...(provenance.score !== undefined ? { score: provenance.score } : {}),
-    ...(provenance.sources ? { sources: [...provenance.sources] } : {}),
+    ...(provenance.sources !== undefined ? { sources: [...provenance.sources] } : {}),
   };
 }
 
@@ -439,8 +543,10 @@ interface RequiredState {
   items: PinnedResolvedItem[];
   revisionPins: ContextRevisionPin[];
   pinMap: Map<string, ContextRevisionPin>;
+  optionalPinMap: Map<string, ContextRevisionPin>;
   revisionCache: RevisionCache;
   sections: ContextSection[];
+  optionalExpandedSections: ContextSection[];
   seenMessages: SeenMessages;
   estimatedTokens: number;
 }
@@ -460,6 +566,7 @@ interface EvidenceOnlyCandidate {
 
 interface AdmissionState {
   sections: ContextSection[];
+  admittedPins: ContextRevisionPin[];
   usedEstimatedTokens: number;
   candidateEvidence: Map<ContextSection, StagedEvidenceItem[]>;
   evidenceOnly: EvidenceOnlyCandidate[];
@@ -525,6 +632,176 @@ function restoreRequiredBaselines(baselines: RequiredSectionBaseline[]): void {
   }
 }
 
+const UUID_REGEX = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+const HEX64_REGEX = /^[0-9a-f]{64}$/i;
+
+export function isConversationId(id: string): boolean {
+  return UUID_REGEX.test(id) || HEX64_REGEX.test(id);
+}
+
+function escapeRegExp(s: string): string {
+  return s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+export type PointerExtractionResult =
+  | { status: "found"; id: string }
+  | { status: "invalid"; rawValue: string }
+  | { status: "cleared" }
+  | { status: "missing" };
+
+const isClearedToken = (token: string): boolean =>
+  /^(none|null|cleared|unset|empty|undefined)$/i.test(token);
+export function extractPointerFromText(text: string, fieldPath: string): PointerExtractionResult {
+  const trimmed = text.trim();
+  if (!trimmed) {
+    return { status: "missing" };
+  }
+
+  // 1. JSON parsing attempt
+  if (trimmed.startsWith("{") && trimmed.endsWith("}")) {
+    try {
+      const obj = JSON.parse(trimmed) as Record<string, unknown>;
+      let cur: unknown = obj;
+      const parts = fieldPath.split(".");
+      let pathFound = true;
+      for (const part of parts) {
+        if (cur && typeof cur === "object" && part in (cur as Record<string, unknown>)) {
+          cur = (cur as Record<string, unknown>)[part];
+        } else {
+          pathFound = false;
+          break;
+        }
+      }
+      if (!pathFound) {
+        return { status: "missing" };
+      }
+      if (cur === null || cur === undefined) {
+        return { status: "cleared" };
+      }
+      if (typeof cur === "string" || typeof cur === "number") {
+        const valStr = String(cur).trim();
+        if (!valStr || isClearedToken(valStr)) {
+          return { status: "cleared" };
+        }
+        if (isConversationId(valStr)) {
+          return { status: "found", id: valStr };
+        }
+        return { status: "invalid", rawValue: valStr };
+      }
+      return {
+        status: "invalid",
+        rawValue: JSON.stringify(cur) ?? "",
+      };
+    } catch {
+      // Not JSON, fall back to line parsing
+    }
+  }
+
+  // 2. Structured Line / Key-Value parsing
+  const lines = text.split(/\r?\n/);
+  const parts = fieldPath.split(".");
+  const rootField = parts[0]!.trim();
+  const subField = parts.length > 1 ? parts.slice(1).join(".").trim() : null;
+
+  let candidateInvalid: string | null = null;
+
+  for (const line of lines) {
+    const lineTrimmed = line.trim();
+    if (!lineTrimmed) continue;
+
+    const rootPattern = new RegExp(`(?:^|[;\\s])(?:${escapeRegExp(rootField)})\\s*:\\s*(.*)$`, "i");
+    const rootMatch = lineTrimmed.match(rootPattern);
+    if (!rootMatch) continue;
+
+    const remainder = rootMatch[1] ?? "";
+
+    if (subField) {
+      const subPattern = new RegExp(
+        `(?:^|[;\\s])${escapeRegExp(subField)}\\s*[:=]?\\s*([^;\\s]+)`,
+        "i",
+      );
+      const subMatch = remainder.match(subPattern);
+      if (subMatch) {
+        const rawToken = (subMatch[1] ?? "").replace(/^["']|["']$/g, "").trim();
+        if (!rawToken || isClearedToken(rawToken)) {
+          return { status: "cleared" };
+        }
+        if (isConversationId(rawToken)) {
+          return { status: "found", id: rawToken };
+        }
+        candidateInvalid = rawToken;
+      }
+    } else {
+      const ownerMatch = remainder.match(/(?:^|[;\s])owner\s*[:=]?\s*([^;\s]+)/i);
+      let rawToken: string;
+      if (ownerMatch && ownerMatch[1]) {
+        rawToken = ownerMatch[1].replace(/^["']|["']$/g, "").trim();
+      } else {
+        const segment = remainder.split(";")[0]?.trim() ?? "";
+        rawToken =
+          segment
+            .split(/\s+/)[0]
+            ?.replace(/^["']|["']$/g, "")
+            .trim() ?? "";
+      }
+
+      if (rawToken) {
+        if (isClearedToken(rawToken)) {
+          return { status: "cleared" };
+        }
+        if (isConversationId(rawToken)) {
+          return { status: "found", id: rawToken };
+        }
+        candidateInvalid = rawToken;
+      } else {
+        return { status: "cleared" };
+      }
+    }
+  }
+
+  if (candidateInvalid !== null) {
+    return { status: "invalid", rawValue: candidateInvalid };
+  }
+
+  return { status: "missing" };
+}
+
+export function extractPointerFromConversation(
+  conversation: CanonicalConversation,
+  fieldPath: string,
+): PointerExtractionResult {
+  const byId = new Map(conversation.nodes.map((n) => [n.sourceNodeId, n]));
+  const nodes = (conversation.activeSourceNodeIds ?? [])
+    .map((id) => byId.get(id))
+    .filter((n): n is CanonicalNode => n !== undefined && n.text.length > 0);
+
+  const searchNodes = nodes.length > 0 ? [...nodes].reverse() : [...conversation.nodes].reverse();
+
+  for (const node of searchNodes) {
+    const res = extractPointerFromText(node.text, fieldPath);
+    if (res.status === "found" || res.status === "invalid") {
+      return res;
+    }
+    if (res.status === "cleared") {
+      return { status: "missing" };
+    }
+  }
+
+  return { status: "missing" };
+}
+
+function normalizeFollow(items: BuildContextFollowItem[]): unknown[] {
+  return items.map((f) => ({
+    field: f.field,
+    required: f.required ?? true,
+    priority: f.priority ?? 100,
+    mode: f.mode ?? "full",
+    branch: f.branch ?? "active",
+    tail_messages: f.tail_messages ?? 20,
+    ...(f.follow && f.follow.length > 0 ? { follow: normalizeFollow(f.follow) } : {}),
+  }));
+}
+
 function buildCompiledText(sections: ContextSection[]): string {
   const lines: string[] = [];
   for (const section of sections) {
@@ -535,6 +812,16 @@ function buildCompiledText(sections: ContextSection[]): string {
       lines.push(`[REQUIRED MEMORY: ${section.title}]`);
       lines.push(`conversation_id: ${section.conversation_id}`);
       lines.push(`revision_id: ${section.revision_id}`);
+    } else if (section.kind === "expanded_required") {
+      lines.push(`[EXPANDED REQUIRED MEMORY: ${section.title}]`);
+      lines.push(`conversation_id: ${section.conversation_id}`);
+      lines.push(`revision_id: ${section.revision_id}`);
+      if (section.source_conversation_id) {
+        lines.push(`source_conversation_id: ${section.source_conversation_id}`);
+      }
+      if (section.pointer) {
+        lines.push(`pointer: ${section.pointer}`);
+      }
     } else {
       lines.push(`[RETRIEVED EVIDENCE: ${section.title}]`);
       lines.push(`conversation_id: ${section.conversation_id}`);
@@ -579,6 +866,7 @@ async function computePackId(
       branch: req.branch,
       priority: req.priority,
       tail_messages: req.tail_messages ?? 20,
+      ...(req.follow && req.follow.length > 0 ? { follow: normalizeFollow(req.follow) } : {}),
     })),
     retrieve: (input.retrieve ?? []).map((ret) => ({
       query: ret.query,
@@ -704,6 +992,7 @@ async function resolveRequiredItems(
         branch: reqItem.branch,
         priority: reqItem.priority,
         tailMessages: reqItem.tail_messages !== undefined ? Math.floor(reqItem.tail_messages) : 20,
+        ...(reqItem.follow !== undefined ? { follow: reqItem.follow } : {}),
       };
     }
   }
@@ -776,6 +1065,7 @@ async function resolveRequiredItems(
           branch: item.branch,
           priority: item.priority,
           tailMessages: item.tail_messages !== undefined ? Math.floor(item.tail_messages) : 20,
+          ...(item.follow !== undefined ? { follow: item.follow } : {}),
         };
       }),
     );
@@ -789,11 +1079,16 @@ async function resolveRequiredItems(
     if (!existing) {
       canonicalByConv.set(item.conversationId, item);
     } else {
+      if (item.follow && item.follow.length > 0) {
+        existing.follow = [...(existing.follow ?? []), ...item.follow];
+      }
       const preferExisting =
         existing.priority > item.priority ||
         (existing.priority === item.priority && existing.requestIndex <= item.requestIndex);
       if (!preferExisting) {
+        const mergedFollow = existing.follow;
         canonicalByConv.set(item.conversationId, item);
+        item.follow = mergedFollow;
       }
     }
   }
@@ -830,11 +1125,35 @@ async function resolveRequiredItems(
   };
 }
 
+function extractNodesForSection(
+  conversation: CanonicalConversation,
+  branch: "active" | "all",
+  mode: "full" | "tail",
+  tailMessages: number,
+): CanonicalNode[] {
+  let branchNodes: CanonicalNode[];
+  if (branch === "active") {
+    const byId = new Map(conversation.nodes.map((n) => [n.sourceNodeId, n]));
+    branchNodes = (conversation.activeSourceNodeIds ?? [])
+      .map((id) => byId.get(id))
+      .filter((n): n is CanonicalNode => n !== undefined && n.text.length > 0);
+  } else {
+    branchNodes = (conversation.nodes ?? []).filter((n) => n.text.length > 0);
+  }
+  if (mode === "full") {
+    return branchNodes;
+  }
+  return branchNodes.slice(-tailMessages);
+}
+
 async function prepareRequiredState(
   env: AppEnv,
+  tenant: Tenant,
+  input: BuildContextInput,
   resolved: ResolvedRequiredItems,
   includeProvenance: boolean,
   deduplicate: boolean,
+  warningState: WarningState,
 ): Promise<RequiredState> {
   const uniqueRevisionIds = Array.from(
     new Set(
@@ -857,31 +1176,20 @@ async function prepareRequiredState(
     }
   }
 
-  // Extract required messages and construct required sections
+  // Extract explicit required messages and construct required sections
   const requiredSections: ContextSection[] = [];
   for (let i = 0; i < resolved.items.length; i++) {
     const item = resolved.items[i];
     if (!item) continue;
     const loaded = revisionCache.get(item.revisionId);
     if (!loaded) continue;
-    const conversation = loaded.conversation;
 
-    let branchNodes: CanonicalNode[];
-    if (item.branch === "active") {
-      const byId = new Map(conversation.nodes.map((n) => [n.sourceNodeId, n]));
-      branchNodes = (conversation.activeSourceNodeIds ?? [])
-        .map((id) => byId.get(id))
-        .filter((n): n is CanonicalNode => n !== undefined && n.text.length > 0);
-    } else {
-      branchNodes = (conversation.nodes ?? []).filter((n) => n.text.length > 0);
-    }
-
-    let selectedNodes: CanonicalNode[];
-    if (item.mode === "full") {
-      selectedNodes = branchNodes;
-    } else {
-      selectedNodes = branchNodes.slice(-item.tailMessages);
-    }
+    const selectedNodes = extractNodesForSection(
+      loaded.conversation,
+      item.branch,
+      item.mode,
+      item.tailMessages,
+    );
 
     const messages: ContextMessage[] = selectedNodes.map((node) => {
       const msg: ContextMessage = {
@@ -921,17 +1229,398 @@ async function prepareRequiredState(
     requiredSections.push(section);
   }
 
-  // Sort required sections: priority desc, request_index asc
+  // Discover and resolve the pointer graph before materializing canonical sections.
+  const explicitByConversation = new Map<string, PinnedResolvedItem>();
+  for (const item of resolved.items) {
+    if (!item) continue;
+    const existing = explicitByConversation.get(item.conversationId);
+    if (
+      !existing ||
+      item.priority > existing.priority ||
+      (item.priority === existing.priority && item.requestIndex < existing.requestIndex)
+    ) {
+      explicitByConversation.set(item.conversationId, item);
+    }
+  }
+  const visitedExplicit = new Set(explicitByConversation.keys());
+
+  const requiredExpandedSections: ContextSection[] = [];
+  const optionalExpandedSections: ContextSection[] = [];
+  const revisionPins = [...resolved.revisionPins];
+  const pinMap = new Map(resolved.pinMap);
+  const optionalPinMap = new Map<string, ContextRevisionPin>();
+
+  interface ExpansionParent {
+    conversationId: string;
+    revisionId: string;
+    title: string;
+    namespace: string;
+    priority: number;
+    conversation: CanonicalConversation;
+  }
+
+  interface TargetEdge {
+    targetId: string;
+    required: boolean;
+    priority: number;
+    mode: "full" | "tail";
+    branch: "active" | "all";
+    tailMessages: number;
+    sourceConversationId: string;
+    sourceRevisionId: string;
+    pointer: string;
+    nestedFollow: Array<{ follow: BuildContextFollowItem; depth: number }>;
+    queuedNestedCount: number;
+    discoveryOrder: number;
+    pin?: ContextRevisionPin;
+    resolved?: ExpansionParent;
+    missing?: boolean;
+    loadFailed?: boolean;
+  }
+
+  interface FollowTask {
+    parent: ExpansionParent;
+    follow: BuildContextFollowItem;
+    depth: number;
+  }
+
+  const queue: FollowTask[] = [];
+
+  for (const item of explicitByConversation.values()) {
+    if (!item || !item.follow || item.follow.length === 0) continue;
+    const loaded = revisionCache.get(item.revisionId);
+    if (!loaded) continue;
+    const parent: ExpansionParent = {
+      conversationId: item.conversationId,
+      revisionId: item.revisionId,
+      title: item.title,
+      namespace: item.namespace,
+      priority: item.priority,
+      conversation: loaded.conversation,
+    };
+    for (const follow of item.follow) {
+      queue.push({ parent, follow, depth: 1 });
+    }
+  }
+
+  const targetEdges = new Map<string, TargetEdge>();
+  let discoveryCounter = 0;
+
+  while (queue.length > 0) {
+    const current = queue.shift()!;
+    if (current.depth > 5) {
+      throw new AppError("VALIDATION", "Pointer expansion depth exceeded maximum limit of 5", 400);
+    }
+
+    const extraction = extractPointerFromConversation(
+      current.parent.conversation,
+      current.follow.field,
+    );
+
+    if (extraction.status === "missing" || extraction.status === "cleared") {
+      if (current.follow.required !== false) {
+        throw new AppError(
+          "NOT_FOUND",
+          `Required pointer "${current.follow.field}" was not found in conversation "${current.parent.title}" (${current.parent.conversationId})`,
+          404,
+        );
+      }
+      addWarning(warningState, {
+        code: "POINTER_NOT_FOUND",
+        conversation_id: current.parent.conversationId,
+        revision_id: current.parent.revisionId,
+        message: `Optional pointer "${current.follow.field}" was not found in conversation "${current.parent.title}"`,
+      });
+      continue;
+    }
+
+    if (extraction.status === "invalid") {
+      if (current.follow.required !== false) {
+        throw new AppError(
+          "VALIDATION",
+          `Invalid conversation ID "${extraction.rawValue}" for pointer "${current.follow.field}" in conversation "${current.parent.title}"`,
+          400,
+        );
+      }
+      addWarning(warningState, {
+        code: "POINTER_INVALID",
+        conversation_id: current.parent.conversationId,
+        revision_id: current.parent.revisionId,
+        message: `Invalid conversation ID "${extraction.rawValue}" for optional pointer "${current.follow.field}" in conversation "${current.parent.title}"`,
+      });
+      continue;
+    }
+
+    const targetId = extraction.id;
+    const isRequired = current.follow.required !== false;
+    const priority =
+      current.follow.priority !== undefined ? current.follow.priority : current.parent.priority;
+    const mode = current.follow.mode ?? "full";
+    const branch = current.follow.branch ?? "active";
+    const tailMessages =
+      current.follow.tail_messages !== undefined ? Math.floor(current.follow.tail_messages) : 20;
+    const nestedFollow = (current.follow.follow ?? []).map((follow) => ({
+      follow,
+      depth: current.depth + 1,
+    }));
+
+    // Explicit required conversations own their canonical section, but every duplicate can add follows.
+    if (visitedExplicit.has(targetId)) {
+      const explicit = explicitByConversation.get(targetId);
+      const loadedExplicit = explicit ? revisionCache.get(explicit.revisionId) : undefined;
+      if (explicit && loadedExplicit) {
+        const parent: ExpansionParent = {
+          conversationId: targetId,
+          revisionId: explicit.revisionId,
+          title: explicit.title,
+          namespace: explicit.namespace,
+          priority,
+          conversation: loadedExplicit.conversation,
+        };
+        for (const nested of nestedFollow) {
+          queue.push({ parent, follow: nested.follow, depth: nested.depth });
+        }
+      }
+      continue;
+    }
+
+    let edge = targetEdges.get(targetId);
+    if (edge) {
+      edge.required = edge.required || isRequired;
+      if (priority > edge.priority) {
+        edge.priority = priority;
+        edge.sourceConversationId = current.parent.conversationId;
+        edge.sourceRevisionId = current.parent.revisionId;
+        edge.pointer = current.follow.field;
+        edge.mode = mode;
+        edge.branch = branch;
+        edge.tailMessages = tailMessages;
+        if (edge.resolved) {
+          edge.resolved.priority = priority;
+        }
+      }
+      edge.nestedFollow.push(...nestedFollow);
+    } else {
+      edge = {
+        targetId,
+        required: isRequired,
+        priority,
+        mode,
+        branch,
+        tailMessages,
+        sourceConversationId: current.parent.conversationId,
+        sourceRevisionId: current.parent.revisionId,
+        pointer: current.follow.field,
+        nestedFollow,
+        queuedNestedCount: 0,
+        discoveryOrder: discoveryCounter++,
+      };
+      targetEdges.set(targetId, edge);
+    }
+
+    if (!edge.resolved) {
+      if (edge.missing) {
+        if (edge.required) {
+          throw new AppError(
+            "NOT_FOUND",
+            `Referenced conversation "${targetId}" for pointer "${current.follow.field}" not found`,
+            404,
+          );
+        }
+        continue;
+      }
+
+      if (!edge.pin) {
+        const namespaces = resolveItemNamespaces(tenant, input.namespace, undefined);
+        const where = [
+          "id = ?",
+          "user_id = ?",
+          "deleted_at IS NULL",
+          "current_revision_id IS NOT NULL",
+        ];
+        const params: Array<string | number> = [targetId, tenant.userId];
+
+        if (namespaces.length === 0) {
+          where.push("1 = 0");
+        } else {
+          where.push(`namespace IN (${namespaces.map(() => "?").join(",")})`);
+          params.push(...namespaces);
+        }
+
+        const row = await env.MEMORY_DB.prepare(
+          `SELECT id, current_revision_id, title, namespace FROM conversations WHERE ${where.join(" AND ")}`,
+        )
+          .bind(...params)
+          .first<{
+            id: string;
+            current_revision_id: string;
+            title: string;
+            namespace: string;
+          }>();
+
+        if (!row || !row.current_revision_id) {
+          edge.missing = true;
+          if (edge.required) {
+            throw new AppError(
+              "NOT_FOUND",
+              `Referenced conversation "${targetId}" for pointer "${current.follow.field}" not found`,
+              404,
+            );
+          }
+          addWarning(warningState, {
+            code: "POINTER_TARGET_NOT_FOUND",
+            conversation_id: current.parent.conversationId,
+            revision_id: current.parent.revisionId,
+            message: `Referenced conversation "${targetId}" for optional pointer "${current.follow.field}" not found`,
+          });
+          continue;
+        }
+
+        edge.pin = {
+          conversation_id: targetId,
+          revision_id: row.current_revision_id,
+          title: row.title,
+          namespace: row.namespace,
+        };
+      }
+
+      if (edge.loadFailed && !edge.required) {
+        continue;
+      }
+
+      let loaded = revisionCache.get(edge.pin.revision_id);
+      if (!loaded) {
+        try {
+          loaded = await loadCanonicalRevision(env, edge.pin.revision_id);
+          revisionCache.set(edge.pin.revision_id, loaded);
+        } catch (err) {
+          edge.loadFailed = true;
+          if (edge.required) {
+            throw err;
+          }
+          addWarning(warningState, {
+            code: "POINTER_CANONICAL_LOAD_FAILED",
+            conversation_id: targetId,
+            revision_id: edge.pin.revision_id,
+            message: `Canonical revision "${edge.pin.revision_id}" for optional pointer "${current.follow.field}" failed to load`,
+          });
+          continue;
+        }
+      }
+
+      edge.resolved = {
+        conversationId: targetId,
+        revisionId: edge.pin.revision_id,
+        title: edge.pin.title,
+        namespace: edge.pin.namespace,
+        priority: edge.priority,
+        conversation: loaded.conversation,
+      };
+    }
+    const resolvedParent = edge.resolved;
+    if (!resolvedParent) continue;
+
+    while (edge.queuedNestedCount < edge.nestedFollow.length) {
+      const nested = edge.nestedFollow[edge.queuedNestedCount++]!;
+      queue.push({
+        parent: resolvedParent,
+        follow: nested.follow,
+        depth: nested.depth,
+      });
+    }
+  }
+
+  // Materialize each resolved target once, after duplicate promotion is complete.
+  for (const edge of targetEdges.values()) {
+    const pin = edge.pin;
+    if (!edge.resolved || !pin) continue;
+
+    const selectedNodes = extractNodesForSection(
+      edge.resolved.conversation,
+      edge.branch,
+      edge.mode,
+      edge.tailMessages,
+    );
+    const messages: ContextMessage[] = selectedNodes.map((node) => {
+      const message: ContextMessage = {
+        source_node_id: node.sourceNodeId,
+        role: node.role ?? null,
+        created_at: node.createdAt,
+        updated_at: node.updatedAt,
+        text: node.text,
+        conversation_id: edge.targetId,
+        revision_id: pin.revision_id,
+      };
+      if (includeProvenance) {
+        message.provenance = {
+          kind: "expanded_required",
+          request_index: edge.discoveryOrder,
+          conversation_id: edge.targetId,
+          revision_id: pin.revision_id,
+          source_node_id: node.sourceNodeId,
+          source_conversation_id: edge.sourceConversationId,
+          source_revision_id: edge.sourceRevisionId,
+          pointer: edge.pointer,
+        };
+      }
+      return message;
+    });
+
+    const estimatedTokens = messages.reduce(
+      (sum, message) => sum + estimateTokens(message.text),
+      0,
+    );
+    const section: ContextSection = {
+      kind: "expanded_required",
+      request_index: edge.discoveryOrder,
+      title: pin.title,
+      priority: edge.priority,
+      conversation_id: edge.targetId,
+      revision_id: pin.revision_id,
+      source_conversation_id: edge.sourceConversationId,
+      source_revision_id: edge.sourceRevisionId,
+      pointer: edge.pointer,
+      messages,
+      estimated_tokens: estimatedTokens,
+      serialized_bytes: 0,
+    };
+    section.serialized_bytes = jsonBytes(section);
+
+    if (edge.required) {
+      pinMap.set(edge.targetId, pin);
+      revisionPins.push(pin);
+      requiredExpandedSections.push(section);
+    } else {
+      optionalPinMap.set(edge.targetId, pin);
+      optionalExpandedSections.push(section);
+    }
+  }
+
+  // Sort explicit required sections: priority desc, request_index asc
   requiredSections.sort((a, b) => {
     if (b.priority !== a.priority) return b.priority - a.priority;
     return a.request_index - b.request_index;
   });
 
+  // Sort required expanded sections: priority desc, request_index asc
+  requiredExpandedSections.sort((a, b) => {
+    if (b.priority !== a.priority) return b.priority - a.priority;
+    return a.request_index - b.request_index;
+  });
+
+  // Sort optional expanded sections: priority desc, request_index asc
+  optionalExpandedSections.sort((a, b) => {
+    if (b.priority !== a.priority) return b.priority - a.priority;
+    return a.request_index - b.request_index;
+  });
+
+  // Combined required sections (Tier 1 explicit + Tier 2 required expanded)
+  const allRequiredSections = [...requiredSections, ...requiredExpandedSections];
+
   // Track seen messages for deduplication
   const seenMessages: SeenMessages = new Map();
 
-  // If deduplication is enabled, deduplicate across required sections as well
-  for (const sec of requiredSections) {
+  for (const sec of allRequiredSections) {
     const retainedMessages: ContextMessage[] = [];
     for (const msg of sec.messages) {
       const key = `${msg.conversation_id}:${msg.revision_id}:${msg.source_node_id}`;
@@ -946,14 +1635,16 @@ async function prepareRequiredState(
     sec.serialized_bytes = jsonBytes(sec);
   }
 
-  const estimatedTokens = requiredSections.reduce((sum, sec) => sum + sec.estimated_tokens, 0);
+  const estimatedTokens = allRequiredSections.reduce((sum, sec) => sum + sec.estimated_tokens, 0);
 
   return {
     items: resolved.items,
-    revisionPins: resolved.revisionPins,
-    pinMap: resolved.pinMap,
+    revisionPins,
+    pinMap,
+    optionalPinMap,
     revisionCache,
-    sections: requiredSections,
+    sections: allRequiredSections,
+    optionalExpandedSections,
     seenMessages,
     estimatedTokens,
   };
@@ -1285,8 +1976,84 @@ function admitRetrievedCandidates(
   });
 
   const admittedSections: ContextSection[] = [...required.sections];
+  const admittedPins: ContextRevisionPin[] = [];
   let usedEstimatedTokens = required.estimatedTokens;
+  const budgetCeiling = Math.min(input.budget.max_serialized_bytes, MAX_SERIALIZED_BYTES_LIMIT);
+  const deduplicate = input.options?.deduplicate ?? true;
 
+  // Optional expansion pins and messages become visible only after the section fits.
+  for (const optional of required.optionalExpandedSections) {
+    const pin = required.optionalPinMap.get(optional.conversation_id);
+    if (!pin) continue;
+
+    const messages = optional.messages.filter((message) => {
+      const key = `${message.conversation_id}:${message.revision_id}:${message.source_node_id}`;
+      return !deduplicate || !required.seenMessages.has(key);
+    });
+    const estimatedTokens = messages.reduce(
+      (sum, message) => sum + estimateTokens(message.text),
+      0,
+    );
+    const section: ContextSection = {
+      ...optional,
+      messages,
+      estimated_tokens: estimatedTokens,
+      serialized_bytes: 0,
+    };
+    section.serialized_bytes = jsonBytes(section);
+
+    if (usedEstimatedTokens + estimatedTokens > input.budget.max_estimated_tokens) {
+      addWarning(warningState, {
+        code: "OPTIONAL_EXPANSION_OMITTED_BUDGET",
+        conversation_id: section.conversation_id,
+        revision_id: section.revision_id,
+        message: `Optional expanded conversation "${section.title}" omitted due to token budget`,
+      });
+      continue;
+    }
+
+    const testSections = [...admittedSections, section];
+    const testPins = [...required.revisionPins, ...admittedPins, pin];
+    const draftPack: Record<string, unknown> = {
+      status: "complete",
+      pack_id: "0".repeat(64),
+      namespace: input.namespace ?? null,
+      task: input.task,
+      revision_pins: testPins,
+      sections: testSections,
+      budget: {
+        max_estimated_tokens: input.budget.max_estimated_tokens,
+        used_estimated_tokens: usedEstimatedTokens + estimatedTokens,
+        max_serialized_bytes: input.budget.max_serialized_bytes,
+        used_serialized_bytes: 0,
+        estimator: ESTIMATOR_VERSION,
+      },
+      omitted: [],
+      degraded: false,
+      unavailable: [],
+      warnings: [],
+      ...(includeCompiledText ? { compiled_text: buildCompiledText(testSections) } : {}),
+    };
+
+    if (computePackSerializedBytes(draftPack) > budgetCeiling) {
+      addWarning(warningState, {
+        code: "OPTIONAL_EXPANSION_OMITTED_BUDGET",
+        conversation_id: section.conversation_id,
+        revision_id: section.revision_id,
+        message: `Optional expanded conversation "${section.title}" omitted due to serialized byte budget`,
+      });
+      continue;
+    }
+
+    admittedSections.push(section);
+    admittedPins.push(pin);
+    usedEstimatedTokens += estimatedTokens;
+    for (const message of messages) {
+      const key = `${message.conversation_id}:${message.revision_id}:${message.source_node_id}`;
+      required.seenMessages.set(key, { section, message });
+    }
+  }
+  const effectivePins = [...required.revisionPins, ...admittedPins];
   const candidateEvidenceMap = new Map<ContextSection, StagedEvidenceItem[]>();
   const admittedEvidenceOnlyCandidates: EvidenceOnlyCandidate[] = [];
 
@@ -1300,8 +2067,6 @@ function admitRetrievedCandidates(
       ...(msg.provenance ? { provenance: cloneProvenance(msg.provenance) } : {}),
     })),
   }));
-
-  const deduplicate = input.options?.deduplicate ?? true;
 
   for (const candidate of retrieval.candidates) {
     // 6a. Check for oversized messages in optional retrieved candidate
@@ -1450,7 +2215,7 @@ function admitRetrievedCandidates(
           pack_id: "0".repeat(64),
           namespace: input.namespace ?? null,
           task: input.task,
-          revision_pins: required.revisionPins,
+          revision_pins: effectivePins,
           sections: admittedSections,
           budget: {
             max_estimated_tokens: input.budget.max_estimated_tokens,
@@ -1529,7 +2294,7 @@ function admitRetrievedCandidates(
       pack_id: "0".repeat(64),
       namespace: input.namespace ?? null,
       task: input.task,
-      revision_pins: required.revisionPins,
+      revision_pins: effectivePins,
       sections: testSections,
       budget: {
         max_estimated_tokens: input.budget.max_estimated_tokens,
@@ -1572,6 +2337,7 @@ function admitRetrievedCandidates(
 
   return {
     sections: admittedSections,
+    admittedPins,
     usedEstimatedTokens,
     candidateEvidence: candidateEvidenceMap,
     evidenceOnly: admittedEvidenceOnlyCandidates,
@@ -1692,12 +2458,13 @@ async function finalizeContextPack(
   for (const sec of admission.sections) {
     sec.serialized_bytes = jsonBytes(sec);
   }
+  let effectivePins = [...required.revisionPins, ...admission.admittedPins];
 
   let finalCompiledText = includeCompiledText ? buildCompiledText(admission.sections) : undefined;
   let finalPackId = await computePackId(
     env,
     input,
-    required.revisionPins,
+    effectivePins,
     admission.sections,
     finalCompiledText,
   );
@@ -1707,7 +2474,7 @@ async function finalizeContextPack(
     pack_id: finalPackId,
     namespace: input.namespace ?? null,
     task: input.task,
-    revision_pins: required.revisionPins,
+    revision_pins: effectivePins,
     sections: admission.sections,
     budget: {
       max_estimated_tokens: input.budget.max_estimated_tokens,
@@ -1737,18 +2504,36 @@ async function finalizeContextPack(
     if (staged) {
       rollbackStagedEvidence(staged);
     }
-    retrieval.omitted.push({
-      kind: "retrieved",
-      conversation_id: popped.conversation_id,
-      revision_id: popped.revision_id,
-      reason: "budget",
-    });
+    if (popped.kind === "retrieved") {
+      retrieval.omitted.push({
+        kind: "retrieved",
+        conversation_id: popped.conversation_id,
+        revision_id: popped.revision_id,
+        reason: "budget",
+      });
+    } else {
+      addWarning(warningState, {
+        code: "OPTIONAL_EXPANSION_OMITTED_BUDGET",
+        conversation_id: popped.conversation_id,
+        revision_id: popped.revision_id,
+        message: `Optional expanded conversation "${popped.title}" omitted due to serialized byte budget`,
+      });
+      const pinIndex = admission.admittedPins.findIndex(
+        (pin) =>
+          pin.conversation_id === popped.conversation_id && pin.revision_id === popped.revision_id,
+      );
+      if (pinIndex >= 0) {
+        admission.admittedPins.splice(pinIndex, 1);
+      }
+    }
     for (const sec of admission.sections) {
       sec.serialized_bytes = jsonBytes(sec);
     }
     finalCompiledText = includeCompiledText ? buildCompiledText(admission.sections) : undefined;
     finalPack.sections = admission.sections;
     finalPack.budget.used_estimated_tokens = admission.usedEstimatedTokens;
+    effectivePins = [...required.revisionPins, ...admission.admittedPins];
+    finalPack.revision_pins = effectivePins;
     if (finalCompiledText !== undefined) {
       finalPack.compiled_text = finalCompiledText;
     } else {
@@ -1757,7 +2542,7 @@ async function finalizeContextPack(
     finalPackId = await computePackId(
       env,
       input,
-      required.revisionPins,
+      effectivePins,
       admission.sections,
       finalCompiledText,
     );
@@ -1790,7 +2575,7 @@ async function finalizeContextPack(
     finalPackId = await computePackId(
       env,
       input,
-      required.revisionPins,
+      effectivePins,
       admission.sections,
       finalCompiledText,
     );
@@ -1847,7 +2632,7 @@ async function finalizeContextPack(
   finalPackId = await computePackId(
     env,
     input,
-    required.revisionPins,
+    effectivePins,
     admission.sections,
     finalCompiledText,
   );
@@ -1868,29 +2653,31 @@ export async function buildContext(
   const includeProvenance = input.options?.include_provenance ?? true;
   const includeCompiledText = input.options?.include_compiled_text ?? true;
 
-  // 1. Resolve and pin required selectors
-  const resolvedRequired = await resolveRequiredItems(env, tenant, input);
-
-  // 2. Prepare required state and sections
-  const requiredState = await prepareRequiredState(
-    env,
-    resolvedRequired,
-    includeProvenance,
-    deduplicate,
-  );
-
-  // 3. Early exit if required content alone exceeds budget
-  const earlyFailure = await requiredBudgetFailure(env, input, requiredState, includeCompiledText);
-  if (earlyFailure) {
-    return earlyFailure;
-  }
-
-  // 4. Request-local warning state
+  // 1. Request-local warning state
   const warningState: WarningState = {
     warnings: [],
     droppedCount: 0,
   };
 
+  // 2. Resolve and pin required selectors
+  const resolvedRequired = await resolveRequiredItems(env, tenant, input);
+
+  // 3. Prepare required state and sections (including deterministic pointer expansion)
+  const requiredState = await prepareRequiredState(
+    env,
+    tenant,
+    input,
+    resolvedRequired,
+    includeProvenance,
+    deduplicate,
+    warningState,
+  );
+
+  // 4. Early exit if required content alone exceeds budget
+  const earlyFailure = await requiredBudgetFailure(env, input, requiredState, includeCompiledText);
+  if (earlyFailure) {
+    return earlyFailure;
+  }
   // 5. Run retrieval and canonical expansion
   const retrievalState = await collectRetrievedCandidates(
     env,

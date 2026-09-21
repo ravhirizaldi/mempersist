@@ -168,15 +168,15 @@ See the [RP workflow and reviewable runtime-rule amendment](docs/rp-workflow.md)
 
 For prompt and task execution, `memory_build_context` compiles a deterministic, revision-pinned context pack
 from 1–20 required canonical conversations (exact title or conversation ID, full or tail mode,
-active or all branch) and up to 8 optional hybrid-search retrieval requests within caller-specified
-token and serialized-byte limits (at most 49,152 bytes / 48 KiB). It pins required current
-revisions before loading canonical bodies, deduplicates source messages structurally on
-`(conversation_id, revision_id, source_node_id)`, orders content deterministically by authority
-(required over retrieved), priority, score, and stable IDs, and greedily fits whole messages. If required
-content alone exceeds either budget, it returns a bounded diagnostic with suggested minimums without
-leaking canonical text. Context packs are extractive-only, include full message provenance and an
-optional deterministic compiled text projection, have a deterministic `pack_id`, and perform no writes
-or generative summarization.
+active or all branch, and optional `follow` pointer-expansion fields) and up to 8 optional hybrid-search retrieval
+requests within caller-specified token and serialized-byte limits (at most 49,152 bytes / 48 KiB). It pins required
+current revisions before loading canonical bodies, follows exact structured pointers (such as `current_scene` and
+`active_arc.owner`) deterministically without semantic fallback, deduplicates source messages structurally on
+`(conversation_id, revision_id, source_node_id)`, orders content deterministically by authority (explicit required,
+then required expanded, then optional expanded, then retrieved), priority, score, and stable IDs, and greedily fits
+whole messages. If required content alone exceeds either budget, it returns a bounded diagnostic with suggested minimums
+without leaking canonical text. Context packs are extractive-only, include full message provenance and an optional
+deterministic compiled text projection, have a deterministic `pack_id`, and perform no writes or generative summarization.
 
 ## Quality gate
 
