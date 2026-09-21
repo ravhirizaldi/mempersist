@@ -2,7 +2,74 @@ import { localeHeaders, messages, type Locale } from "./i18n";
 import { localizePageMarkup } from "./locales/pages-id";
 import { BASE_CSS, brand, FAVICON } from "./ui";
 import { SITE_CSS, SITE_SCRIPT } from "./site";
+import { PUBLIC_ORIGIN } from "./discovery";
 
+const SEO: Record<Locale, Record<string, { title: string; description: string }>> = {
+  en: {
+    "/": {
+      title: "MemPersist — Durable AI conversation memory",
+      description:
+        "MemPersist keeps AI conversation memory durable, searchable, and portable across ChatGPT, Codex, Claude Code, and MCP clients.",
+    },
+    "/whitepaper": {
+      title: "Whitepaper — Durable AI conversation memory",
+      description:
+        "Read the MemPersist whitepaper: a canonical, versioned, and rebuildable architecture for durable AI conversation memory.",
+    },
+    "/architecture": {
+      title: "Architecture — Cloudflare-native AI memory",
+      description:
+        "Explore MemPersist’s Cloudflare-native architecture for canonical conversation storage, rebuildable indexes, and OAuth-protected MCP.",
+    },
+    "/security": {
+      title: "Security — MemPersist",
+      description:
+        "Review MemPersist’s threat model, security controls, data boundaries, and recovery practices for sensitive AI conversation memory.",
+    },
+    "/adrs": {
+      title: "Architecture decision records — MemPersist",
+      description:
+        "Read MemPersist’s accepted architecture decisions covering storage, retrieval, OAuth, indexing, and operational safety.",
+    },
+    "/about": {
+      title: "About — MemPersist",
+      description:
+        "Learn about Ravhi Rizaldi, the engineer behind MemPersist and its durable AI conversation memory platform.",
+    },
+  },
+  id: {
+    "/": {
+      title: "MemPersist — Memori percakapan AI tahan lama",
+      description:
+        "MemPersist menjaga memori percakapan AI tetap tahan lama, mudah dicari, dan portabel di ChatGPT, Codex, Claude Code, serta klien MCP.",
+    },
+    "/whitepaper": {
+      title: "Makalah — Memori percakapan AI tahan lama",
+      description:
+        "Baca makalah MemPersist tentang arsitektur memori percakapan AI yang kanonis, berversi, dan dapat dibangun ulang.",
+    },
+    "/architecture": {
+      title: "Arsitektur — Memori AI Cloudflare-native",
+      description:
+        "Pelajari arsitektur Cloudflare-native MemPersist untuk penyimpanan percakapan kanonis, indeks yang dapat dibangun ulang, dan MCP OAuth.",
+    },
+    "/security": {
+      title: "Keamanan — MemPersist",
+      description:
+        "Tinjau model ancaman, kontrol keamanan, batas data, dan praktik pemulihan MemPersist untuk memori percakapan AI yang sensitif.",
+    },
+    "/adrs": {
+      title: "Keputusan arsitektur — MemPersist",
+      description:
+        "Baca keputusan arsitektur MemPersist tentang penyimpanan, pengambilan, OAuth, pengindeksan, dan keamanan operasional.",
+    },
+    "/about": {
+      title: "Tentang — MemPersist",
+      description:
+        "Kenali Ravhi Rizaldi, insinyur di balik MemPersist dan platform memori percakapan AI yang tahan lama.",
+    },
+  },
+};
 const MCP_ENDPOINT = "https://mempersist.codifiedtech.id/mcp";
 
 function escapeHtml(value: string): string {
@@ -15,6 +82,21 @@ function escapeHtml(value: string): string {
 
 function page(title: string, body: string, active: string, locale: Locale, intro = ""): string {
   const t = messages(locale);
+  const metadata = SEO[locale][active] ?? {
+    title: `${title} · MemPersist`,
+    description: t.shared.description,
+  };
+  const canonical = `${PUBLIC_ORIGIN}${active === "/" ? "/" : active}`;
+  const jsonLd = JSON.stringify({
+    "@context": "https://schema.org",
+    "@type": active === "/" ? "WebSite" : "WebPage",
+    name: metadata.title,
+    description: metadata.description,
+    url: canonical,
+    inLanguage: locale,
+    isPartOf: { "@type": "WebSite", name: "MemPersist", url: `${PUBLIC_ORIGIN}/` },
+    publisher: { "@type": "Person", name: "Ravhi Rizaldi", url: `${PUBLIC_ORIGIN}/about` },
+  }).replaceAll("<", "\\u003c");
   const navItems = [
     { href: "/", label: t.shared.home },
     { href: "/whitepaper", label: t.shared.whitepaper },
@@ -55,8 +137,23 @@ ${language}<a class="nav-sign-in" href="/login">${t.shared.signIn}</a><a class="
 </div></nav>`;
   const html = `<!doctype html>
 <html lang="${locale}"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<meta name="description" content="${t.shared.description}">
-<title>${escapeHtml(title)} · MemPersist</title>
+<meta name="description" content="${escapeHtml(metadata.description)}">
+<meta name="author" content="Ravhi Rizaldi">
+<meta name="robots" content="index,follow,max-image-preview:large">
+<meta name="theme-color" content="#f7f6f2">
+<link rel="canonical" href="${escapeHtml(canonical)}">
+<link rel="manifest" href="/site.webmanifest">
+<meta property="og:type" content="${active === "/" ? "website" : "article"}">
+<meta property="og:site_name" content="MemPersist">
+<meta property="og:title" content="${escapeHtml(metadata.title)}">
+<meta property="og:description" content="${escapeHtml(metadata.description)}">
+<meta property="og:url" content="${escapeHtml(canonical)}">
+<meta property="og:locale" content="${locale === "id" ? "id_ID" : "en_US"}">
+<meta name="twitter:card" content="summary">
+<meta name="twitter:title" content="${escapeHtml(metadata.title)}">
+<meta name="twitter:description" content="${escapeHtml(metadata.description)}">
+<script type="application/ld+json">${jsonLd}</script>
+<title>${escapeHtml(metadata.title)}</title>
 ${FAVICON}
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>

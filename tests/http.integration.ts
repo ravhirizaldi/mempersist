@@ -38,6 +38,37 @@ describe("HTTP security boundary", () => {
     }
   });
 
+  it("publishes SEO, crawler, and security metadata", async () => {
+    const appEnv = env as AppEnv;
+    const robots = await app.request("/robots.txt", {}, appEnv);
+    expect(robots.status).toBe(200);
+    expect(await robots.text()).toContain(
+      "Sitemap: https://mempersist.codifiedtech.id/sitemap.xml",
+    );
+    expect(robots.headers.get("cache-control")).toContain("public");
+
+    const sitemap = await app.request("/sitemap.xml", {}, appEnv);
+    expect(sitemap.status).toBe(200);
+    expect(sitemap.headers.get("content-type")).toContain("application/xml");
+    expect(await sitemap.text()).toContain("<loc>https://mempersist.codifiedtech.id/</loc>");
+
+    const security = await app.request("/.well-known/security.txt", {}, appEnv);
+    expect(security.status).toBe(200);
+    expect(await security.text()).toContain(
+      "Contact: https://github.com/ravhirizaldi/mempersist/security/advisories/new",
+    );
+
+    const manifest = await app.request("/site.webmanifest", {}, appEnv);
+    expect(manifest.status).toBe(200);
+    expect(manifest.headers.get("content-type")).toContain("application/manifest+json");
+
+    const landing = await app.request("/", {}, appEnv);
+    const html = await landing.text();
+    expect(html).toContain('<link rel="canonical" href="https://mempersist.codifiedtech.id/">');
+    expect(html).toContain('property="og:title"');
+    expect(html).toContain('type="application/ld+json"');
+  });
+
   it("negotiates Indonesian and allows a cookie preference to override it", async () => {
     const appEnv = env as AppEnv;
     const landing = await app.request("/", { headers: { "accept-language": "id-ID" } }, appEnv);

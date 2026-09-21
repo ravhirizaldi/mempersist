@@ -13,6 +13,11 @@ Deployment is a deliberate operator action.
 8. Run `yarn deploy`.
 9. Verify `/healthz`, authenticated `/readyz`, OAuth protected-resource and authorization-server metadata, MCP discovery with both OAuth and the developer token, both browser languages and the secure language switch, localized magic-link email for a new and existing email, `/login`, dashboard session/logout, an export, a small canonical write, indexing state, search, and context retrieval.
 
+Public discovery endpoints are served by the Worker and should remain reachable without
+authentication: `/robots.txt`, `/sitemap.xml`, `/.well-known/security.txt`, and
+`/site.webmanifest`. The sitemap lists only the public documentation routes; private dashboard,
+API, OAuth, MCP, and health routes are excluded from crawling.
+
 Migration 0009 adds hashed dashboard challenges/sessions, ownership for imports, and the separately
 leased deletion queue. After a rollback, follow the deletion-job re-enqueue procedure in
 [operations-and-recovery.md](operations-and-recovery.md); old Worker code will ignore those IDs

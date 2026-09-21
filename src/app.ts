@@ -30,6 +30,12 @@ import {
 import { completeMemoryWrite } from "./writes";
 import { searchMemory } from "./search";
 import { landingRoutes } from "./landing";
+import {
+  manifestResponse,
+  robotsResponse,
+  securityTxtResponse,
+  sitemapResponse,
+} from "./discovery";
 import { appendConversation, listConversations, writeCanonicalConversation } from "./storage";
 import {
   assertAccountWritable,
@@ -69,8 +75,8 @@ app.use("*", async (c, next) => {
   c.set("locale", resolveLocale(c.req.raw));
   await next();
   c.header("X-Request-Id", c.get("requestId"));
-  c.header("X-Content-Type-Options", "nosniff");
-  c.header("Cache-Control", "no-store");
+  if (!c.res.headers.has("X-Content-Type-Options")) c.header("X-Content-Type-Options", "nosniff");
+  if (!c.res.headers.has("Cache-Control")) c.header("Cache-Control", "no-store");
 });
 
 app.use("/api/*", async (c, next) => {
@@ -86,6 +92,10 @@ app.get("/readyz", async (c) => {
   await c.env.MEMORY_DB.prepare("SELECT 1 AS ready").first();
   return c.json({ status: "ready" });
 });
+app.get("/robots.txt", () => robotsResponse());
+app.get("/sitemap.xml", () => sitemapResponse());
+app.get("/.well-known/security.txt", () => securityTxtResponse());
+app.get("/site.webmanifest", () => manifestResponse());
 for (const [path, handler] of Object.entries(landingRoutes)) {
   app.get(path, (c) => handler(c.get("locale")));
 }
