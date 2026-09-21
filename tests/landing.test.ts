@@ -24,8 +24,9 @@ describe("Minimalist public pages", () => {
     expect(html).toContain(`href="${path}" aria-current="page"`);
     expect(html).toContain('aria-controls="nav-links"');
     expect(html).toContain(`/language/${locale === "en" ? "id" : "en"}?return_to=`);
-    expect(html).toContain("--canvas:#f7f6f2");
-    expect(html).toContain("prefers-reduced-motion:reduce");
+    expect(html).toContain('<link rel="stylesheet" href="/site.css">');
+    expect(html).toContain('<script src="/site.js" defer></script>');
+    expect(html).not.toContain("<style>");
     expect(html).not.toContain("cdn.jsdelivr.net");
     expect((html.match(/<h1[ >]/g) ?? []).length).toBe(1);
     expect((html.match(/<footer>/g) ?? []).length).toBe(1);
@@ -38,6 +39,7 @@ describe("Minimalist public pages", () => {
     expect(csp).toContain("frame-ancestors 'none'");
     expect(csp).toContain("font-src 'self'");
     expect(csp).toContain("manifest-src 'self'");
+    expect(csp).not.toContain("'unsafe-inline'");
     expect(response.headers.get("permissions-policy")).toBe(
       "camera=(), microphone=(), geolocation=()",
     );

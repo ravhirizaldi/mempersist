@@ -1,3 +1,6 @@
+import { SITE_CSS, SITE_SCRIPT } from "./site";
+import { BASE_CSS } from "./ui";
+
 export const PUBLIC_ORIGIN = "https://mempersist.codifiedtech.id";
 
 export const PUBLIC_PATHS = [
@@ -19,6 +22,13 @@ function textResponse(body: string, contentType: string): Response {
       "X-Content-Type-Options": "nosniff",
     },
   });
+}
+export function siteCssResponse(): Response {
+  return textResponse(`${BASE_CSS}${SITE_CSS}`, "text/css; charset=UTF-8");
+}
+
+export function siteScriptResponse(): Response {
+  return textResponse(SITE_SCRIPT, "application/javascript; charset=UTF-8");
 }
 export function llmsTxtResponse(): Response {
   return textResponse(

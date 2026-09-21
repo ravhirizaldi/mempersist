@@ -1,7 +1,6 @@
 import { localeHeaders, messages, type Locale } from "./i18n";
 import { localizePageMarkup } from "./locales/pages-id";
-import { BASE_CSS, brand, FAVICON } from "./ui";
-import { SITE_CSS, SITE_SCRIPT } from "./site";
+import { brand, FAVICON } from "./ui";
 import { PUBLIC_ORIGIN } from "./discovery";
 
 const SEO: Record<Locale, Record<string, { title: string; description: string }>> = {
@@ -157,14 +156,14 @@ ${language}<a class="nav-sign-in" href="/login">${t.shared.signIn}</a><a class="
 ${FAVICON}
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-<link href="https://fonts.googleapis.com/css2?family=Outfit:wght@400;500;600&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
-<style>${BASE_CSS}${SITE_CSS}</style></head>
+<link href="https://fonts.googleapis.com/css2?family=Outfit:wght@400;500;600&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="/site.css"></head>
 <body data-copied="${t.runtime.copied}" data-copy-success="${t.runtime.copiedFeedback}" data-copy-failed="${t.runtime.copyFailed}" data-decision-count="${t.runtime.decisionCount}"><a class="skip-link" href="#main-content">${t.shared.skip}</a>${nav}
 <main id="main-content" class="wrap${active === "/" ? " home" : ""}" tabindex="-1">
 <div class="page-meta"><span>${t.shared.memoryContext}</span><span>${active === "/" ? t.shared.ownArchive : `<a href="/">${t.shared.home}</a> / ${escapeHtml(navItems.find((item) => item.href === active)?.label ?? title)}`}</span></div>
 ${intro}<div class="reading-layout">${toc}<div class="document">${content}</div></div>
 <footer><span>MemPersist · ${t.shared.durable}</span><div class="footer-links"><a href="/security">${t.shared.privacy}</a><a href="/about">${t.shared.creator}</a><a href="#main-content">${t.shared.backTop} ↑</a></div></footer>
-</main><script>${SITE_SCRIPT}</script>
+</main><script src="/site.js" defer></script>
 </body></html>`;
   return localizePageMarkup(locale, html);
 }
@@ -730,7 +729,7 @@ function respond(html: string, locale: Locale): Response {
       "cross-origin-opener-policy": "same-origin",
       "x-content-type-options": "nosniff",
       "content-security-policy":
-        "default-src 'none'; script-src 'self' 'unsafe-inline' https://static.cloudflareinsights.com; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src 'self' https://fonts.gstatic.com; connect-src 'self' https://cloudflareinsights.com https://static.cloudflareinsights.com; manifest-src 'self'; img-src data:; base-uri 'none'; form-action 'self'; frame-ancestors 'none'",
+        "default-src 'none'; script-src 'self' https://static.cloudflareinsights.com; style-src 'self' https://fonts.googleapis.com; font-src 'self' https://fonts.gstatic.com; connect-src 'self' https://cloudflareinsights.com https://static.cloudflareinsights.com; manifest-src 'self'; img-src data:; base-uri 'none'; form-action 'self'; frame-ancestors 'none'",
       "permissions-policy": "camera=(), microphone=(), geolocation=()",
       "referrer-policy": "no-referrer",
       ...localeHeaders(locale),

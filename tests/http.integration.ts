@@ -69,6 +69,15 @@ describe("HTTP security boundary", () => {
     expect(llmsBody).toContain("# MemPersist");
     expect(llmsBody).toContain("- [Whitepaper](https://mempersist.codifiedtech.id/whitepaper)");
 
+    const siteCss = await app.request("/site.css", {}, appEnv);
+    expect(siteCss.status).toBe(200);
+    expect(siteCss.headers.get("content-type")).toContain("text/css");
+    expect(await siteCss.text()).toContain(".site-nav");
+
+    const siteJs = await app.request("/site.js", {}, appEnv);
+    expect(siteJs.status).toBe(200);
+    expect(siteJs.headers.get("content-type")).toContain("application/javascript");
+    expect(await siteJs.text()).toContain("navigator.clipboard");
     const landing = await app.request("/", {}, appEnv);
     const html = await landing.text();
     expect(html).toContain('<link rel="canonical" href="https://mempersist.codifiedtech.id/">');

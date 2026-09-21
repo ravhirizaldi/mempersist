@@ -35,6 +35,8 @@ import {
   manifestResponse,
   robotsResponse,
   securityTxtResponse,
+  siteCssResponse,
+  siteScriptResponse,
   sitemapResponse,
 } from "./discovery";
 import { appendConversation, listConversations, writeCanonicalConversation } from "./storage";
@@ -98,6 +100,8 @@ app.get("/sitemap.xml", () => sitemapResponse());
 app.get("/.well-known/security.txt", () => securityTxtResponse());
 app.get("/site.webmanifest", () => manifestResponse());
 app.get("/llms.txt", () => llmsTxtResponse());
+app.get("/site.css", () => siteCssResponse());
+app.get("/site.js", () => siteScriptResponse());
 for (const [path, handler] of Object.entries(landingRoutes)) {
   app.get(path, (c) => handler(c.get("locale")));
 }
