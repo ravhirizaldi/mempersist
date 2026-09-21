@@ -125,7 +125,7 @@ function page(title: string, body: string, active: string, locale: Locale, intro
     : `<aside class="toc"><p>${t.shared.projectNotes}</p><a href="/architecture">${t.shared.readArchitecture}</a><a href="/whitepaper">${t.shared.readWhitepaper}</a></aside>`;
   const language = `<nav class="language-switch" aria-label="${t.shared.language}"><a href="/language/en?return_to=${encodeURIComponent(active)}" lang="en"${locale === "en" ? ' aria-current="true"' : ""}>EN</a><span aria-hidden="true">/</span><a href="/language/id?return_to=${encodeURIComponent(active)}" lang="id"${locale === "id" ? ' aria-current="true"' : ""}>ID</a></nav>`;
   const nav = `<nav class="site-nav" aria-label="${t.shared.mainNav}"><div class="nav">
-${brand(t.shared.homeLabel)}
+${brand()}
 <button type="button" class="nav-toggle" aria-controls="nav-links" aria-expanded="false" aria-label="${t.shared.menu}" hidden><span class="hamburger" aria-hidden="true"></span><span class="sr-only">${t.shared.menu}</span></button>
 <div class="nav-links" id="nav-links">${navItems
     .map(
@@ -170,7 +170,7 @@ ${intro}<div class="reading-layout">${toc}<div class="document">${content}</div>
 }
 
 function codeBlock(id: string, label: string, code: string): string {
-  return `<div class="code-block"><div class="code-heading"><span>${escapeHtml(label)}</span><button class="copy-button" type="button" data-copy="${id}" aria-label="Copy ${escapeHtml(label)}" hidden>Copy</button></div><pre class="code" tabindex="0"><code id="${id}">${escapeHtml(code)}</code></pre></div>`;
+  return `<div class="code-block"><div class="code-heading"><span>${escapeHtml(label)}</span><button class="copy-button" type="button" data-copy="${id}" hidden>Copy</button></div><pre class="code" tabindex="0"><code id="${id}">${escapeHtml(code)}</code></pre></div>`;
 }
 
 export function landingPage(locale: Locale = "en"): Response {
@@ -196,7 +196,7 @@ export function landingPage(locale: Locale = "en"): Response {
       <div class="preview-bottom"><span>Original context. Not invented history.</span><span>01 — 03</span></div>
     </section>
   </header>
-  <div class="endpoint" id="connect"><span class="endpoint-label">YOUR MCP ENDPOINT</span><code id="mcp-endpoint">${escapeHtml(MCP_ENDPOINT)}</code><button class="copy-button" type="button" data-copy="mcp-endpoint" aria-label="Copy MCP endpoint" hidden>Copy endpoint</button></div>
+  <div class="endpoint" id="connect"><span class="endpoint-label">YOUR MCP ENDPOINT</span><code id="mcp-endpoint">${escapeHtml(MCP_ENDPOINT)}</code><button class="copy-button" type="button" data-copy="mcp-endpoint" hidden>Copy endpoint</button></div>
   <p class="copy-feedback" id="copy-feedback" role="status" aria-live="polite"></p>
   <section class="auth-panel">
     <div>
@@ -726,6 +726,8 @@ function respond(html: string, locale: Locale): Response {
     headers: {
       "content-type": "text/html; charset=UTF-8",
       "cache-control": "no-store",
+      "strict-transport-security": "max-age=31536000; includeSubDomains",
+      "cross-origin-opener-policy": "same-origin",
       "x-content-type-options": "nosniff",
       "content-security-policy":
         "default-src 'none'; script-src 'self' 'unsafe-inline' https://static.cloudflareinsights.com; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src 'self' https://fonts.gstatic.com; connect-src 'self' https://cloudflareinsights.com https://static.cloudflareinsights.com; manifest-src 'self'; img-src data:; base-uri 'none'; form-action 'self'; frame-ancestors 'none'",

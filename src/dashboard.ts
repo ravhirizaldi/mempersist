@@ -235,6 +235,8 @@ function htmlHeaders(locale: Locale, value: string): HeadersInit {
     "Content-Type": "text/html; charset=UTF-8",
     "Permissions-Policy": "camera=(), microphone=(), geolocation=()",
     "Referrer-Policy": "same-origin",
+    "Strict-Transport-Security": "max-age=31536000; includeSubDomains",
+    "Cross-Origin-Opener-Policy": "same-origin",
     "X-Content-Type-Options": "nosniff",
     "X-Frame-Options": "DENY",
     Vary: "Accept-Language, Cookie",
@@ -259,8 +261,8 @@ function page(
     pathname.startsWith("/dashboard/conversations/");
   const mapCurrent = pathname === "/dashboard/mindmap";
   const nav = options.session
-    ? `<nav class="dashboard-nav" aria-label="${messages(locale).shared.mainNav}">${brand(messages(locale).shared.homeLabel)}<details class="dashboard-menu"><summary class="nav-toggle" aria-haspopup="true"><span class="hamburger" aria-hidden="true"></span><span class="sr-only">${messages(locale).shared.menu}</span></summary><div class="nav-panel"><a href="/dashboard"${dashboardCurrent ? ' aria-current="page"' : ""}>${t.dashboard}</a><a href="/dashboard/mindmap"${mapCurrent ? ' aria-current="page"' : ""}>${t.memoryMap}</a><a href="/dashboard/export">${t.export}</a>${language}<form method="post" action="/logout"><input type="hidden" name="csrf" value="${options.session.csrf}"><button class="link-button" type="submit">${t.logout}</button></form></div></details></nav>`
-    : `<nav class="dashboard-nav">${brand(messages(locale).shared.homeLabel)}<div>${language}</div></nav>`;
+    ? `<nav class="dashboard-nav" aria-label="${messages(locale).shared.mainNav}">${brand()}<details class="dashboard-menu"><summary class="nav-toggle" aria-haspopup="true"><span class="hamburger" aria-hidden="true"></span><span class="sr-only">${messages(locale).shared.menu}</span></summary><div class="nav-panel"><a href="/dashboard"${dashboardCurrent ? ' aria-current="page"' : ""}>${t.dashboard}</a><a href="/dashboard/mindmap"${mapCurrent ? ' aria-current="page"' : ""}>${t.memoryMap}</a><a href="/dashboard/export">${t.export}</a>${language}<form method="post" action="/logout"><input type="hidden" name="csrf" value="${options.session.csrf}"><button class="link-button" type="submit">${t.logout}</button></form></div></details></nav>`
+    : `<nav class="dashboard-nav">${brand()}<div>${language}</div></nav>`;
   return new Response(
     `<!doctype html><html lang="${locale}"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>${escapeHtml(title)} · MemPersist</title>${FAVICON}<link rel="preconnect" href="https://fonts.googleapis.com"><link rel="preconnect" href="https://fonts.gstatic.com" crossorigin><link href="https://fonts.googleapis.com/css2?family=Outfit:wght@400;500;600&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet"><style nonce="${n}">${BASE_CSS}${DASHBOARD_CSS}</style></head><body><a class="skip-link" href="#main">${messages(locale).shared.skip}</a>${nav}<main id="main" class="dashboard-shell" tabindex="-1">${body}</main>${options.session ? `<script nonce="${n}">${DASHBOARD_MENU_SCRIPT}</script>` : ""}${options.script ? `<script nonce="${n}">${options.script}</script>` : ""}</body></html>`,
     {

@@ -80,6 +80,10 @@ async function signIn(appEnv: AppEnv, sent: SentEmail[], email: string, returnTo
     appEnv,
   );
   const html = await dashboard.text();
+  expect(dashboard.headers.get("strict-transport-security")).toBe(
+    "max-age=31536000; includeSubDomains",
+  );
+  expect(dashboard.headers.get("cross-origin-opener-policy")).toBe("same-origin");
   const csrf = html.match(/name="csrf" value="([^"]+)"/)?.[1];
   expect(csrf).toBeTruthy();
   return { cookie, csrf: csrf!, link: link! };

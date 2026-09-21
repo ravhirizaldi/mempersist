@@ -33,6 +33,8 @@ const SECURITY_HEADERS = {
     "default-src 'none'; style-src 'unsafe-inline'; img-src data:; base-uri 'none'; form-action 'self'; frame-ancestors 'none'",
   "Permissions-Policy": "camera=(), microphone=(), geolocation=()",
   "Referrer-Policy": "no-referrer",
+  "Strict-Transport-Security": "max-age=31536000; includeSubDomains",
+  "Cross-Origin-Opener-Policy": "same-origin",
   "X-Content-Type-Options": "nosniff",
   "X-Frame-Options": "DENY",
 } as const;
@@ -101,7 +103,7 @@ function authorizationError(error: AuthorizationError, locale: Locale): Response
 function statusPage(title: string, message: string, status: number, locale: Locale): Response {
   const t = messages(locale);
   return new Response(
-    `<!doctype html><html lang="${locale}"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>${escapeHtml(title)} · MemPersist</title>${FAVICON}<style>${BASE_CSS}${PAGE_CSS}</style></head><body><main class="status">${brand(t.shared.homeLabel)}<section class="status-card" aria-labelledby="status-title"><div class="status-symbol" aria-hidden="true">${status < 400 ? "↗" : "!"}</div><p class="eyebrow">${status < 400 ? t.oauth.statusPending : t.oauth.statusError}</p><h1 id="status-title">${escapeHtml(title)}</h1><p>${escapeHtml(message)}</p><p class="status-help">${status < 400 ? t.oauth.pendingHelp : t.oauth.errorHelp}</p><a class="button secondary" href="/">${t.oauth.back} <span aria-hidden="true">↗</span></a></section><p class="auth-footer">${t.oauth.archiveYours}</p></main></body></html>`,
+    `<!doctype html><html lang="${locale}"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>${escapeHtml(title)} · MemPersist</title>${FAVICON}<style>${BASE_CSS}${PAGE_CSS}</style></head><body><main class="status">${brand()}<section class="status-card" aria-labelledby="status-title"><div class="status-symbol" aria-hidden="true">${status < 400 ? "↗" : "!"}</div><p class="eyebrow">${status < 400 ? t.oauth.statusPending : t.oauth.statusError}</p><h1 id="status-title">${escapeHtml(title)}</h1><p>${escapeHtml(message)}</p><p class="status-help">${status < 400 ? t.oauth.pendingHelp : t.oauth.errorHelp}</p><a class="button secondary" href="/">${t.oauth.back} <span aria-hidden="true">↗</span></a></section></main></body></html>`,
     {
       status,
       headers: {
@@ -144,7 +146,7 @@ function consentPage(
 <body>
   <main class="shell">
     <section class="panel" aria-labelledby="page-title">
-      <div class="auth-brand">${brand(t.shared.homeLabel)}<div>${language}<span class="badge">${t.oauth.privateConnection}</span></div></div>
+      <div class="auth-brand">${brand()}<div>${language}<span class="badge">${t.oauth.privateConnection}</span></div></div>
       <div class="panel-heading">
         <p class="eyebrow">${t.oauth.contextConnected}</p>
         <h1 id="page-title">${t.oauth.approve}</h1>

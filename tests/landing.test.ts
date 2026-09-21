@@ -41,6 +41,11 @@ describe("Minimalist public pages", () => {
     expect(response.headers.get("permissions-policy")).toBe(
       "camera=(), microphone=(), geolocation=()",
     );
+    expect(response.headers.get("strict-transport-security")).toBe(
+      "max-age=31536000; includeSubDomains",
+    );
+    expect(response.headers.get("cross-origin-opener-policy")).toBe("same-origin");
+    expect(html).not.toMatch(/class="(?:brand|copy-button)"[^>]*aria-label=/u);
     expect(csp).not.toContain("cdn.jsdelivr.net");
   });
 
@@ -49,7 +54,7 @@ describe("Minimalist public pages", () => {
     expect(html).toContain("Custom MCP app");
     expect(html).toContain("codex mcp login mempersist");
     expect(html).toContain("claude mcp add --transport http mempersist");
-    expect(html).toContain('data-copy="mcp-endpoint" aria-label="Copy MCP endpoint" hidden');
+    expect(html).toContain('data-copy="mcp-endpoint" hidden>Copy endpoint</button>');
     expect(html).toContain('id="copy-feedback" role="status"');
     expect(html).toContain('id="example-save" data-example>');
     expect(html).toContain('id="example-find" data-example>');

@@ -249,6 +249,10 @@ describe("OAuth authorization consent", () => {
     expect(html).toContain("start a new connection request");
     expect(html).not.toContain("<script");
     expect(response.headers.get("content-security-policy")).toContain("default-src 'none'");
+    expect(response.headers.get("strict-transport-security")).toBe(
+      "max-age=31536000; includeSubDomains",
+    );
+    expect(response.headers.get("cross-origin-opener-policy")).toBe("same-origin");
   });
 
   it("sends a sign-in link for an existing user and completes authorization once", async () => {

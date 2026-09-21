@@ -33,15 +33,8 @@ code,kbd{font-family:var(--mono);font-size:.85em;overflow-wrap:anywhere}
 @media(prefers-reduced-motion:reduce){html{scroll-behavior:auto}*,*::before,*::after{animation:none!important;transition:none!important}}
 `;
 
-function escapeAttribute(value: string): string {
-  return value.replace(
-    /[&<>"]/g,
-    (character) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" })[character]!,
-  );
-}
-
-export function brand(homeLabel: string): string {
-  return `<a class="brand" href="/" aria-label="${escapeAttribute(homeLabel)}"><span class="mark" aria-hidden="true">m</span><span class="wordmark">MemPersist</span></a>`;
+export function brand(): string {
+  return `<a class="brand" href="/"><span class="mark" aria-hidden="true">m</span><span class="wordmark">MemPersist</span></a>`;
 }
 
 export const FAVICON = `<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 40 40'%3E%3Crect width='40' height='40' rx='8' fill='%23282a25'/%3E%3Ctext x='9' y='28' font-family='monospace' font-size='28' fill='%23f7f6f2'%3Em%3C/text%3E%3C/svg%3E">`;
