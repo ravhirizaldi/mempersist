@@ -138,6 +138,7 @@ ${language}<a class="nav-sign-in" href="/login">${t.shared.signIn}</a><a class="
 <html lang="${locale}"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <meta name="description" content="${escapeHtml(metadata.description)}">
 <meta name="author" content="Ravhi Rizaldi">
+<meta name="google-site-verification" content="mwzJlCt4rJwkhbnmNF0EDUELm14CZzPYQhI-YtcX_sA">
 <meta name="robots" content="index,follow,max-image-preview:large">
 <meta name="theme-color" content="#f7f6f2">
 <link rel="canonical" href="${escapeHtml(canonical)}">
