@@ -27,6 +27,9 @@ describe("Minimalist public pages", () => {
     expect(html).toContain(
       '<meta name="google-site-verification" content="mwzJlCt4rJwkhbnmNF0EDUELm14CZzPYQhI-YtcX_sA">',
     );
+    expect(html).toContain(
+      "https://fonts.googleapis.com/css2?family=Outfit:wght@400;500;600&display=optional",
+    );
     expect(html).toContain('<link rel="stylesheet" href="/site.css">');
     expect(html).toContain('<script src="/site.js" defer></script>');
     expect(html).not.toContain("<style>");

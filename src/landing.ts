@@ -157,7 +157,7 @@ ${language}<a class="nav-sign-in" href="/login">${t.shared.signIn}</a><a class="
 ${FAVICON}
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-<link href="https://fonts.googleapis.com/css2?family=Outfit:wght@400;500;600&display=swap" rel="stylesheet">
+<link href="https://fonts.googleapis.com/css2?family=Outfit:wght@400;500;600&display=optional" rel="stylesheet">
 <link rel="stylesheet" href="/site.css"></head>
 <body data-copied="${t.runtime.copied}" data-copy-success="${t.runtime.copiedFeedback}" data-copy-failed="${t.runtime.copyFailed}" data-decision-count="${t.runtime.decisionCount}"><a class="skip-link" href="#main-content">${t.shared.skip}</a>${nav}
 <main id="main-content" class="wrap${active === "/" ? " home" : ""}" tabindex="-1">
