@@ -20,6 +20,32 @@ function textResponse(body: string, contentType: string): Response {
     },
   });
 }
+export function llmsTxtResponse(): Response {
+  return textResponse(
+    [
+      "# MemPersist",
+      "",
+      "> Durable, searchable, and portable AI conversation memory for ChatGPT, Codex, Claude Code, and MCP clients.",
+      "",
+      "MemPersist preserves original conversations in canonical, versioned revisions and rebuilds disposable search indexes from them. It is single-user developer software with OAuth-protected MCP access.",
+      "",
+      "## Documentation",
+      "",
+      `- [Whitepaper](${PUBLIC_ORIGIN}/whitepaper): canonical storage, revisioning, retrieval, and rebuildable indexing.`,
+      `- [Architecture](${PUBLIC_ORIGIN}/architecture): Cloudflare-native request, storage, queue, and indexing flow.`,
+      `- [Security](${PUBLIC_ORIGIN}/security): threat model, security controls, data boundaries, and recovery practices.`,
+      `- [Architecture decision records](${PUBLIC_ORIGIN}/adrs): accepted decisions covering storage, retrieval, OAuth, and indexing.`,
+      `- [About](${PUBLIC_ORIGIN}/about): project background and maintainer.`,
+      "",
+      "## Integrations",
+      "",
+      `- [MemPersist homepage](${PUBLIC_ORIGIN}/): MCP endpoint setup for ChatGPT, Codex CLI, Claude Code, and other MCP clients.`,
+      `- [MCP endpoint](${PUBLIC_ORIGIN}/mcp): authenticated Model Context Protocol endpoint.`,
+      "",
+    ].join("\n"),
+    "text/plain; charset=UTF-8",
+  );
+}
 
 export function robotsResponse(): Response {
   return textResponse(

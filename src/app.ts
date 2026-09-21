@@ -31,6 +31,7 @@ import { completeMemoryWrite } from "./writes";
 import { searchMemory } from "./search";
 import { landingRoutes } from "./landing";
 import {
+  llmsTxtResponse,
   manifestResponse,
   robotsResponse,
   securityTxtResponse,
@@ -96,6 +97,7 @@ app.get("/robots.txt", () => robotsResponse());
 app.get("/sitemap.xml", () => sitemapResponse());
 app.get("/.well-known/security.txt", () => securityTxtResponse());
 app.get("/site.webmanifest", () => manifestResponse());
+app.get("/llms.txt", () => llmsTxtResponse());
 for (const [path, handler] of Object.entries(landingRoutes)) {
   app.get(path, (c) => handler(c.get("locale")));
 }

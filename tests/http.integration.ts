@@ -62,6 +62,13 @@ describe("HTTP security boundary", () => {
     expect(manifest.status).toBe(200);
     expect(manifest.headers.get("content-type")).toContain("application/manifest+json");
 
+    const llms = await app.request("/llms.txt", {}, appEnv);
+    expect(llms.status).toBe(200);
+    expect(llms.headers.get("content-type")).toContain("text/plain");
+    const llmsBody = await llms.text();
+    expect(llmsBody).toContain("# MemPersist");
+    expect(llmsBody).toContain("- [Whitepaper](https://mempersist.codifiedtech.id/whitepaper)");
+
     const landing = await app.request("/", {}, appEnv);
     const html = await landing.text();
     expect(html).toContain('<link rel="canonical" href="https://mempersist.codifiedtech.id/">');
