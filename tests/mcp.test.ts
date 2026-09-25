@@ -246,7 +246,7 @@ describe("MCP server", () => {
     const client = await connectedClient();
     const namespace = await client.callTool({
       name: "memory_empty_namespace",
-      arguments: { namespace: "astara_alt", confirm_namespace: "astara-alt" },
+      arguments: { namespace: "team_notes", confirm_namespace: "team-notes" },
     });
     const emptyNamespace = await client.callTool({
       name: "memory_empty_namespace",
@@ -618,7 +618,7 @@ describe("MCP server", () => {
 
   it("accepts the issue sample shape for memory_build_context", () => {
     const sampleInput = {
-      namespace: "astara_alt_v2",
+      namespace: "shared-ns",
       task: "Continue the current scene after xxx reviews her resignation letter",
       required: [
         {
@@ -674,14 +674,14 @@ describe("MCP server", () => {
     const sampleOutput = {
       status: "complete",
       pack_id: "test-pack-id",
-      namespace: "astara_alt_v2",
+      namespace: "shared-ns",
       task: "Continue the current scene after xxx reviews her resignation letter",
       revision_pins: [
         {
           conversation_id: crypto.randomUUID(),
           revision_id: "a".repeat(64),
           title: "CURRENT",
-          namespace: "astara_alt_v2",
+          namespace: "shared-ns",
         },
       ],
       sections: [

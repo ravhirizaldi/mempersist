@@ -4,9 +4,9 @@ Mempersist uses the official MCP TypeScript SDK v2 and Cloudflare Agents `create
 
 Primary endpoint: `https://mempersist.codifiedtech.id/mcp`. Browser CORS is disabled. The server caps serialized tool output at 64 KiB and asks callers to narrow pages rather than returning broken/truncated JSON.
 
-The legacy endpoint `https://mempersist.nextostaging.net/mcp` remains active for existing
-connections. Leave those clients unchanged to avoid reauthorization; moving one client to the
-primary endpoint requires one new authorization for that client.
+The legacy endpoint remains active for existing connections. Leave those clients unchanged to
+avoid reauthorization; moving one client to the primary endpoint requires one new authorization
+for that client.
 
 ## Authentication
 
@@ -15,7 +15,7 @@ primary endpoint requires one new authorization for that client.
 - The consent page asks for an email and offers one `Continue with email` action.
   MemPersist sends a single-use, 15-minute magic link through Cloudflare Email Service. An
   existing email reconnects to its archive; a new user is created only after opening the link.
-  The existing owner archive is bound to `vhie1046@gmail.com`.
+  The pre-existing owner archive is bound to the address seeded by migration 0005.
 - Consent, status pages, and email are available in English and Bahasa Indonesia. The selected
   browser language is carried in the application-owned magic link; OAuth protocol fields and MCP
   contracts remain English.
@@ -522,7 +522,7 @@ Input: `requests` (array of 1–20 objects):
   "requests": [
     {
       "title": "CURRENT",
-      "namespace": "astara_alt_v2",
+      "namespace": "project/example",
       "tags": ["state"],
       "tag_mode": "all"
     }
@@ -548,7 +548,7 @@ Output:
           "conversation_id": "<conversation-id>",
           "revision_id": "<current-revision-id>",
           "title": "CURRENT",
-          "namespace": "astara_alt_v2",
+          "namespace": "project/example",
           "tags": ["state"],
           "updated_at": "2026-09-17T00:00:00.000Z"
         }
@@ -586,7 +586,7 @@ facts, never arbitrates canon, never persists context packs, and never writes to
 
 ```json
 {
-  "namespace": "astara_alt_v2",
+  "namespace": "project/example",
   "task": "Continue the current scene after xxx reviews her resignation letter",
   "required": [
     {
@@ -610,7 +610,7 @@ facts, never arbitrates canon, never persists context packs, and never writes to
   "retrieve": [
     {
       "query": "xxx agency resignation letter Mia professional responsibility",
-      "namespace": "astara_alt_v2",
+      "namespace": "project/example",
       "tags": ["rp"],
       "tag_mode": "all",
       "limit": 8,
@@ -680,14 +680,14 @@ facts, never arbitrates canon, never persists context packs, and never writes to
 {
   "status": "complete",
   "pack_id": "<deterministic-pack-id>",
-  "namespace": "astara_alt_v2",
+  "namespace": "project/example",
   "task": "Continue the current scene after xxx reviews her resignation letter",
   "revision_pins": [
     {
       "conversation_id": "0191f6e0-1234-7000-8000-000000000001",
       "revision_id": "<revision-id>",
       "title": "CURRENT",
-      "namespace": "astara_alt_v2"
+      "namespace": "project/example"
     }
   ],
   "sections": [

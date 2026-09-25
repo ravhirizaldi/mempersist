@@ -58,8 +58,8 @@ async function connectedClient(tenant: Tenant) {
 }
 
 async function ownerClient() {
-  await grantNamespace(env, OWNER_DB_USER_ID, "astara_alt_v2");
-  await grantNamespace(env, OWNER_DB_USER_ID, "astara_alt_v3");
+  await grantNamespace(env, OWNER_DB_USER_ID, "shared-ns");
+  await grantNamespace(env, OWNER_DB_USER_ID, "sibling-ns");
   return await connectedClient(await resolveTenant(env, { userId: "owner" }));
 }
 
@@ -155,7 +155,7 @@ describe("memory_resolve_conversations integration", () => {
     const client = await ownerClient();
     const seeded = await seedConversation({
       title: "CURRENT",
-      namespace: "astara_alt_v2",
+      namespace: "shared-ns",
       userId: OWNER_DB_USER_ID,
       tags: ["state", "rp"],
     });
@@ -163,7 +163,7 @@ describe("memory_resolve_conversations integration", () => {
     const result = await resolveConversationsTool(client, [
       {
         title: "CURRENT",
-        namespace: "astara_alt_v2",
+        namespace: "shared-ns",
       },
     ]);
 
@@ -177,7 +177,7 @@ describe("memory_resolve_conversations integration", () => {
       conversation_id: seeded.conversationId,
       revision_id: seeded.revisionId,
       title: "CURRENT",
-      namespace: "astara_alt_v2",
+      namespace: "shared-ns",
     });
     expect(item.matches[0]!.tags.sort()).toEqual(["rp", "state"]);
   });
@@ -186,14 +186,14 @@ describe("memory_resolve_conversations integration", () => {
     const client = await ownerClient();
     await seedConversation({
       title: "CURRENT_SCENE",
-      namespace: "astara_alt_v2",
+      namespace: "shared-ns",
       userId: OWNER_DB_USER_ID,
     });
 
     const result = await resolveConversationsTool(client, [
-      { title: "current_scene", namespace: "astara_alt_v2" },
-      { title: "Current_Scene", namespace: "astara_alt_v2" },
-      { title: "CURRENT_SCENE", namespace: "astara_alt_v2" },
+      { title: "current_scene", namespace: "shared-ns" },
+      { title: "Current_Scene", namespace: "shared-ns" },
+      { title: "CURRENT_SCENE", namespace: "shared-ns" },
     ]);
 
     expect(result.results[0]!.status).toBe("not_found");
@@ -211,12 +211,12 @@ describe("memory_resolve_conversations integration", () => {
     const unicodeTitle = "シーン_CURRENT · Adriana’s Resignation № 42 ✨";
     const seeded = await seedConversation({
       title: unicodeTitle,
-      namespace: "astara_alt_v2",
+      namespace: "shared-ns",
       userId: OWNER_DB_USER_ID,
     });
 
     const result = await resolveConversationsTool(client, [
-      { title: unicodeTitle, namespace: "astara_alt_v2" },
+      { title: unicodeTitle, namespace: "shared-ns" },
     ]);
 
     expect(result.results[0]!.status).toBe("ok");
@@ -227,17 +227,17 @@ describe("memory_resolve_conversations integration", () => {
     const client = await ownerClient();
     const c1 = await seedConversation({
       title: "DUPLICATE_OWNER",
-      namespace: "astara_alt_v2",
+      namespace: "shared-ns",
       userId: OWNER_DB_USER_ID,
     });
     const c2 = await seedConversation({
       title: "DUPLICATE_OWNER",
-      namespace: "astara_alt_v2",
+      namespace: "shared-ns",
       userId: OWNER_DB_USER_ID,
     });
 
     const result = await resolveConversationsTool(client, [
-      { title: "DUPLICATE_OWNER", namespace: "astara_alt_v2" },
+      { title: "DUPLICATE_OWNER", namespace: "shared-ns" },
     ]);
 
     expect(result.results[0]!.status).toBe("ambiguous");
@@ -252,13 +252,13 @@ describe("memory_resolve_conversations integration", () => {
     const uniqueTitle = `TAG_TEST_${crypto.randomUUID()}`;
     const c1 = await seedConversation({
       title: uniqueTitle,
-      namespace: "astara_alt_v2",
+      namespace: "shared-ns",
       userId: OWNER_DB_USER_ID,
       tags: ["state", "rp"],
     });
     const c2 = await seedConversation({
       title: uniqueTitle,
-      namespace: "astara_alt_v2",
+      namespace: "shared-ns",
       userId: OWNER_DB_USER_ID,
       tags: ["state", "archive"],
     });
@@ -267,7 +267,7 @@ describe("memory_resolve_conversations integration", () => {
     const resAll = await resolveConversationsTool(client, [
       {
         title: uniqueTitle,
-        namespace: "astara_alt_v2",
+        namespace: "shared-ns",
         tags: ["state", "rp"],
         tag_mode: "all",
       },
@@ -279,7 +279,7 @@ describe("memory_resolve_conversations integration", () => {
     const resAny = await resolveConversationsTool(client, [
       {
         title: uniqueTitle,
-        namespace: "astara_alt_v2",
+        namespace: "shared-ns",
         tags: ["rp", "archive"],
         tag_mode: "any",
       },
@@ -294,7 +294,7 @@ describe("memory_resolve_conversations integration", () => {
     const resNone = await resolveConversationsTool(client, [
       {
         title: uniqueTitle,
-        namespace: "astara_alt_v2",
+        namespace: "shared-ns",
         tags: ["missing_tag"],
       },
     ]);
@@ -307,7 +307,7 @@ describe("memory_resolve_conversations integration", () => {
     const crossTitle = `CROSS_NS_${crypto.randomUUID()}`;
     const inV3 = await seedConversation({
       title: crossTitle,
-      namespace: "astara_alt_v3",
+      namespace: "sibling-ns",
       userId: OWNER_DB_USER_ID,
     });
 
@@ -315,7 +315,7 @@ describe("memory_resolve_conversations integration", () => {
 
     expect(result.results[0]!.status).toBe("ok");
     expect(result.results[0]!.matches[0]!.conversation_id).toBe(inV3.conversationId);
-    expect(result.results[0]!.matches[0]!.namespace).toBe("astara_alt_v3");
+    expect(result.results[0]!.matches[0]!.namespace).toBe("sibling-ns");
   });
 
   it("handles duplicate requests in input order with independent results", async () => {
@@ -323,14 +323,14 @@ describe("memory_resolve_conversations integration", () => {
     const title = `DUP_REQ_${crypto.randomUUID()}`;
     const seeded = await seedConversation({
       title,
-      namespace: "astara_alt_v2",
+      namespace: "shared-ns",
       userId: OWNER_DB_USER_ID,
     });
 
     const result = await resolveConversationsTool(client, [
-      { title, namespace: "astara_alt_v2" },
-      { title: "NONEXISTENT", namespace: "astara_alt_v2" },
-      { title, namespace: "astara_alt_v2" },
+      { title, namespace: "shared-ns" },
+      { title: "NONEXISTENT", namespace: "shared-ns" },
+      { title, namespace: "shared-ns" },
     ]);
 
     expect(result.results).toHaveLength(3);
@@ -351,13 +351,13 @@ describe("memory_resolve_conversations integration", () => {
     const tombstoneTitle = `TOMBSTONE_${crypto.randomUUID()}`;
     await seedConversation({
       title: tombstoneTitle,
-      namespace: "astara_alt_v2",
+      namespace: "shared-ns",
       userId: OWNER_DB_USER_ID,
       deletedAt: new Date().toISOString(),
     });
 
     const result = await resolveConversationsTool(client, [
-      { title: tombstoneTitle, namespace: "astara_alt_v2" },
+      { title: tombstoneTitle, namespace: "shared-ns" },
     ]);
 
     expect(result.results[0]!.status).toBe("not_found");
@@ -417,7 +417,7 @@ describe("memory_resolve_conversations integration", () => {
       const title = `${batchPrefix}_${i}`;
       const seeded = await seedConversation({
         title,
-        namespace: "astara_alt_v2",
+        namespace: "shared-ns",
         userId: OWNER_DB_USER_ID,
       });
       seededIds.push(seeded.conversationId);
@@ -425,7 +425,7 @@ describe("memory_resolve_conversations integration", () => {
 
     const requests = seededIds.map((_, i) => ({
       title: `${batchPrefix}_${i}`,
-      namespace: "astara_alt_v2",
+      namespace: "shared-ns",
     }));
 
     const result = await resolveConversationsTool(client, requests);
@@ -451,7 +451,7 @@ describe("memory_resolve_conversations integration", () => {
         env.MEMORY_DB.prepare(
           `INSERT INTO conversations
            (id, source_type, title, imported_at, namespace, user_id, current_revision_id, created_at, updated_at)
-           VALUES (?, 'mcp', ?, ?, 'astara_alt_v2', ?, ?, ?, ?)`,
+           VALUES (?, 'mcp', ?, ?, 'shared-ns', ?, ?, ?, ?)`,
         ).bind(convId, floodTitle, createdAt, OWNER_DB_USER_ID, revId, createdAt, createdAt),
         env.MEMORY_DB.prepare(
           `INSERT INTO conversation_revisions
@@ -466,7 +466,7 @@ describe("memory_resolve_conversations integration", () => {
     }
 
     const result = await resolveConversationsTool(client, [
-      { title: floodTitle, namespace: "astara_alt_v2" },
+      { title: floodTitle, namespace: "shared-ns" },
     ]);
 
     expect(result.results[0]!.status).toBe("ambiguous");

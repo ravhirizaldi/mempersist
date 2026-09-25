@@ -88,18 +88,15 @@ See [docs/chatgpt-import.md](docs/chatgpt-import.md).
 
 The Streamable HTTP endpoint is `https://<worker>/mcp`. Interactive clients such as ChatGPT
 use OAuth 2.1 authorization-code flow with PKCE: the consent page takes an email, sends a
-single-use magic link, and completes the connection only after the link is opened. Existing
-emails reconnect to their archive; a new archive is created after the first link. The owner archive is
-bound to `vhie1046@gmail.com` across all of its namespaces (`personal`, `astara_alt_v2`,
-`coding/mempersist`, `test/mempersist-blackbox`); entering that email reconnects to the same
-data. Each account can own multiple namespaces, and the same namespace name may exist in
-different accounts with fully separated data.
+single-use magic link, and completes the connection only after the link is opened. An existing
+email reconnects to its archive; a new archive is created after the first link. Each account can
+own multiple namespaces, and the same namespace name may exist in different accounts with fully
+separated data.
 Developer scripts and the CLI may keep sending `MEMORY_API_TOKEN` as a bearer token for the
 owner archive.
 
-Email authentication uses the `EMAIL` send binding. The primary endpoint sends from
-`AUTH_EMAIL_FROM` (`noreply@mempersist.codifiedtech.id`); the legacy endpoint keeps using
-`LEGACY_AUTH_EMAIL_FROM` (`noreply@mempersist.nextostaging.net`).
+Email authentication uses the `EMAIL` send binding. The sending address per endpoint is
+configuration (`AUTH_EMAIL_FROM`, `LEGACY_AUTH_EMAIL_FROM`), not part of the API contract.
 
 The public site, OAuth pages, and magic-link email support English and Bahasa Indonesia. Use the
 language switcher to persist a browser preference; otherwise MemPersist uses `Accept-Language` and
@@ -118,9 +115,9 @@ or additional Cloudflare resource is required.
 For the deployed Worker, add `https://mempersist.codifiedtech.id/mcp` as a custom MCP app in
 ChatGPT Developer mode. ChatGPT discovers OAuth automatically, opens the consent page, and
 stores the issued access/refresh tokens. Existing connections keep working after upgrades
-without re-authorization. Clients already configured with
-`https://mempersist.nextostaging.net/mcp` remain supported; changing one to the primary endpoint
-requires one new authorization. Do not paste `MEMORY_API_TOKEN` into ChatGPT's connector settings.
+without re-authorization. Clients already configured with the legacy endpoint remain
+supported; changing one to the primary endpoint requires one new authorization. Do not paste
+`MEMORY_API_TOKEN` into ChatGPT's connector settings.
 
 Available tools:
 

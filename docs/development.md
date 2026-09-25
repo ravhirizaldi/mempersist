@@ -10,8 +10,8 @@
 
 Wrangler simulates D1, R2, and Queues locally. The main configuration marks Workers AI and Vectorize remote; those calls can incur usage. Unit and Workers integration tests use pure logic or local D1/R2 and never call remote AI.
 
-The local database seeds the owner account (`vhie1046@gmail.com`, namespace `personal`) from
-migration 0005, so the archive you see in `yarn dev` is the same one the static
+The local database seeds the owner account (the address bound in migration 0005, namespace
+`personal`), so the archive you see in `yarn dev` is the same one the static
 `MEMORY_API_TOKEN` protects. New emails entered on the `/authorize` consent page must
 complete registration through the emailed magic link before their isolated namespace is
 created.

@@ -25,10 +25,10 @@ conversations, chunks, FTS, and Vectorize metadata. ID-addressed reads, appends,
 updates, and deletions verify the target conversation or chunk belongs to the caller's
 namespace before acting. `delete_all_memories` is scoped to the caller's tenant.
 
-The existing archive is bound to `vhie1046@gmail.com`: the migration seeds that user with
-namespace `personal`, and the legacy `owner` identity (static bearer token and any grant
-issued before this ADR) aliases to it. Existing ChatGPT connections therefore keep working
-without re-authorization.
+The existing archive is bound to the address seeded by the user migration: the migration seeds
+that user with namespace `personal`, and the legacy `owner` identity (static bearer token and
+any grant issued before this ADR) aliases to it. Existing ChatGPT connections therefore keep
+working without re-authorization.
 
 ## Consequences
 

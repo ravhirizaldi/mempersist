@@ -5,7 +5,7 @@
 ## Context
 
 `chat-turn-v1` packed derived units toward a 1200-token target, so a container memory such as
-`ASTARA_ALT_V2_EVENTS` (one event per canonical message) produced vectors that mixed several
+an events container (one event per canonical message) produced vectors that mixed several
 independent events, and a paraphrase for one event had to match a blended multi-event vector.
 Exact and specificity ranking handled queries that name the event, but natural English and
 Indonesian paraphrases still missed because the relevant event never entered the semantic

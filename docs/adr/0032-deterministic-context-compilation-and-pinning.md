@@ -73,7 +73,7 @@ The tool accepts an input object following the repository's established `snake_c
 
 ```json
 {
-  "namespace": "astara_alt_v2",
+  "namespace": "project/example",
   "task": "Continue the current scene after character reviews her resignation letter",
   "required": [
     {
@@ -300,7 +300,7 @@ revision_id: rev_01j8
 Review the current deployment status.
 
 [assistant]
-All systems operational in namespace astara_alt_v2.
+All systems operational in namespace project/example.
 
 [RETRIEVED EVIDENCE: RUNBOOK]
 conversation_id: conv_01j9
