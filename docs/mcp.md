@@ -72,7 +72,7 @@ See [SKILLS.md](../SKILLS.md) for the memory conventions coding agents should fo
 | `memory_search`                | query, limit 1–20, tags, tag_mode                                                 | compact ranked chunk references and degradation state             |
 | `memory_get_context`           | chunk ID, before/after 0–10                                                       | canonical matched ranges and surrounding messages                 |
 | `memory_get_conversation`      | conversation ID, branch, offset, limit                                            | paginated active timeline or all graph nodes                      |
-| `memory_get_conversations`     | 1–20 conversation requests                                                        | ordered compact pages, errors, and continuations                  |
+| `memory_get_conversations`     | `requests` or `cursor`, `max_serialized_bytes`                                    | fair, revision-pinned compact batch pages                         |
 | `memory_list_conversations`    | cursor, limit, tags, tag_mode                                                     | metadata and tags only                                            |
 | `memory_list_revisions`        | conversation ID, cursor, limit 1–100                                              | revision metadata newest first, current head marked               |
 | `memory_resolve_conversations` | 1–20 exact titles, optional namespace and tags                                    | conversation IDs, current revision IDs, and live tags             |
@@ -116,32 +116,83 @@ metadata includes ID, revision ID, title, namespace, and tags. Context reads ret
 Duplicate content parts, raw source objects, and branch graph metadata are omitted only
 from the response, never from the archive.
 
-`memory_get_conversations` accepts a `requests` array of 1–20 objects, each with:
+`memory_get_conversations` has two call forms:
+
+- **First call:** `requests` is an array of 1–20 objects, with optional
+  `max_serialized_bytes`.
+- **Continuation:** `cursor` is one opaque cursor string, with optional
+  `max_serialized_bytes`.
+
+Send exactly one of `requests` or `cursor`; sending both or neither is a validation error.
+The first-call request objects retain their snake_case fields:
 
 - `conversation_id`: a memory UUID or 64-character hexadecimal conversation ID.
 - `offset`: nonnegative integer, default 0; `limit`: 1–100, default 20.
 - `branch`: `active` (default) or `all`.
 - `revision_id`: optional 64-character hexadecimal revision ID for that owned conversation.
 
-The tool always returns compact output as `{ "results": [...] }` in input order. Duplicate
-IDs are allowed, for example when requesting different pages. Each entry has `requestIndex`,
-`status` (`ok`, `error`, or `deferred`), and `continuation` (a request object or null). Successful
-entries include `page`; failures include a categorized, content-free `error`. Missing and
-foreign IDs produce the same not-found error, including foreign revision IDs.
+`max_serialized_bytes` is an optional integer from 4,096 through 49,152. It defaults to
+32,768. The server measures the complete response envelope as UTF-8 JSON bytes, including
+results, diagnostics, and the cursor, and guarantees that `usedSerializedBytes` is no greater
+than both the requested budget and 49,152. The minimum is sized for the envelope plus one
+normal compact message; use a larger budget for unusually large metadata or text.
 
-Follow every non-null `continuation`, including partial successful pages and deferred
-requests, by placing it in the next `requests` array. Continuations include `revision_id`
-to keep pages on the same immutable revision. Single conversation reads also accept
-`revision_id`, so they can finish a batch or verified-save readback. Ordinary reads without
-it still use the current revision. Tags on ordinary reads remain the live catalog tags.
+Every response uses the established camelCase output convention:
 
-The combined batch JSON is at most 48 KiB; no more than four canonical read chains run at
-once. Whole messages are paginated, never truncated. A message too large for its individual
-response budget produces `page.oversizedMessage` with `offset`, `sourceNodeId`, and serialized
-message `bytes`; `nextOffset` stays on that message. This requires a separate canonical
-HTTP read/export, not repeated identical batch calls. Oversized metadata produces an explicit
-`RESPONSE_TOO_LARGE` error. Single compact conversation pages also use a 48 KiB budget.
-Context responses retain the existing 64 KiB tool guard; narrow before/after when needed.
+```json
+{
+  "batchId": "<batch id>",
+  "results": [],
+  "completed": 1,
+  "remaining": 2,
+  "nextCursor": "<opaque cursor or null>",
+  "usedSerializedBytes": 1234,
+  "maxSerializedBytes": 32768
+}
+```
+
+`results` retain input order and include `requestIndex`. `completed` and `remaining` count
+request states finished and unfinished in this batch. Individual results may be `ok`, `error`,
+or `deferred`; an error is content-free and isolated to that request. Missing, deleted, and
+foreign conversation or revision IDs return the same not-found outcome. Successful results
+include compact `page` data. A compatibility `continuation` request may remain in a result,
+including its `revision_id`, but it is not the primary scheduling API.
+
+The first response of a batch lists every requested `requestIndex`. A cursor response is
+sparse: it contains only the results touched on that page, so an omitted index is neither a
+failure nor a completion. Untouched indexes remain represented by `remaining` and by the
+authenticated `nextCursor` state, and the batch is finished only when `nextCursor` is null.
+
+On the first call, the server ownership-checks the entire request set and pins every resolved
+current revision before loading any canonical R2 body. An explicit `revision_id` is validated
+as a member of its conversation and is pinned as supplied. Later calls with `nextCursor` keep
+those revision pins, so concurrent writes cannot mix revisions into one batch. The cursor is a
+URL-safe, versioned, HMAC-authenticated string bound with `MEMORY_API_TOKEN` to the tenant and
+valid for 15 minutes.
+It carries normalized request order, request indexes, conversation/revision pins, branch,
+requested limit, offsets for unfinished requests, batch ID, fairness position, and expiry /
+snapshot-validity state; it exposes no user IDs, D1 row IDs, R2 keys, or storage metadata.
+Validate it before any canonical read. Malformed, forged, expired, incompatible, and
+cross-tenant cursors all return the bounded generic `Invalid cursor` validation error.
+
+Admission is deterministic round-robin from the saved fairness position. The server emits whole
+compact messages only, preserves stable message order, and advances every request state that
+cannot fit. `nextCursor` is non-null while `remaining` is nonzero; call the tool again with
+`{ "cursor": nextCursor }` and the same or a new valid budget until it becomes null. Do not
+resubmit `requests` or follow every per-item continuation as the primary workflow. A new
+`requests` call starts a new batch and snapshot.
+
+An oversized message is never truncated or returned in the batch. The bounded
+`page.oversizedMessage` diagnostic contains `conversationId`, `revisionId`, `sourceNodeId`,
+`offset`, and serialized message `bytes`, with no text. The top-level cursor advances past that
+message so repeating the same cursor cannot loop. Legacy page consumers may still receive the
+older `offset`, `sourceNodeId`, and `bytes` fields. Recover complete content with an authorized
+canonical HTTP read such as `/api/conversations/:id?format=canonical&revision_id=...&offset=...`,
+or with the account canonical export; do not retry an identical batch page as recovery.
+
+Single conversation reads still accept `revision_id` and `format: "compact" | "canonical"`.
+Ordinary reads without a revision use the current revision, and their tags remain the live
+catalog tags. Context responses retain the existing 64 KiB tool guard.
 
 HTTP conversation/context reads support the same `format` query parameter; the conversation
 endpoint also accepts `revision_id`. HTTP canonical reads keep their existing behavior.

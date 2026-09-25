@@ -150,8 +150,30 @@ Available tools:
 
 Search returns compact references; call `memory_get_context` only for selected results. See [docs/mcp.md](docs/mcp.md).
 
-For known memories, `memory_get_conversations` returns up to 20 ordered compact pages within
-48 KiB, including explicit errors and continuations. Single reads accept `format: "compact"`;
+For known memories, start `memory_get_conversations` with a `requests` array of 1–20
+conversation requests and optional `max_serialized_bytes` (default 32,768; minimum 4,096;
+maximum 49,152). A continuation sends exactly one opaque `cursor` plus the optional budget —
+never both `requests` and `cursor`, and never neither. Results use the established camelCase
+batch fields `batchId`, `results`, `completed`, `remaining`, `nextCursor`,
+`usedSerializedBytes`, and `maxSerializedBytes`; `results` retain `requestIndex` and isolate
+individual errors. The complete UTF-8 JSON response, including its envelope and cursor, stays
+within the requested budget and 49,152-byte ceiling.
+
+The first call pins every resolved revision before canonical bodies load; cursor calls keep
+those pins, so concurrent writes cannot mix revisions. Its response lists every requested
+`requestIndex`, while a cursor response is sparse and lists only the indexes it touched; an
+omitted index is neither a failure nor a completion. Admit whole compact messages in
+deterministic round-robin order and loop on the returned cursor until `nextCursor` is null:
+
+```text
+call memory_get_conversations({ cursor: nextCursor })
+```
+
+Per-item `continuation` values remain available for compatibility, but are not the primary
+workflow. An oversized message returns bounded `page.oversizedMessage` metadata
+(`conversationId`, `revisionId`, `sourceNodeId`, `offset`, `bytes`) without text and advances
+cursor state; recover its complete content through an authorized canonical HTTP read or account
+export rather than retrying the same batch page. Single reads accept `format: "compact"`;
 canonical output remains the default. `memory_resolve_conversations` resolves up to 20 known
 conversation owners by exact title without semantic search, returning conversation IDs, current
 revision IDs, and live tags. `memory_list_revisions` returns the immutable revision

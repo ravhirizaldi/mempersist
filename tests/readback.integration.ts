@@ -72,19 +72,20 @@ const receiptResult = z.object({
 const connections: Array<{ client: Client; server: ReturnType<typeof createMemoryMcpServer> }> = [];
 afterEach(async () => {
   vi.restoreAllMocks();
+  vi.useRealTimers();
   for (const { client, server } of connections.splice(0)) {
     await client.close();
     await server.close();
   }
 });
 
-async function connectedClient() {
+async function connectedClientFor(userId = OWNER_DB_USER_ID, namespaces = ["personal"]) {
   const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
   const client = new Client({ name: "synthetic-readback", version: "1" });
   const server = createMemoryMcpServer(env, {
-    userId: OWNER_DB_USER_ID,
-    defaultNamespace: "personal",
-    namespaces: ["personal"],
+    userId,
+    defaultNamespace: namespaces[0] ?? "personal",
+    namespaces,
   });
   await server.connect(serverTransport);
   await client.connect(clientTransport);
@@ -92,14 +93,76 @@ async function connectedClient() {
   return client;
 }
 
-async function call(client: Client, name: string, args: Record<string, unknown>) {
+async function connectedClient() {
+  return connectedClientFor();
+}
+
+async function callRaw(client: Client, name: string, args: Record<string, unknown>) {
   const result = await client.callTool({ name, arguments: args });
-  expect(result.isError).not.toBe(true);
   const content = z
     .array(z.object({ type: z.literal("text"), text: z.string() }))
     .parse(result.content);
   const text = content[0]!.text;
-  return { value: JSON.parse(text) as unknown, bytes: new TextEncoder().encode(text).byteLength };
+  return { result, text, bytes: new TextEncoder().encode(text).byteLength };
+}
+
+async function call(client: Client, name: string, args: Record<string, unknown>) {
+  const result = await callRaw(client, name, args);
+  expect(result.result.isError).not.toBe(true);
+  return { value: JSON.parse(result.text) as unknown, bytes: result.bytes };
+}
+
+type BatchPage = {
+  conversation?: { id?: string; revisionId?: string };
+  messages?: Array<{ text: string; sourceNodeId?: string }>;
+  oversizedMessage?: {
+    conversationId?: string;
+    revisionId?: string;
+    sourceNodeId?: string;
+    offset?: number;
+    bytes?: number;
+  } | null;
+  nextOffset?: number | null;
+};
+
+type BatchEntry = {
+  requestIndex: number;
+  status: string;
+  continuation?: unknown;
+  page?: BatchPage;
+  error?: { code?: string; message?: string };
+};
+
+type BatchValue = {
+  batchId?: string;
+  completed?: number;
+  remaining?: number;
+  nextCursor?: string | null;
+  usedSerializedBytes?: number;
+  maxSerializedBytes?: number;
+  results: BatchEntry[];
+};
+
+function batch(value: unknown): BatchValue {
+  return value as BatchValue;
+}
+
+function pageTexts(value: BatchValue): Map<number, string[]> {
+  const texts = new Map<number, string[]>();
+  for (const entry of value.results) {
+    if (entry.page?.messages?.length)
+      texts.set(
+        entry.requestIndex,
+        entry.page.messages.map((message) => message.text),
+      );
+  }
+  return texts;
+}
+
+function addPageTexts(target: Map<number, string[]>, value: BatchValue): void {
+  for (const [requestIndex, messages] of pageTexts(value)) {
+    target.set(requestIndex, [...(target.get(requestIndex) ?? []), ...messages]);
+  }
 }
 
 async function store(content = messages, userId = OWNER_DB_USER_ID) {
@@ -235,6 +298,7 @@ describe("compact readback and committed write verification", () => {
         async () => {
           const response = await call(client, "memory_get_conversations", {
             requests: snapshots.slice(0, 5),
+            max_serialized_bytes: 49152,
           });
           const parsed = z
             .object({
@@ -410,6 +474,446 @@ describe("compact readback and committed write verification", () => {
     expect(batch.results[0]?.page?.oversizedMessage?.offset).toBe(0);
     expect(batch.results[0]?.continuation?.offset).toBe(0);
     expect(jsonBytes(batch)).toBeLessThanOrEqual(48 * 1024);
+  });
+
+  it("uses one top-level cursor for deterministic fair paging and accepts 1–20 requests", async () => {
+    const client = await connectedClient();
+    const content = Array.from({ length: 8 }, (_, index) => ({
+      ...messages[0]!,
+      content: `${index}:${"x".repeat(700)}`,
+    }));
+    const owner = await store(content);
+    const firstResponse = await call(client, "memory_get_conversations", {
+      requests: [request(owner.conversation.id)],
+      max_serialized_bytes: 4096,
+    });
+    const first = batch(firstResponse.value);
+    expect(first.batchId).toEqual(expect.any(String));
+    expect(first.completed).toEqual(expect.any(Number));
+    expect(first.remaining).toEqual(expect.any(Number));
+    expect(first.maxSerializedBytes).toBe(4096);
+    expect(firstResponse.bytes).toBeLessThanOrEqual(4096);
+    expect(first.nextCursor).toEqual(expect.any(String));
+    const defaultBudget = batch(
+      (
+        await call(client, "memory_get_conversations", {
+          requests: [request(owner.conversation.id, 0, 1)],
+        })
+      ).value,
+    );
+    expect(defaultBudget.maxSerializedBytes).toBe(32768);
+    expect(defaultBudget.nextCursor).toEqual(expect.any(String));
+
+    const seen = new Map<number, string[]>();
+    addPageTexts(seen, first);
+    let cursor = first.nextCursor;
+    for (let pageNumber = 0; cursor; pageNumber++) {
+      expect(pageNumber).toBeLessThan(20);
+      const response = await call(client, "memory_get_conversations", {
+        cursor,
+        max_serialized_bytes: 4096,
+      });
+      expect(response.bytes).toBeLessThanOrEqual(4096);
+      const page = batch(response.value);
+      expect(page.batchId).toBe(first.batchId);
+      expect(page.results.every((entry) => entry.requestIndex === 0)).toBe(true);
+      addPageTexts(seen, page);
+      cursor = page.nextCursor;
+    }
+    expect(cursor).toBeNull();
+    expect(seen.get(0)).toEqual(content.map((message) => message.content));
+
+    const twentyTexts = Array.from(
+      { length: 20 },
+      (_, index) => `twenty-${index}:${"x".repeat(700)}`,
+    );
+    const twentyOwners = await Promise.all(
+      twentyTexts.map((content) => store([{ ...messages[0]!, content }])),
+    );
+    const twentyRequests = twentyOwners.map((owner) => request(owner.conversation.id));
+    const twentyResponse = await call(client, "memory_get_conversations", {
+      requests: twentyRequests,
+      max_serialized_bytes: 4096,
+    });
+    let twenty = batch(twentyResponse.value);
+    const twentyBatchId = twenty.batchId;
+    expect(twentyBatchId).toEqual(expect.any(String));
+    expect(twentyResponse.bytes).toBeLessThanOrEqual(4096);
+    expect(twenty.results).toHaveLength(20);
+    expect(twenty.results.map((entry) => entry.requestIndex)).toEqual(
+      Array.from({ length: 20 }, (_, index) => index),
+    );
+    expect(twenty.maxSerializedBytes).toBe(4096);
+    expect(twenty.results.some((entry) => entry.status === "deferred")).toBe(true);
+    expect(twenty.nextCursor).toEqual(expect.any(String));
+
+    const twentySeen = new Map<number, string[]>();
+    const twentySeenTexts = new Set<string>();
+    const twentySeenIndexes = new Set<number>();
+    const twentySeenCursors = new Set<string>();
+    let twentyBytes = twentyResponse.bytes;
+    let previousCompleted = twenty.completed!;
+    let previousRemaining = twenty.remaining!;
+    let pageCount = 0;
+    while (true) {
+      expect(pageCount++).toBeLessThan(200);
+      expect(twenty.batchId).toBe(twentyBatchId);
+      expect(twenty.completed).toEqual(expect.any(Number));
+      expect(twenty.remaining).toEqual(expect.any(Number));
+      expect(twentyBytes).toBeLessThanOrEqual(4096);
+      const indexes = twenty.results.map((entry) => entry.requestIndex);
+      expect(indexes).toEqual([...indexes].sort((left, right) => left - right));
+      expect(new Set(indexes).size).toBe(indexes.length);
+      expect(indexes.every((index) => index >= 0 && index < twentyRequests.length)).toBe(true);
+      const hasPayload = twenty.results.some(
+        (entry) => (entry.page?.messages?.length ?? 0) > 0 || Boolean(entry.page?.oversizedMessage),
+      );
+      const aggregateAdvanced =
+        twenty.completed !== previousCompleted || twenty.remaining !== previousRemaining;
+      if (pageCount > 1) expect(hasPayload || aggregateAdvanced).toBe(true);
+      for (const entry of twenty.results) {
+        if (entry.page?.messages?.length) {
+          twentySeenIndexes.add(entry.requestIndex);
+          for (const message of entry.page.messages) {
+            expect(twentySeenTexts.has(message.text)).toBe(false);
+            twentySeenTexts.add(message.text);
+          }
+        }
+      }
+      addPageTexts(twentySeen, twenty);
+      previousCompleted = twenty.completed!;
+      previousRemaining = twenty.remaining!;
+      if (!twenty.nextCursor) break;
+      const nextCursor = twenty.nextCursor;
+      expect(nextCursor).toEqual(expect.any(String));
+      expect(twentySeenCursors.has(nextCursor)).toBe(false);
+      twentySeenCursors.add(nextCursor);
+      const response = await call(client, "memory_get_conversations", {
+        cursor: nextCursor,
+        max_serialized_bytes: 4096,
+      });
+      twenty = batch(response.value);
+      twentyBytes = response.bytes;
+    }
+    expect(twenty.nextCursor).toBeNull();
+    expect(twentySeenIndexes).toEqual(new Set(Array.from({ length: 20 }, (_, index) => index)));
+    expect([...twentySeenTexts].sort()).toEqual([...twentyTexts].sort());
+    for (const [index, text] of twentyTexts.entries())
+      expect(twentySeen.get(index)).toEqual([text]);
+  }, 30_000);
+
+  it("keeps mixed-size admissions round-robin, whole-message, ordered, and repeatable", async () => {
+    const client = await connectedClient();
+    const contents = [
+      Array.from({ length: 4 }, (_, index) => ({ ...messages[0]!, content: `small-a-${index}` })),
+      Array.from({ length: 4 }, (_, index) => ({
+        ...messages[0]!,
+        content: `large-${index}:${"L".repeat(2_000)}`,
+      })),
+      Array.from({ length: 4 }, (_, index) => ({ ...messages[0]!, content: `small-b-${index}` })),
+    ];
+    const owners = await Promise.all(contents.map((value) => store(value)));
+    const requests = owners.map((owner) => request(owner.conversation.id));
+    const firstArgs = { requests, max_serialized_bytes: 6000 };
+    const first = batch((await call(client, "memory_get_conversations", firstArgs)).value);
+    const repeated = batch((await call(client, "memory_get_conversations", firstArgs)).value);
+    const shape = (value: BatchValue) =>
+      value.results.map((entry) => ({
+        requestIndex: entry.requestIndex,
+        status: entry.status,
+        texts: entry.page?.messages?.map((message) => message.text) ?? [],
+      }));
+    expect(shape(repeated)).toEqual(shape(first));
+    const admitted = first.results
+      .filter((entry) => (entry.page?.messages?.length ?? 0) > 0)
+      .map((entry) => entry.requestIndex);
+    expect(new Set(admitted).size).toBeGreaterThan(1);
+    expect(admitted).toEqual([...admitted].sort((left, right) => left - right));
+    expect(jsonBytes(first)).toBeLessThanOrEqual(6000);
+
+    const seen = new Map<number, string[]>();
+    addPageTexts(seen, first);
+    let cursor = first.nextCursor;
+    for (let pageNumber = 0; cursor; pageNumber++) {
+      expect(pageNumber).toBeLessThan(20);
+      const page = batch(
+        (
+          await call(client, "memory_get_conversations", {
+            cursor,
+            max_serialized_bytes: 6000,
+          })
+        ).value,
+      );
+      expect(jsonBytes(page)).toBeLessThanOrEqual(6000);
+      addPageTexts(seen, page);
+      cursor = page.nextCursor;
+    }
+    expect(cursor).toBeNull();
+    for (const [index, value] of contents.entries())
+      expect(seen.get(index)).toEqual(value.map((message) => message.content));
+  });
+
+  it("pins every current revision before body reads, including cursor pages", async () => {
+    const client = await connectedClient();
+    const content = Array.from({ length: 6 }, (_, index) => ({
+      ...messages[0]!,
+      content: `${index}:${"p".repeat(900)}`,
+    }));
+    const owners = await Promise.all([store(content), store(content)]);
+    const originalGet = env.MEMORY_BUCKET.get.bind(env.MEMORY_BUCKET);
+    let injected = false;
+    vi.spyOn(env.MEMORY_BUCKET, "get").mockImplementation(async (...args) => {
+      if (!injected) {
+        injected = true;
+        await Promise.all(
+          owners.map((owner) =>
+            appendConversation(env, owner.conversation.id, owner.stored.revisionId, [messages[1]!]),
+          ),
+        );
+      }
+      return originalGet(...args);
+    });
+    const requests = owners.map((owner) => request(owner.conversation.id));
+    const first = batch(
+      (
+        await call(client, "memory_get_conversations", {
+          requests,
+          max_serialized_bytes: 6000,
+        })
+      ).value,
+    );
+    const revisions = new Set<string>();
+    for (const entry of first.results)
+      if (entry.page?.conversation?.revisionId) revisions.add(entry.page.conversation.revisionId);
+    expect(
+      [...revisions].every((revisionId) =>
+        owners.some((owner) => owner.stored.revisionId === revisionId),
+      ),
+    ).toBe(true);
+    const seen = new Map<number, string[]>();
+    addPageTexts(seen, first);
+    let cursor = first.nextCursor;
+    for (let pageNumber = 0; cursor; pageNumber++) {
+      expect(pageNumber).toBeLessThan(20);
+      const page = batch(
+        (
+          await call(client, "memory_get_conversations", {
+            cursor,
+            max_serialized_bytes: 6000,
+          })
+        ).value,
+      );
+      for (const entry of page.results)
+        if (entry.page?.conversation?.revisionId) revisions.add(entry.page.conversation.revisionId);
+      addPageTexts(seen, page);
+      cursor = page.nextCursor;
+    }
+    expect(cursor).toBeNull();
+    expect(revisions).toEqual(new Set(owners.map((owner) => owner.stored.revisionId)));
+    for (const [index] of owners.entries())
+      expect(seen.get(index)).toEqual(content.map((message) => message.content));
+  });
+
+  it("keeps missing and foreign items as indistinguishable per-item errors", async () => {
+    const client = await connectedClient();
+    const foreignUser = await getOrCreateUser(env, "readback-foreign@example.com");
+    const foreign = await store(messages, foreignUser.id);
+    const missing = crypto.randomUUID();
+    const value = batch(
+      (
+        await call(client, "memory_get_conversations", {
+          requests: [request(foreign.conversation.id), request(missing)],
+        })
+      ).value,
+    );
+    expect(value.results.map((entry) => entry.requestIndex)).toEqual([0, 1]);
+    expect(value.results.map((entry) => entry.status)).toEqual(["error", "error"]);
+    expect(value.results[0]?.error).toEqual(value.results[1]?.error);
+    expect(JSON.stringify(value)).not.toContain(foreign.stored.revisionId);
+  });
+
+  it("rejects forged, expired, version-incompatible, and cross-tenant cursors generically", async () => {
+    const ownerClient = await connectedClient();
+    const content = Array.from({ length: 8 }, (_, index) => ({
+      ...messages[0]!,
+      content: `${index}:${"c".repeat(800)}`,
+    }));
+    const owner = await store(content);
+    const first = batch(
+      (
+        await call(ownerClient, "memory_get_conversations", {
+          requests: [request(owner.conversation.id)],
+          max_serialized_bytes: 4096,
+        })
+      ).value,
+    );
+    expect(first.nextCursor).toEqual(expect.any(String));
+    const cursor = first.nextCursor as string;
+    expect(cursor).not.toContain(OWNER_DB_USER_ID);
+    expect(cursor).not.toContain(owner.conversation.id);
+    expect(cursor).not.toContain(owner.stored.revisionId);
+    const forgedCursor = cursor.replace(/[A-Za-z0-9]/u, (character) =>
+      character === "a" ? "b" : "a",
+    );
+    const invalid = await callRaw(ownerClient, "memory_get_conversations", {
+      cursor: forgedCursor,
+    });
+    const wrongVersion = await callRaw(ownerClient, "memory_get_conversations", {
+      cursor: `v0.${cursor}`,
+    });
+    expect(invalid.result.isError).toBe(true);
+    expect(wrongVersion.result.isError).toBe(true);
+    expect(invalid.text).toBe(wrongVersion.text);
+
+    const foreignUser = await getOrCreateUser(env, "readback-cursor-foreign@example.com");
+    const foreignClient = await connectedClientFor(foreignUser.id, [foreignUser.namespace]);
+    const crossTenant = await callRaw(foreignClient, "memory_get_conversations", { cursor });
+    expect(crossTenant.result.isError).toBe(true);
+    expect(crossTenant.text).toBe(invalid.text);
+
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date(Date.now() + 16 * 60_000));
+    const expired = await callRaw(ownerClient, "memory_get_conversations", { cursor });
+    vi.useRealTimers();
+    expect(expired.result.isError).toBe(true);
+    expect(expired.text).toBe(invalid.text);
+  });
+
+  it("reports oversized messages without prose and advances the top-level cursor", async () => {
+    const client = await connectedClient();
+    const oversizedText = "雨".repeat(20_000);
+    const afterText = `message after the oversized node:${"n".repeat(3200)}`;
+    const owner = await store([
+      { ...messages[0]!, content: oversizedText },
+      { ...messages[1]!, content: afterText },
+    ]);
+    const firstResponse = await call(client, "memory_get_conversations", {
+      requests: [request(owner.conversation.id)],
+      max_serialized_bytes: 4096,
+    });
+    const first = batch(firstResponse.value);
+    const diagnostic = first.results[0]?.page?.oversizedMessage;
+    expect(diagnostic).toMatchObject({
+      conversationId: owner.conversation.id,
+      revisionId: owner.stored.revisionId,
+      sourceNodeId: owner.conversation.nodes[0]!.sourceNodeId,
+      offset: 0,
+    });
+    expect(diagnostic?.bytes).toBeGreaterThan(4096);
+    expect(JSON.stringify(first)).not.toContain(oversizedText);
+    expect(first.nextCursor).toEqual(expect.any(String));
+
+    const next = batch(
+      (
+        await call(client, "memory_get_conversations", {
+          cursor: first.nextCursor,
+          max_serialized_bytes: 4096,
+        })
+      ).value,
+    );
+    expect(JSON.stringify(next)).not.toContain(oversizedText);
+    expect(
+      next.results.flatMap((entry) => entry.page?.messages?.map((message) => message.text) ?? []),
+    ).toContain(afterText);
+    expect(next.results.some((entry) => entry.page?.oversizedMessage)).toBe(false);
+    expect(next.nextCursor).toBeNull();
+  });
+
+  it("pages oversized diagnostics in a multi-request 4096-byte batch", async () => {
+    const client = await connectedClient();
+    const oversizedText = "雨".repeat(20_000);
+    const normalText = `normal conversation after the oversized node:${"n".repeat(3200)}`;
+    const oversized = await store([{ ...messages[0]!, content: oversizedText }]);
+    const normal = await store([{ ...messages[1]!, content: normalText }]);
+    const firstResponse = await call(client, "memory_get_conversations", {
+      requests: [request(oversized.conversation.id), request(normal.conversation.id)],
+      max_serialized_bytes: 4096,
+    });
+    let page = batch(firstResponse.value);
+    const batchId = page.batchId;
+    expect(batchId).toEqual(expect.any(String));
+    expect(page.completed).toEqual(expect.any(Number));
+    expect(page.remaining).toEqual(expect.any(Number));
+    expect(page.maxSerializedBytes).toBe(4096);
+    expect(firstResponse.bytes).toBeLessThanOrEqual(4096);
+    expect(page.nextCursor).toEqual(expect.any(String));
+
+    const normalTexts = new Set<string>();
+    const seenIndexes = new Set<number>();
+    const seenCursors = new Set<string>();
+    let currentBytes = firstResponse.bytes;
+    let previousCompleted = page.completed!;
+    let previousRemaining = page.remaining!;
+    let diagnosticCount = 0;
+    let pageCount = 0;
+    while (true) {
+      expect(pageCount++).toBeLessThan(100);
+      expect(page.batchId).toBe(batchId);
+      expect(page.completed).toEqual(expect.any(Number));
+      expect(page.remaining).toEqual(expect.any(Number));
+      expect(currentBytes).toBeLessThanOrEqual(4096);
+      const indexes = page.results.map((entry) => entry.requestIndex);
+      expect(indexes).toEqual([...indexes].sort((left, right) => left - right));
+      expect(new Set(indexes).size).toBe(indexes.length);
+      expect(indexes.every((index) => index === 0 || index === 1)).toBe(true);
+      const hasPayload = page.results.some(
+        (entry) => (entry.page?.messages?.length ?? 0) > 0 || Boolean(entry.page?.oversizedMessage),
+      );
+      const aggregateAdvanced =
+        page.completed !== previousCompleted || page.remaining !== previousRemaining;
+      if (pageCount > 1) expect(hasPayload || aggregateAdvanced).toBe(true);
+      expect(JSON.stringify(page)).not.toContain(oversizedText);
+      for (const entry of page.results) {
+        const diagnostic = entry.page?.oversizedMessage;
+        if (diagnostic) {
+          diagnosticCount++;
+          seenIndexes.add(entry.requestIndex);
+          expect(diagnostic).toMatchObject({
+            conversationId: oversized.conversation.id,
+            revisionId: oversized.stored.revisionId,
+            sourceNodeId: oversized.conversation.nodes[0]!.sourceNodeId,
+            offset: 0,
+          });
+          expect(diagnostic.bytes).toBeGreaterThan(4096);
+        }
+        for (const message of entry.page?.messages ?? []) {
+          expect(message.text).toBe(normalText);
+          expect(normalTexts.has(message.text)).toBe(false);
+          normalTexts.add(message.text);
+          seenIndexes.add(entry.requestIndex);
+        }
+      }
+      previousCompleted = page.completed!;
+      previousRemaining = page.remaining!;
+      if (!page.nextCursor) break;
+      const nextCursor = page.nextCursor;
+      expect(nextCursor).toEqual(expect.any(String));
+      expect(seenCursors.has(nextCursor)).toBe(false);
+      seenCursors.add(nextCursor);
+      const response = await call(client, "memory_get_conversations", {
+        cursor: nextCursor,
+        max_serialized_bytes: 4096,
+      });
+      page = batch(response.value);
+      currentBytes = response.bytes;
+    }
+    expect(page.nextCursor).toBeNull();
+    expect(diagnosticCount).toBe(1);
+    expect(normalTexts).toEqual(new Set([normalText]));
+    expect(seenIndexes).toEqual(new Set([0, 1]));
+  }, 30_000);
+
+  it("enforces UTF-8 byte budgets rather than character counts", async () => {
+    const client = await connectedClient();
+    const unicode = await store([{ ...messages[0]!, content: "雨🌙".repeat(850) }]);
+    const response = await call(client, "memory_get_conversations", {
+      requests: [request(unicode.conversation.id)],
+      max_serialized_bytes: 5000,
+    });
+    const value = batch(response.value);
+    expect(response.bytes).toBeLessThanOrEqual(5000);
+    expect(value.usedSerializedBytes).toBeLessThanOrEqual(5000);
+    expect(jsonBytes(value)).toBe(response.bytes);
   });
 
   it("bounds concurrent canonical read chains to four", async () => {

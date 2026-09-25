@@ -1,7 +1,8 @@
 import { localeHeaders, messages, type Locale } from "./i18n";
 import { localizePageMarkup } from "./locales/pages-id";
-import { brand, FAVICON } from "./ui";
-import { PUBLIC_ORIGIN } from "./discovery";
+import { BASE_CSS, brand, FAVICON } from "./ui";
+import { CRITICAL_SITE_CSS } from "./site";
+import { PUBLIC_ASSET_VERSION, PUBLIC_ORIGIN } from "./discovery";
 
 const SEO: Record<Locale, Record<string, { title: string; description: string }>> = {
   en: {
@@ -158,13 +159,15 @@ ${FAVICON}
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@400;500;600&display=optional" rel="stylesheet">
-<link rel="stylesheet" href="/site.css"></head>
+<style>${BASE_CSS}${CRITICAL_SITE_CSS}</style>
+<link rel="preload" href="/site.css?v=${PUBLIC_ASSET_VERSION}" as="style" fetchpriority="high" onload="this.onload=null;this.rel='stylesheet'">
+<noscript><link rel="stylesheet" href="/site.css?v=${PUBLIC_ASSET_VERSION}"></noscript></head>
 <body data-copied="${t.runtime.copied}" data-copy-success="${t.runtime.copiedFeedback}" data-copy-failed="${t.runtime.copyFailed}" data-decision-count="${t.runtime.decisionCount}"><a class="skip-link" href="#main-content">${t.shared.skip}</a>${nav}
 <main id="main-content" class="wrap${active === "/" ? " home" : ""}" tabindex="-1">
 <div class="page-meta"><span>${t.shared.memoryContext}</span><span>${active === "/" ? t.shared.ownArchive : `<a href="/">${t.shared.home}</a> / ${escapeHtml(navItems.find((item) => item.href === active)?.label ?? title)}`}</span></div>
 ${intro}<div class="reading-layout">${toc}<div class="document">${content}</div></div>
 <footer><span>MemPersist · ${t.shared.durable}</span><div class="footer-links"><a href="/security">${t.shared.privacy}</a><a href="/about">${t.shared.creator}</a><a href="#main-content">${t.shared.backTop} ↑</a></div></footer>
-</main><script src="/site.js" defer></script>
+</main><script src="/site.js?v=${PUBLIC_ASSET_VERSION}" defer></script>
 </body></html>`;
   return localizePageMarkup(locale, html);
 }
@@ -256,7 +259,7 @@ export function landingPage(locale: Locale = "en"): Response {
         <tr><td><code>memory_search</code></td><td>find memories; tags + tag_mode filter</td></tr>
         <tr><td><code>memory_get_context</code></td><td>original messages around a hit</td></tr>
         <tr><td><code>memory_get_conversation</code></td><td>page a full conversation</td></tr>
-        <tr><td><code>memory_get_conversations</code></td><td>batch up to 20 known conversations</td></tr>
+        <tr><td><code>memory_get_conversations</code></td><td>start with 1–20 requests; resume fairly with one opaque cursor</td></tr>
         <tr><td><code>memory_list_conversations</code></td><td>metadata and tags</td></tr>
         <tr><td><code>memory_list_revisions</code></td><td>immutable revision history of one conversation</td></tr>
         <tr><td><code>memory_resolve_conversations</code></td><td>resolve up to 20 exact titles without semantic search</td></tr>
@@ -273,6 +276,7 @@ export function landingPage(locale: Locale = "en"): Response {
         <tr><td><code>memory_empty_namespace</code></td><td>empty one namespace (exact confirmation)</td></tr>
       </tbody>
     </table>
+    <p><code>memory_get_conversations</code> accepts exactly one of <code>requests</code> (the first call) or an opaque <code>cursor</code> (continuations), plus optional <code>max_serialized_bytes</code>: default 32,768, minimum 4,096, maximum 49,152. Responses report <code>batchId</code>, ordered <code>results</code>, <code>completed</code>, <code>remaining</code>, <code>nextCursor</code>, <code>usedSerializedBytes</code>, and <code>maxSerializedBytes</code>; UTF-8 JSON stays within the requested budget and the 49,152-byte ceiling. Current revisions are pinned before bodies load, so cursor pages never mix concurrent writes; individual errors remain isolated and whole compact messages are admitted in deterministic round-robin order. Loop with <code>{ cursor: nextCursor }</code> until <code>nextCursor</code> is null. Per-item continuations remain for compatibility. Oversized messages return bounded conversation/revision/source-node/offset/byte metadata without text and advance cursor state; recover complete content through an authorized canonical HTTP read or account export.</p>
   </section>
 
   <section>

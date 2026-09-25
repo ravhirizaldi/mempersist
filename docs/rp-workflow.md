@@ -23,9 +23,14 @@ across owners.
      EVENTS_INDEX) by exact title using `memory_resolve_conversations` (scoped to your project or
      active namespace) without semantic search. Then batch the resolved conversation IDs with
      `memory_get_conversations`. Use actual IDs discovered in your archive.
-   - Consume results in order, including later correction messages. Follow **every** non-null
-     `continuation` by placing that object in the next call's `requests` array. A deferred entry
-     has not delivered its prose. Keep `revision_id` when following a continuation.
+   - On the first call, send 1–20 requests with optional `max_serialized_bytes`. Process ordered
+     results and errors, including later correction messages. Then repeatedly call
+     `memory_get_conversations({ cursor: nextCursor })` with only that cursor until `nextCursor` is
+     `null`; do not resubmit `requests`.
+   - Legacy per-item `continuation` objects may be followed only by compatibility clients. A deferred
+     entry has not delivered its prose; keep `revision_id` when following a legacy continuation.
+   - Oversized diagnostics require authorized canonical HTTP/export recovery; do not retry an identical
+     batch page as recovery.
    - Resolve the active arc and relevant character/world owners from the complete first batch,
      then batch those owners. Fetch archived arcs only when source context is needed.
 4. Treat individual read failures, oversized messages, incomplete pages, or `required_budget_exceeded`
@@ -69,9 +74,12 @@ appending anything. Preserve unrelated rules and owner references verbatim.
 > Ordinary RP remains read-only. Save only on explicit `simpan state`. Prefer `memory_build_context`
 > to compile required runtime owners and task evidence into a single pinned context pack. Fall back to
 > `memory_resolve_conversations` and compact batch reads (`memory_get_conversations`) when individual owners
-> require deep pagination or exceed pack budgets. Finish every page or deferred request before relying
-> on those owners. Later corrective messages supersede earlier facts. Resolve the active arc
-> and relevant owners after runtime loading; archived arcs remain source-on-demand.
+> require deep pagination or exceed pack budgets. Start each batch with 1–20 requests and optional
+> `max_serialized_bytes`; process ordered results and errors, then repeatedly call
+> `memory_get_conversations({ cursor: nextCursor })` with only that cursor until `nextCursor` is `null`.
+> Legacy per-item `continuation` objects may be followed only by compatibility clients. Oversized diagnostics
+> require authorized canonical HTTP/export recovery. Later corrective messages supersede earlier facts.
+> Resolve the active arc and relevant owners after runtime loading; archived arcs remain source-on-demand.
 >
 > For authorized saves, retain owner boundaries and optimistic base revisions. Request
 > `verify: true` for each store/append/replace. Server readback counts as persistence

@@ -30,9 +30,10 @@ describe("Minimalist public pages", () => {
     expect(html).toContain(
       "https://fonts.googleapis.com/css2?family=Outfit:wght@400;500;600&display=optional",
     );
-    expect(html).toContain('<link rel="stylesheet" href="/site.css">');
-    expect(html).toContain('<script src="/site.js" defer></script>');
-    expect(html).not.toContain("<style>");
+    expect(html).toContain('<link rel="stylesheet" href="/site.css?v=2">');
+    expect(html).toContain('<link rel="preload" href="/site.css?v=2" as="style"');
+    expect(html).toContain("<style>");
+    expect(html).toContain('<script src="/site.js?v=2" defer></script>');
     expect(html).not.toContain("cdn.jsdelivr.net");
     expect((html.match(/<h1[ >]/g) ?? []).length).toBe(1);
     expect((html.match(/<footer>/g) ?? []).length).toBe(1);

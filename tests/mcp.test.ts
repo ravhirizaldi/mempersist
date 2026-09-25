@@ -142,6 +142,58 @@ describe("MCP server", () => {
       expect(tool.outputSchema, tool.name).toMatchObject({ type: "object" });
     }
   });
+  it("exposes cursor batch budgets and enforces exactly one first-call input", async () => {
+    const client = await connectedClient();
+    const listed = await client.listTools();
+    const tool = listed.tools.find((candidate) => candidate.name === "memory_get_conversations");
+    expect(tool).toBeDefined();
+    const inputSchema = tool!.inputSchema as {
+      properties?: Record<string, unknown>;
+    };
+    expect(inputSchema.properties?.requests).toMatchObject({
+      type: "array",
+      minItems: 1,
+      maxItems: 20,
+    });
+    expect(inputSchema.properties?.cursor).toMatchObject({ type: "string" });
+    expect(inputSchema.properties?.max_serialized_bytes).toMatchObject({
+      type: "integer",
+      minimum: 4096,
+      maximum: 49152,
+    });
+    expect(tool!.description).toMatch(/minimum|4096|4\s*KiB/iu);
+    const outputSchema = tool!.outputSchema as {
+      properties?: Record<string, unknown>;
+    };
+    for (const property of [
+      "batchId",
+      "completed",
+      "remaining",
+      "nextCursor",
+      "usedSerializedBytes",
+      "maxSerializedBytes",
+    ])
+      expect(outputSchema.properties).toHaveProperty(property);
+    expect(tool!.annotations).toEqual({
+      readOnlyHint: true,
+      destructiveHint: false,
+      openWorldHint: false,
+      idempotentHint: true,
+    });
+
+    const request = { conversation_id: crypto.randomUUID() };
+    for (const arguments_ of [
+      {},
+      { requests: [request], cursor: "opaque-cursor" },
+      { requests: [request], max_serialized_bytes: 4095 },
+      { requests: [request], max_serialized_bytes: 49153 },
+    ]) {
+      expect(
+        (await client.callTool({ name: "memory_get_conversations", arguments: arguments_ }))
+          .isError,
+      ).toBe(true);
+    }
+  });
 
   it("rejects malformed tool arguments before business logic", async () => {
     const client = await connectedClient();

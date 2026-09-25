@@ -69,15 +69,21 @@ describe("HTTP security boundary", () => {
     expect(llmsBody).toContain("# MemPersist");
     expect(llmsBody).toContain("- [Whitepaper](https://mempersist.codifiedtech.id/whitepaper)");
 
-    const siteCss = await app.request("/site.css", {}, appEnv);
+    const siteCss = await app.request("/site.css?v=2", {}, appEnv);
     expect(siteCss.status).toBe(200);
     expect(siteCss.headers.get("content-type")).toContain("text/css");
+    expect(siteCss.headers.get("cache-control")).toBe("public, max-age=31536000, immutable");
     expect(await siteCss.text()).toContain(".site-nav");
+    const staleCss = await app.request("/site.css?v=1", {}, appEnv);
+    expect(staleCss.headers.get("cache-control")).toContain("max-age=86400");
 
-    const siteJs = await app.request("/site.js", {}, appEnv);
+    const siteJs = await app.request("/site.js?v=2", {}, appEnv);
     expect(siteJs.status).toBe(200);
     expect(siteJs.headers.get("content-type")).toContain("application/javascript");
+    expect(siteJs.headers.get("cache-control")).toBe("public, max-age=31536000, immutable");
     expect(await siteJs.text()).toContain("navigator.clipboard");
+    const staleJs = await app.request("/site.js", {}, appEnv);
+    expect(staleJs.headers.get("cache-control")).toContain("max-age=86400");
     const landing = await app.request("/", {}, appEnv);
     const html = await landing.text();
     expect(html).toContain('<link rel="canonical" href="https://mempersist.codifiedtech.id/">');
@@ -88,7 +94,9 @@ describe("HTTP security boundary", () => {
   it("negotiates Indonesian and allows a cookie preference to override it", async () => {
     const appEnv = env as AppEnv;
     const landing = await app.request("/", { headers: { "accept-language": "id-ID" } }, appEnv);
-    expect(await landing.text()).toContain("ambil hingga 20 percakapan dikenal sekaligus");
+    expect(await landing.text()).toContain(
+      "mulai dengan 1–20 permintaan; lanjutkan secara adil dengan satu kursor opak",
+    );
 
     const indonesian = await app.request(
       "/whitepaper",

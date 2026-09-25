@@ -116,7 +116,14 @@ const replacements: ReadonlyArray<readonly [string, string]> = [
   ["find memories; tags + tag_mode filter", "temukan memori; filter tags + tag_mode"],
   ["original messages around a hit", "pesan asli di sekitar hasil"],
   ["page a full conversation", "tampilkan percakapan lengkap per halaman"],
-  ["batch up to 20 known conversations", "ambil hingga 20 percakapan dikenal sekaligus"],
+  [
+    "start with 1–20 requests; resume fairly with one opaque cursor",
+    "mulai dengan 1–20 permintaan; lanjutkan secara adil dengan satu kursor opak",
+  ],
+  [
+    "<code>memory_get_conversations</code> accepts exactly one of <code>requests</code> (the first call) or an opaque <code>cursor</code> (continuations), plus optional <code>max_serialized_bytes</code>: default 32,768, minimum 4,096, maximum 49,152. Responses report <code>batchId</code>, ordered <code>results</code>, <code>completed</code>, <code>remaining</code>, <code>nextCursor</code>, <code>usedSerializedBytes</code>, and <code>maxSerializedBytes</code>; UTF-8 JSON stays within the requested budget and the 49,152-byte ceiling. Current revisions are pinned before bodies load, so cursor pages never mix concurrent writes; individual errors remain isolated and whole compact messages are admitted in deterministic round-robin order. Loop with <code>{ cursor: nextCursor }</code> until <code>nextCursor</code> is null. Per-item continuations remain for compatibility. Oversized messages return bounded conversation/revision/source-node/offset/byte metadata without text and advance cursor state; recover complete content through an authorized canonical HTTP read or account export.",
+    "<code>memory_get_conversations</code> menerima tepat salah satu dari <code>requests</code> (panggilan pertama) atau <code>cursor</code> opak (kelanjutan), serta <code>max_serialized_bytes</code> opsional: default 32.768, minimum 4.096, maksimum 49.152. Respons melaporkan <code>batchId</code>, <code>results</code> berurutan, <code>completed</code>, <code>remaining</code>, <code>nextCursor</code>, <code>usedSerializedBytes</code>, dan <code>maxSerializedBytes</code>; JSON UTF-8 tetap berada dalam anggaran yang diminta dan batas 49.152 byte. Revisi saat ini dipatok sebelum isi dimuat, sehingga halaman kursor tidak pernah mencampur penulisan bersamaan; setiap kesalahan tetap terisolasi dan pesan ringkas utuh diterima secara adil dalam urutan round-robin deterministik. Ulangi dengan <code>{ cursor: nextCursor }</code> sampai <code>nextCursor</code> bernilai null. Kelanjutan per-item tetap tersedia untuk kompatibilitas. Pesan yang terlalu besar mengembalikan metadata percakapan/revisi/node sumber/offset/byte yang dibatasi tanpa teks dan memajukan state kursor; pulihkan konten lengkap melalui pembacaan HTTP kanonis yang terotorisasi atau ekspor akun.",
+  ],
   ["metadata and tags", "metadata dan tag"],
   ["namespaces your account owns", "namespace milik akun Anda"],
   ["counts and indexing health", "jumlah dan kesehatan pengindeksan"],

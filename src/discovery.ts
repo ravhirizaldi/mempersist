@@ -2,6 +2,7 @@ import { SITE_CSS, SITE_SCRIPT } from "./site";
 import { BASE_CSS } from "./ui";
 
 export const PUBLIC_ORIGIN = "https://mempersist.codifiedtech.id";
+export const PUBLIC_ASSET_VERSION = "2";
 
 export const PUBLIC_PATHS = [
   "/",
@@ -13,22 +14,25 @@ export const PUBLIC_PATHS = [
 ] as const;
 
 const CACHE_CONTROL = "public, max-age=86400, stale-while-revalidate=604800";
+const ASSET_CACHE_CONTROL = "public, max-age=31536000, immutable";
 
-function textResponse(body: string, contentType: string): Response {
+function textResponse(body: string, contentType: string, cacheControl = CACHE_CONTROL): Response {
   return new Response(body, {
     headers: {
-      "Cache-Control": CACHE_CONTROL,
+      "Cache-Control": cacheControl,
       "Content-Type": contentType,
       "X-Content-Type-Options": "nosniff",
     },
   });
 }
-export function siteCssResponse(): Response {
-  return textResponse(`${BASE_CSS}${SITE_CSS}`, "text/css; charset=UTF-8");
+export function siteCssResponse(version?: string): Response {
+  const cacheControl = version === PUBLIC_ASSET_VERSION ? ASSET_CACHE_CONTROL : CACHE_CONTROL;
+  return textResponse(`${BASE_CSS}${SITE_CSS}`, "text/css; charset=UTF-8", cacheControl);
 }
 
-export function siteScriptResponse(): Response {
-  return textResponse(SITE_SCRIPT, "application/javascript; charset=UTF-8");
+export function siteScriptResponse(version?: string): Response {
+  const cacheControl = version === PUBLIC_ASSET_VERSION ? ASSET_CACHE_CONTROL : CACHE_CONTROL;
+  return textResponse(SITE_SCRIPT, "application/javascript; charset=UTF-8", cacheControl);
 }
 export function llmsTxtResponse(): Response {
   return textResponse(
