@@ -8,9 +8,8 @@
 
 Per-user isolation in ADR 0020 pinned every request to exactly one namespace per
 account. The owner's real archive lives in several namespaces created before the
-SaaS switch (`astara_alt_v2`, `coding/mempersist`, `test/mempersist-blackbox`,
-plus the `personal` default), and the owner wants those folders to remain
-addressable by name under `vhie1046@gmail.com`.
+SaaS switch, plus the `personal` default, and the owner wants those folders to remain
+addressable by name under the owner account.
 
 ## Decision
 

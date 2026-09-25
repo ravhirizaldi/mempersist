@@ -203,18 +203,18 @@ describe("safe memory deletion", () => {
 
   it("deletes one namespace without crossing namespace boundaries", async () => {
     const vectors = vectorBindings();
-    const first = await storeMemory("astara-alt", "namespace first");
-    const second = await storeMemory("astara-alt", "namespace second");
+    const first = await storeMemory("team-notes", "namespace first");
+    const second = await storeMemory("team-notes", "namespace second");
     const isolated = await storeMemory("personal", "namespace survivor");
 
     const result = await deleteNamespace(
       deletionEnv(vectors.binding),
       OWNER_DB_USER_ID,
-      "astara-alt",
+      "team-notes",
     );
 
     expect(result).toMatchObject({
-      namespace: "astara-alt",
+      namespace: "team-notes",
       requested: 2,
       processed: 2,
       deleted: 2,

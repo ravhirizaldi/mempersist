@@ -21,22 +21,18 @@ import {
 
 describe("tenant helpers", () => {
   it("normalizes and validates emails", () => {
-    expect(normalizeEmail("  VHIE1046@Gmail.COM ")).toBe("vhie1046@gmail.com");
-    expect(isValidEmail("vhie1046@gmail.com")).toBe(true);
+    expect(normalizeEmail(`  ${OWNER_EMAIL.toUpperCase()} `)).toBe(OWNER_EMAIL);
+    expect(isValidEmail(OWNER_EMAIL)).toBe(true);
     expect(isValidEmail("not-an-email")).toBe(false);
     expect(isValidEmail("")).toBe(false);
   });
 
   it("derives a deterministic user id from the normalized email", async () => {
-    expect(await userIdForEmail("vhie1046@gmail.com")).toBe(
-      await userIdForEmail("vhie1046@gmail.com"),
+    expect(await userIdForEmail(OWNER_EMAIL)).toBe(await userIdForEmail(OWNER_EMAIL));
+    expect(await userIdForEmail(`  ${OWNER_EMAIL.toUpperCase()} `)).toBe(
+      await userIdForEmail(OWNER_EMAIL),
     );
-    expect(await userIdForEmail("  VHIE1046@Gmail.COM ")).toBe(
-      await userIdForEmail("vhie1046@gmail.com"),
-    );
-    expect(await userIdForEmail("other@example.com")).not.toBe(
-      await userIdForEmail("vhie1046@gmail.com"),
-    );
+    expect(await userIdForEmail("other@example.com")).not.toBe(await userIdForEmail(OWNER_EMAIL));
   });
 });
 
@@ -48,8 +44,8 @@ describe("user provisioning and multi-namespace isolation", () => {
   });
 
   it("reuses the same account for case and whitespace variants", async () => {
-    const first = await getOrCreateUser(env, "vhie1046@gmail.com");
-    const again = await getOrCreateUser(env, "  VHIE1046@Gmail.COM ");
+    const first = await getOrCreateUser(env, OWNER_EMAIL);
+    const again = await getOrCreateUser(env, `  ${OWNER_EMAIL.toUpperCase()} `);
     expect(again.id).toBe(first.id);
     expect(again.namespace).toBe(first.namespace);
   });

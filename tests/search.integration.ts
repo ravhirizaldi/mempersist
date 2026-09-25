@@ -904,7 +904,7 @@ describe("message-boundary semantic chunking", () => {
   it("keeps one semantic chunk per event message and isolates unrelated events", async () => {
     const namespace = `evchunk-${crypto.randomUUID()}`;
     const { stored } = await storeMemory({
-      title: "ASTARA event log",
+      title: "Events container log",
       namespace,
       messages: Array.from({ length: 35 }, (_, index) => eventMessage(index)),
     });
@@ -952,7 +952,7 @@ describe("message-boundary semantic chunking", () => {
   it("retrieves the photobox event for English and Indonesian paraphrases", async () => {
     const namespace = `evpar-${crypto.randomUUID()}`;
     const { stored } = await storeMemory({
-      title: "ASTARA event log",
+      title: "Events container log",
       namespace,
       messages: Array.from({ length: 35 }, (_, index) => eventMessage(index)),
     });

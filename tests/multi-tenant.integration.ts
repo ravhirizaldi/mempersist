@@ -21,36 +21,36 @@ async function connectedClient(tenant: Awaited<ReturnType<typeof resolveTenant>>
 }
 
 describe("same namespace name across accounts stays isolated", () => {
-  it("lets the owner and a second user each own namespace astara_alt_v2", async () => {
-    await grantNamespace(env, OWNER_DB_USER_ID, "astara_alt_v2");
+  it("lets the owner and a second user each own namespace shared-ns", async () => {
+    await grantNamespace(env, OWNER_DB_USER_ID, "shared-ns");
     const other = await getOrCreateUser(env, "second@example.com");
-    await grantNamespace(env, other.id, "astara_alt_v2");
-    expect(await listUserNamespaces(env, other.id)).toContain("astara_alt_v2");
+    await grantNamespace(env, other.id, "shared-ns");
+    expect(await listUserNamespaces(env, other.id)).toContain("shared-ns");
   });
 
   it("keeps conversations separated by user even with the same namespace name", async () => {
-    await grantNamespace(env, OWNER_DB_USER_ID, "astara_alt_v2");
+    await grantNamespace(env, OWNER_DB_USER_ID, "shared-ns");
     const owner = await resolveTenant(env, { userId: "owner" });
     const ownerClient = await connectedClient(owner);
     const ownerStore = await ownerClient.callTool({
       name: "memory_store",
       arguments: {
         title: "owner memory",
-        namespace: "astara_alt_v2",
+        namespace: "shared-ns",
         messages: [{ role: "user", content: "owner-only content" }],
       },
     });
     expect(ownerStore.isError).toBeFalsy();
 
     const other = await getOrCreateUser(env, "second@example.com");
-    await grantNamespace(env, other.id, "astara_alt_v2");
+    await grantNamespace(env, other.id, "shared-ns");
     const otherTenant = await resolveTenant(env, { userId: other.id });
     const otherClient = await connectedClient(otherTenant);
     const otherStore = await otherClient.callTool({
       name: "memory_store",
       arguments: {
         title: "second-user memory",
-        namespace: "astara_alt_v2",
+        namespace: "shared-ns",
         messages: [{ role: "user", content: "second-user content" }],
       },
     });
@@ -58,7 +58,7 @@ describe("same namespace name across accounts stays isolated", () => {
 
     const ownerList = await ownerClient.callTool({
       name: "memory_list_conversations",
-      arguments: { namespace: "astara_alt_v2" },
+      arguments: { namespace: "shared-ns" },
     });
     const ownerTitles = JSON.parse((ownerList.content?.[0] as { text: string })?.text ?? "{}") as {
       conversations: Array<{ title: string }>;
@@ -67,7 +67,7 @@ describe("same namespace name across accounts stays isolated", () => {
 
     const otherList = await otherClient.callTool({
       name: "memory_list_conversations",
-      arguments: { namespace: "astara_alt_v2" },
+      arguments: { namespace: "shared-ns" },
     });
     const otherTitles = JSON.parse((otherList.content?.[0] as { text: string })?.text ?? "{}") as {
       conversations: Array<{ title: string }>;
@@ -82,7 +82,7 @@ describe("same namespace name across accounts stays isolated", () => {
       (ownerNamespaces.content?.[0] as { text: string })?.text ?? "{}",
     ) as { namespaces: Array<{ namespace: string; conversations: number; default: boolean }> };
     expect(ownerNs.namespaces).toContainEqual({
-      namespace: "astara_alt_v2",
+      namespace: "shared-ns",
       conversations: 1,
       default: false,
     });
@@ -99,14 +99,14 @@ describe("same namespace name across accounts stays isolated", () => {
 
   it("cannot delete the other user's conversation", async () => {
     const other = await getOrCreateUser(env, "second@example.com");
-    await grantNamespace(env, other.id, "astara_alt_v2");
+    await grantNamespace(env, other.id, "shared-ns");
     const otherTenant = await resolveTenant(env, { userId: other.id });
     const otherClient = await connectedClient(otherTenant);
     const stored = await otherClient.callTool({
       name: "memory_store",
       arguments: {
         title: "second-user memory",
-        namespace: "astara_alt_v2",
+        namespace: "shared-ns",
         messages: [{ role: "user", content: "second-user content" }],
       },
     });

@@ -14,7 +14,7 @@ import {
   type OAuthEnv,
 } from "../src/oauth";
 import { sha256 } from "../src/crypto";
-import { userIdForEmail } from "../src/tenant";
+import { OWNER_EMAIL, userIdForEmail } from "../src/tenant";
 
 const oauthRequest: AuthRequest = {
   responseType: "code",
@@ -93,7 +93,7 @@ describe("OAuth authorization consent", () => {
         new Request(`${origin}/authorize?client_id=chatgpt-client`, {
           method: "POST",
           headers: { cookie, "content-type": "application/x-www-form-urlencoded" },
-          body: new URLSearchParams({ csrf: token, email: "vhie1046@gmail.com" }),
+          body: new URLSearchParams({ csrf: token, email: OWNER_EMAIL }),
         }),
         env,
       );
@@ -149,7 +149,7 @@ describe("OAuth authorization consent", () => {
     expect(html).toContain("Lanjutkan dengan email");
     expect(html).not.toContain("<script");
     const { cookie, token } = csrfFrom(getResponse, html);
-    const body = new URLSearchParams({ csrf: token, email: "vhie1046@gmail.com" });
+    const body = new URLSearchParams({ csrf: token, email: OWNER_EMAIL });
     const response = await handleAuthorization(
       new Request("https://mempersist.example/authorize?client_id=chatgpt-client", {
         method: "POST",
@@ -260,7 +260,7 @@ describe("OAuth authorization consent", () => {
     const { env, completeAuthorization, send } = testEnv(redirectTo);
     const getResponse = await consent(env);
     const { cookie, token } = csrfFrom(getResponse, await getResponse.text());
-    const email = "vhie1046@gmail.com";
+    const email = OWNER_EMAIL;
     const expectedUserId = await userIdForEmail(email);
     const body = new URLSearchParams({
       csrf: token,
@@ -361,7 +361,7 @@ describe("OAuth authorization consent", () => {
     const { cookie, token } = csrfFrom(getResponse, await getResponse.text());
     const body = new URLSearchParams({
       csrf: token,
-      email: "vhie1046@gmail.com",
+      email: OWNER_EMAIL,
     });
 
     const response = await handleAuthorization(
@@ -386,7 +386,7 @@ describe("OAuth authorization consent", () => {
 
   it("rejects an expired magic link", async () => {
     const now = new Date("2026-08-20T00:00:00.000Z");
-    const issue = await issueMagicLink(env, "login", "vhie1046@gmail.com", oauthRequest, now);
+    const issue = await issueMagicLink(env, "login", OWNER_EMAIL, oauthRequest, now);
     expect(issue).not.toBeNull();
     if (!issue) throw new Error("Expected a magic-link challenge");
 

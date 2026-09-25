@@ -58,7 +58,7 @@ async function connectedClient(tenant: Tenant) {
 }
 
 async function ownerClient() {
-  await grantNamespace(env, OWNER_DB_USER_ID, "astara_alt_v2");
+  await grantNamespace(env, OWNER_DB_USER_ID, "shared-ns");
   return await connectedClient(await resolveTenant(env, { userId: "owner" }));
 }
 
@@ -433,13 +433,13 @@ describe("memory_list_revisions", () => {
     const conversationId = z.object({ conversation_id: z.string() }).parse(
       await callValue(owner, "memory_store", {
         title: "Owner secret",
-        namespace: "astara_alt_v2",
+        namespace: "shared-ns",
         messages: [{ role: "user", content: "owner-only content" }],
       }),
     ).conversation_id;
 
     const other = await getOrCreateUser(env, "second@example.com");
-    await grantNamespace(env, other.id, "astara_alt_v2");
+    await grantNamespace(env, other.id, "shared-ns");
     const otherClient = await connectedClient(await resolveTenant(env, { userId: other.id }));
 
     const foreign = await call(otherClient, "memory_list_revisions", {
@@ -484,7 +484,7 @@ describe("memory_list_revisions", () => {
       conversation_id: z.object({ conversation_id: z.string() }).parse(
         await callValue(otherClient, "memory_store", {
           title: "Second account memory",
-          namespace: "astara_alt_v2",
+          namespace: "shared-ns",
           messages: [{ role: "user", content: "second-user content" }],
         }),
       ).conversation_id,
