@@ -1,7 +1,14 @@
+import { readdirSync } from "node:fs";
 import { Script } from "node:vm";
 import { describe, expect, it } from "vitest";
 import { landingRoutes } from "../src/landing";
 import { SITE_SCRIPT } from "../src/site";
+
+// Every recorded decision must be discoverable on the public decision log.
+const documentedAdrNumbers = readdirSync("docs/adr")
+  .map((file) => /^(\d{4})-.+\.md$/u.exec(file)?.[1])
+  .filter((number): number is string => number !== undefined)
+  .sort();
 
 describe("Minimalist public pages", () => {
   it.each(
@@ -72,11 +79,22 @@ describe("Minimalist public pages", () => {
 
   it("renders the complete decision log before progressive filtering", async () => {
     const html = await landingRoutes["/adrs"]!().text();
-    expect(html.match(/<tr data-decision>/g)).toHaveLength(31);
+    expect(documentedAdrNumbers.length).toBeGreaterThan(0);
+    expect(html.match(/<tr data-decision>/g)).toHaveLength(documentedAdrNumbers.length);
+    for (const number of documentedAdrNumbers) expect(html).toContain(`<code>${number}</code>`);
     expect(html).toContain('id="decision-search" type="search"');
     expect(html).toContain('id="decision-count" role="status"');
     expect(html).toContain('id="decision-empty" hidden');
     expect(html).not.toContain('class="toc" aria-label="On this page"');
+  });
+
+  it("keeps clean-room provenance and internal vendors out of the public interface", async () => {
+    for (const [routePath, render] of Object.entries(landingRoutes)) {
+      for (const locale of ["en", "id"] as const) {
+        const html = await render(locale).text();
+        expect(html, `${routePath} (${locale})`).not.toMatch(/engram/iu);
+      }
+    }
   });
 
   it("renders representative Indonesian content and runtime strings", async () => {
