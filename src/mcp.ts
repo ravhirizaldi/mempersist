@@ -5,6 +5,9 @@ import { deleteConversations, deleteNamespace, MAX_CONVERSATION_DELETE_BATCH } f
 import type { AppEnv } from "./domain";
 import { completeMemoryCopy, completeMemoryRestore, completeMemoryWrite } from "./writes";
 import {
+  BATCH_DEFAULT_SERIALIZED_BYTES,
+  BATCH_MAX_SERIALIZED_BYTES,
+  BATCH_MIN_SERIALIZED_BYTES,
   boundCompactPage,
   compactConversationPage,
   getChunkContext,
@@ -103,7 +106,13 @@ const canonicalConversationOutputSchema = compactConversationOutputSchema.extend
   anomalies: z.array(z.string()),
 });
 const oversizedMessageOutputSchema = z
-  .object({ offset: z.number(), sourceNodeId: z.string(), bytes: z.number() })
+  .object({
+    conversationId: z.string().optional(),
+    revisionId: z.string().optional(),
+    offset: z.number(),
+    sourceNodeId: z.string(),
+    bytes: z.number(),
+  })
   .nullable();
 const compactPageOutputSchema = z.object({
   conversation: compactConversationOutputSchema,
@@ -156,6 +165,7 @@ const contextOutputSchema = z.object({
   ),
 });
 const batchOutputSchema = z.object({
+  batchId: z.string(),
   results: z.array(
     z.object({
       requestIndex: z.number(),
@@ -165,7 +175,39 @@ const batchOutputSchema = z.object({
       error: z.object({ code: z.string(), message: z.string() }).optional(),
     }),
   ),
+  completed: z.number().int().min(0).max(20),
+  remaining: z.number().int().min(0).max(20),
+  nextCursor: nullableStringSchema,
+  usedSerializedBytes: z.number().int().nonnegative(),
+  maxSerializedBytes: z
+    .number()
+    .int()
+    .min(BATCH_MIN_SERIALIZED_BYTES)
+    .max(BATCH_MAX_SERIALIZED_BYTES),
 });
+const batchInputSchema = z
+  .object({
+    requests: z.array(conversationRequestSchema).min(1).max(20).optional(),
+    cursor: z
+      .string()
+      .min(1)
+      .max(16 * 1024)
+      .optional(),
+    max_serialized_bytes: z
+      .number()
+      .int()
+      .min(BATCH_MIN_SERIALIZED_BYTES)
+      .max(BATCH_MAX_SERIALIZED_BYTES)
+      .default(BATCH_DEFAULT_SERIALIZED_BYTES),
+  })
+  .superRefine((input, context) => {
+    if ((input.requests === undefined) === (input.cursor === undefined)) {
+      context.addIssue({
+        code: "custom",
+        message: "Provide exactly one of requests or cursor",
+      });
+    }
+  });
 const listConversationsOutputSchema = z.object({
   conversations: z.array(
     z.object({
@@ -631,13 +673,24 @@ export function createMemoryMcpServer(env: AppEnv, tenant: Tenant): McpServer {
     "memory_get_conversations",
     {
       description:
-        "Read up to 20 known memories in request order as compact pages, with individual errors and explicit continuations. Combined output is at most 48 KiB; follow every continuation, including deferred requests. An oversizedMessage requires a separate read or canonical export; prose is never truncated.",
+        "Read up to 20 owned memories with deterministic revision-pinned round-robin pagination. First calls accept requests and optional max_serialized_bytes (default 32 KiB, minimum 4 KiB, maximum 48 KiB); continuation calls accept one opaque cursor. Whole compact messages are admitted without truncation, and completed/remaining counts plus nextCursor make follow-up reads explicit. An oversizedMessage includes bounded IDs, offset, and bytes; use the authorized canonical HTTP/export read to recover its text.",
       annotations: readOnlyAnnotations,
       outputSchema: batchOutputSchema,
-      inputSchema: z.object({ requests: z.array(conversationRequestSchema).min(1).max(20) }),
+      inputSchema: batchInputSchema,
     },
-    async ({ requests }) =>
-      toolResult(await getConversations(env, requests, tenant.namespaces, tenant.userId)),
+    async (input) =>
+      toolResult(
+        await getConversations(
+          env,
+          {
+            ...(input.requests !== undefined ? { requests: input.requests } : {}),
+            ...(input.cursor !== undefined ? { cursor: input.cursor } : {}),
+            maxSerializedBytes: input.max_serialized_bytes,
+          },
+          tenant.namespaces,
+          tenant.userId,
+        ),
+      ),
   );
 
   server.registerTool(

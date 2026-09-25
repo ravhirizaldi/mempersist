@@ -55,10 +55,22 @@ history; `current_revision_id` stays pinned, and only the page containing it has
 
 For known owners whose conversation IDs are not yet known, call `memory_resolve_conversations`
 to resolve up to 20 exact titles into conversation IDs and current revision IDs without semantic
-search. For known owners, use `memory_get_conversations` and follow every `continuation`, including
-deferred requests. Single conversation/context reads support `format: "compact"` without
-changing original text. For intentional saves, request `verify: true`: the server reloads
-the exact committed R2 revision and returns persisted compact readback. Check its semantics
+search. For known owners, start `memory_get_conversations` with 1–20 `requests` and optional
+`max_serialized_bytes` (default 32,768; minimum 4,096; maximum 49,152). Continue by sending
+exactly one returned `cursor`; do not resubmit `requests`, send both fields, or send neither.
+Loop until `nextCursor` is null. Results retain `requestIndex`, isolate per-request errors, and
+report `batchId`, `results`, `completed`, `remaining`, `nextCursor`, `usedSerializedBytes`, and
+`maxSerializedBytes`.
+The complete UTF-8 response stays within the requested budget and 49,152-byte ceiling.
+The first call pins all resolved revisions before body reads and cursor calls keep those pins,
+so concurrent writes cannot mix revisions. Whole compact messages are admitted fairly in
+deterministic round-robin order. Per-item `continuation` values remain a compatibility aid,
+not the primary workflow. An oversized `page.oversizedMessage` reports conversation/revision
+identity, source node, offset, and byte size without text; recover it with an authorized
+canonical HTTP read or account export rather than retrying the same cursor.
+Single conversation/context reads support `format: "compact"` without
+changing original text. For intentional saves, request `verify: true`: the server reloads the
+exact committed R2 revision and returns persisted compact readback. Check its semantics
 and finish any readback pages using the returned `revision_id` before relying on it. Treat
 durability, verification, and indexing as separate outcomes; do not duplicate a committed
 write because a later verification/indexing step failed. See [the RP workflow](docs/rp-workflow.md)
@@ -90,7 +102,7 @@ suggested minimums without leaking text. The tool is strictly read-only and extr
 | `memory_search`                | find memories; tags + `tag_mode` filter                     |
 | `memory_get_context`           | original messages around a search hit                       |
 | `memory_get_conversation`      | page a full conversation                                    |
-| `memory_get_conversations`     | batch up to 20 known memories with compact continuations    |
+| `memory_get_conversations`     | batch 1–20 via requests, then opaque cursor loop            | fair, revision-pinned compact pages |
 | `memory_list_conversations`    | metadata + tags per conversation                            |
 | `memory_list_revisions`        | immutable revision history of one owned conversation        |
 | `memory_resolve_conversations` | resolve up to 20 exact titles without semantic search       |

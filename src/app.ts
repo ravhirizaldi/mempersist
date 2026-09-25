@@ -100,8 +100,8 @@ app.get("/sitemap.xml", () => sitemapResponse());
 app.get("/.well-known/security.txt", () => securityTxtResponse());
 app.get("/site.webmanifest", () => manifestResponse());
 app.get("/llms.txt", () => llmsTxtResponse());
-app.get("/site.css", () => siteCssResponse());
-app.get("/site.js", () => siteScriptResponse());
+app.get("/site.css", (c) => siteCssResponse(c.req.query("v")));
+app.get("/site.js", (c) => siteScriptResponse(c.req.query("v")));
 for (const [path, handler] of Object.entries(landingRoutes)) {
   app.get(path, (c) => handler(c.get("locale")));
 }
