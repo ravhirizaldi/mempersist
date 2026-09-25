@@ -645,7 +645,7 @@ function securityPage(locale: Locale = "en"): Response {
 
 function adrsPage(locale: Locale = "en"): Response {
   const adrs: Array<[string, string]> = [
-    ["0001", "Clean-room platform, no Engram reuse"],
+    ["0001", "Clean-room memory platform"],
     ["0002", "R2 canonical store"],
     ["0003", "D1 operational catalog"],
     ["0004", "Hybrid retrieval"],
@@ -676,6 +676,10 @@ function adrsPage(locale: Locale = "en"): Response {
     ["0029", "Bundled graph library for the memory map"],
     ["0030", "Revision restore head transitions"],
     ["0031", "Canonical conversation copy"],
+    ["0032", "Deterministic context compilation and pinning"],
+    ["0033", "Pointer-aware deterministic expansion"],
+    ["0034", "Deterministic pointer follow expansion"],
+    ["0035", "Cursor-driven batch conversation pagination"],
   ];
   const rows = adrs
     .map(
