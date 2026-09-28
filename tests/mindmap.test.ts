@@ -3,7 +3,14 @@ import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
-import { buildMindmapGraph } from "../web/mindmap/graph";
+import {
+  buildCountDotEdge,
+  buildCountDotNode,
+  buildMindmapGraph,
+  buildMoreEdge,
+  buildMoreNode,
+} from "../web/mindmap/graph";
+import type { MindmapClientConversation } from "../web/mindmap/types";
 import { mindmapBundleFingerprint } from "../src/mindmap-bundle";
 
 const here = dirname(fileURLToPath(import.meta.url));
@@ -14,13 +21,8 @@ const conversation = (
   namespace: string,
   title: string,
   tags: string[] = [],
-): {
-  id: string;
-  namespace: string;
-  title: string;
-  tags: string[];
-  updated_at: string | null;
-} => ({ id, namespace, title, tags, updated_at: null });
+  messages = 0,
+): MindmapClientConversation => ({ id, namespace, title, tags, updated_at: null, messages });
 
 describe("mindmap graph construction", () => {
   it("links the account to namespaces and namespaces to conversations", () => {
@@ -33,7 +35,7 @@ describe("mindmap graph construction", () => {
       [
         conversation("b", "work", "Beta"),
         conversation("a", "work", "Alpha", ["decision"]),
-        conversation("c", "personal", "Gamma"),
+        conversation("c", "personal", "Gamma", [], 3),
       ],
     );
 
@@ -52,6 +54,12 @@ describe("mindmap graph construction", () => {
       "edge:namespace:work:conversation:a",
       "edge:namespace:work:conversation:b",
     ]);
+    expect(graph.nodes[2]?.data).toMatchObject({
+      id: "conversation:c",
+      kind: "conversation",
+      conversationId: "c",
+      messages: 3,
+    });
   });
 
   it("is deterministic regardless of input ordering", () => {
@@ -61,7 +69,7 @@ describe("mindmap graph construction", () => {
         { namespace: "work", conversations: 1 },
         { namespace: "alpha", conversations: 1 },
       ],
-      [conversation("z", "work", "Zulu"), conversation("a", "alpha", "Alpha")],
+      [conversation("z", "work", "Zulu", [], 2), conversation("a", "alpha", "Alpha", [], 5)],
     );
     const second = buildMindmapGraph(
       "My account",
@@ -69,7 +77,7 @@ describe("mindmap graph construction", () => {
         { namespace: "alpha", conversations: 1 },
         { namespace: "work", conversations: 1 },
       ],
-      [conversation("a", "alpha", "Alpha"), conversation("z", "work", "Zulu")],
+      [conversation("a", "alpha", "Alpha", [], 5), conversation("z", "work", "Zulu", [], 2)],
     );
     expect(first).toEqual(second);
   });
@@ -78,7 +86,7 @@ describe("mindmap graph construction", () => {
     const graph = buildMindmapGraph(
       "My account",
       [{ namespace: "work", conversations: 7 }],
-      [conversation("a", "work", "Alpha", ["decision", "runbook"])],
+      [conversation("a", "work", "Alpha", ["decision", "runbook"], 4)],
     );
     expect(graph.nodes[1]?.data).toMatchObject({
       kind: "namespace",
@@ -90,7 +98,22 @@ describe("mindmap graph construction", () => {
       conversationId: "a",
       label: "Alpha",
       tags: "decision, runbook",
+      messages: 4,
     });
+  });
+
+  it("carries the active message count on every conversation node", () => {
+    const graph = buildMindmapGraph(
+      "My account",
+      [{ namespace: "work", conversations: 2 }],
+      [conversation("a", "work", "Alpha", [], 0), conversation("b", "work", "Beta", [], 12)],
+    );
+    expect(graph.nodes).toMatchObject([
+      { data: { id: "account", kind: "account" } },
+      { data: { id: "namespace:work", kind: "namespace" } },
+      { data: { id: "conversation:a", kind: "conversation", messages: 0 } },
+      { data: { id: "conversation:b", kind: "conversation", messages: 12 } },
+    ]);
   });
 
   it("still renders an account node when no memories exist", () => {
@@ -109,6 +132,62 @@ describe("mindmap graph construction", () => {
     const label = (node?.data as Record<string, unknown> | undefined)?.["label"];
     expect(label).toBe("<img src=x onerror=alert(1)>");
     expect(JSON.stringify(graph)).not.toContain("innerHTML");
+  });
+});
+
+describe("mindmap drill-down builders", () => {
+  it("builds a conversation count dot and its edge with deterministic ids", () => {
+    const node = buildCountDotNode("abc", 7, "messages");
+    expect(node.data).toEqual({
+      id: "messages:abc",
+      kind: "messages",
+      label: "messages",
+      messages: 7,
+      source: "conversation:abc",
+      conversationId: "abc",
+    });
+
+    const edge = buildCountDotEdge("abc");
+    expect(edge.data).toEqual({
+      id: "edge:conversation:abc:messages:abc",
+      source: "conversation:abc",
+      target: "messages:abc",
+    });
+  });
+
+  it("builds a namespace more node and its edge with the remaining count", () => {
+    const node = buildMoreNode("work", 12, "more");
+    expect(node.data).toEqual({
+      id: "more:work",
+      kind: "more",
+      label: "more",
+      namespace: "work",
+      remaining: 12,
+    });
+
+    const edge = buildMoreEdge("work");
+    expect(edge.data).toEqual({
+      id: "edge:namespace:work:more:work",
+      source: "namespace:work",
+      target: "more:work",
+    });
+  });
+
+  it("keeps stored namespaces and ids as plain values, never markup", () => {
+    const namespace = `<img src=x onerror=alert(1)>`;
+    const more = buildMoreNode(namespace, 1, "more");
+    expect(more.data).toMatchObject({ namespace, label: "more", remaining: 1 });
+    expect(JSON.stringify(more)).not.toContain("innerHTML");
+
+    const conversationId = `" onmouseover="alert(1)`;
+    const dot = buildCountDotNode(conversationId, 2, "messages");
+    expect(dot.data).toMatchObject({ id: `messages:${conversationId}`, conversationId });
+    expect(JSON.stringify(dot)).not.toContain("innerHTML");
+  });
+
+  it("labels the count dot and more node from the supplied copy, not stored data", () => {
+    expect(buildCountDotNode("abc", 3, "pesan").data).toMatchObject({ label: "pesan" });
+    expect(buildMoreNode("work", 0, "lainnya").data).toMatchObject({ label: "lainnya" });
   });
 });
 

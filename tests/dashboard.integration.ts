@@ -396,16 +396,102 @@ describe("dashboard authentication and isolation", () => {
       "camera=(), microphone=(), geolocation=()",
     );
     expect(html).not.toContain("cdn.jsdelivr.net");
+    expect(html).not.toMatch(/<script[^>]*src="(?:https?:)?\/\//);
     expect(html).toContain('id="memory-map" class="mindmap-canvas"');
     expect(html).toContain('id="map-tooltip"');
     expect(html).toContain('id="map-collapse-all"');
     expect(html).toContain('id="map-expand-all"');
     expect(html).toContain('id="map-reset-view"');
+    expect(html).toContain('id="map-zoom-in"');
+    expect(html).toContain('id="map-zoom-out"');
+    expect(html).toContain('id="map-search"');
+    expect(html).toContain('id="map-query"');
+    expect(html).toContain('id="map-list-toggle"');
+    expect(html).toMatch(/<[a-z]+(?=[^>]*id="map-list")(?=[^>]*[ \t]hidden[ >])[^>]*>/);
+    expect(html).toMatch(/<p(?=[^>]*id="map-status")(?=[^>]*role="status")[^>]*>/);
+    expect(html).toMatch(/class="[^"]*\bmap-stage\b[^"]*"/);
+    expect(html).toMatch(/class="[^"]*\bmap-shell\b[^"]*"/);
+    expect(html).toMatch(/class="[^"]*\bmap-core\b[^"]*"/);
+    expect(html).toMatch(/class="[^"]*\bmap-island\b[^"]*"/);
+    expect(html).toMatch(/class="[^"]*\bmap-legend\b[^"]*"/);
+    expect(html).not.toContain('class="map-panel"');
+    expect(html).not.toMatch(/class="[^"]*\bhero\b/);
+    expect(html).not.toContain('class="card"');
     expect(html).toContain("window.__mempersistMindmap=");
     expect(html).toContain("&lt;script&gt;map title&lt;/script&gt;");
     expect(html).not.toContain("<script>map title</script>");
     expect(html).not.toContain("<img src=x");
     expect(html).toContain('class="tree-list"');
+  });
+
+  it("scopes mindmap drill-down data to the requested namespace", async () => {
+    const test = dashboardEnv();
+    const first = await signIn(test.env, test.sent, "drill-one@example.com");
+    const firstUser = await getOrCreateUser(test.env, "drill-one@example.com");
+    const secondUser = await getOrCreateUser(test.env, "drill-two@example.com");
+    await grantNamespace(test.env, firstUser.id, "work");
+    await grantNamespace(test.env, firstUser.id, "personal");
+    await grantNamespace(test.env, secondUser.id, "work");
+    await grantNamespace(test.env, secondUser.id, "private-ns");
+
+    const ownWork = await createMcpConversation({
+      title: "work memory",
+      namespace: "work",
+      messages: [
+        { role: "user", content: "one" },
+        { role: "assistant", content: "two" },
+        { role: "user", content: "three" },
+      ],
+    });
+    const ownPersonal = await createMcpConversation({
+      title: "personal memory",
+      namespace: "personal",
+      messages: [{ role: "user", content: "solo" }],
+    });
+    const foreignWork = await createMcpConversation({
+      title: "foreign work memory",
+      namespace: "work",
+      messages: [{ role: "user", content: "not yours" }],
+    });
+    const foreignPrivate = await createMcpConversation({
+      title: "foreign private memory",
+      namespace: "private-ns",
+      messages: [{ role: "user", content: "hidden" }],
+    });
+    await writeCanonicalConversation(test.env, ownWork, null, null, firstUser.id);
+    await writeCanonicalConversation(test.env, ownPersonal, null, null, firstUser.id);
+    await writeCanonicalConversation(test.env, foreignWork, null, null, secondUser.id);
+    await writeCanonicalConversation(test.env, foreignPrivate, null, null, secondUser.id);
+
+    const scoped = await handleDashboardRequest(
+      new Request(
+        "https://mempersist.codifiedtech.id/dashboard/mindmap/data?namespace=work&limit=50",
+        { headers: { cookie: first.cookie } },
+      ),
+      test.env,
+    );
+    expect(scoped.status).toBe(200);
+    const scopedJson = await scoped.json<{
+      conversations: Array<{ id: string; namespace: string; messages: number }>;
+    }>();
+    expect(scopedJson.conversations.map((item) => item.id)).toEqual([ownWork.id]);
+    expect(scopedJson.conversations[0]?.namespace).toBe("work");
+    expect(typeof scopedJson.conversations[0]?.messages).toBe("number");
+    expect(scopedJson.conversations[0]?.messages).toBe(3);
+    expect(scopedJson.conversations.map((item) => item.id)).not.toContain(foreignWork.id);
+    expect(scopedJson.conversations.map((item) => item.id)).not.toContain(ownPersonal.id);
+
+    const foreignScope = await handleDashboardRequest(
+      new Request(
+        "https://mempersist.codifiedtech.id/dashboard/mindmap/data?namespace=private-ns",
+        {
+          headers: { cookie: first.cookie },
+        },
+      ),
+      test.env,
+    );
+    expect(foreignScope.status).toBe(404);
+    expect(await foreignScope.text()).not.toContain(foreignPrivate.id);
   });
 });
 

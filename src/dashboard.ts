@@ -40,6 +40,7 @@ interface MindmapConversation {
   namespace: string;
   updated_at: string | null;
   tags: string[];
+  messages: number;
 }
 
 const copy = {
@@ -77,12 +78,9 @@ const copy = {
     cancelDeletion: "Cancel deletion",
     search: "Search titles and tags",
     searchButton: "Search",
-    loadMore: "Load more",
     loading: "Loading memory map…",
     noMemories: "No memories found.",
     mapError: "The memory map could not be loaded.",
-    mapHint:
-      "Drag to pan, scroll or use the controls to zoom, select a namespace to collapse it, and hover any memory for details.",
     collapseAll: "Collapse all",
     expandAll: "Expand all",
     resetView: "Reset view",
@@ -129,12 +127,9 @@ const copy = {
     cancelDeletion: "Batalkan penghapusan",
     search: "Cari judul dan tag",
     searchButton: "Cari",
-    loadMore: "Muat lagi",
     loading: "Memuat peta memori…",
     noMemories: "Tidak ada memori ditemukan.",
     mapError: "Peta memori tidak dapat dimuat.",
-    mapHint:
-      "Seret untuk menggeser, gulir atau gunakan kontrol untuk memperbesar, pilih namespace untuk melipatnya, dan arahkan kursor ke memori mana pun untuk detail.",
     collapseAll: "Lipat semua",
     expandAll: "Buka semua",
     resetView: "Atur ulang tampilan",
@@ -249,7 +244,12 @@ function page(
   body: string,
   locale: Locale,
   requestPath: string,
-  options: { session?: DashboardSession; script?: string; status?: number } = {},
+  options: {
+    session?: DashboardSession;
+    script?: string;
+    status?: number;
+    fullBleed?: boolean;
+  } = {},
 ): Response {
   const n = nonce();
   const t = copy[locale];
@@ -264,7 +264,7 @@ function page(
     ? `<nav class="dashboard-nav" aria-label="${messages(locale).shared.mainNav}">${brand()}<details class="dashboard-menu"><summary class="nav-toggle" aria-haspopup="true"><span class="hamburger" aria-hidden="true"></span><span class="sr-only">${messages(locale).shared.menu}</span></summary><div class="nav-panel"><a href="/dashboard"${dashboardCurrent ? ' aria-current="page"' : ""}>${t.dashboard}</a><a href="/dashboard/mindmap"${mapCurrent ? ' aria-current="page"' : ""}>${t.memoryMap}</a><a href="/dashboard/export">${t.export}</a>${language}<form method="post" action="/logout"><input type="hidden" name="csrf" value="${options.session.csrf}"><button class="link-button" type="submit">${t.logout}</button></form></div></details></nav>`
     : `<nav class="dashboard-nav">${brand()}<div>${language}</div></nav>`;
   return new Response(
-    `<!doctype html><html lang="${locale}"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>${escapeHtml(title)} · MemPersist</title>${FAVICON}<link rel="preconnect" href="https://fonts.googleapis.com"><link rel="preconnect" href="https://fonts.gstatic.com" crossorigin><link href="https://fonts.googleapis.com/css2?family=Outfit:wght@400;500;600&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet"><style nonce="${n}">${BASE_CSS}${DASHBOARD_CSS}</style></head><body><a class="skip-link" href="#main">${messages(locale).shared.skip}</a>${nav}<main id="main" class="dashboard-shell" tabindex="-1">${body}</main>${options.session ? `<script nonce="${n}">${DASHBOARD_MENU_SCRIPT}</script>` : ""}${options.script ? `<script nonce="${n}">${options.script}</script>` : ""}</body></html>`,
+    `<!doctype html><html lang="${locale}"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>${escapeHtml(title)} · MemPersist</title>${FAVICON}<link rel="preconnect" href="https://fonts.googleapis.com"><link rel="preconnect" href="https://fonts.gstatic.com" crossorigin><link href="https://fonts.googleapis.com/css2?family=Outfit:wght@400;500;600&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet"><style nonce="${n}">${BASE_CSS}${DASHBOARD_CSS}</style></head><body><a class="skip-link" href="#main">${messages(locale).shared.skip}</a>${nav}<main id="main" class="dashboard-shell${options.fullBleed ? " full-bleed" : ""}" tabindex="-1">${body}</main>${options.session ? `<script nonce="${n}">${DASHBOARD_MENU_SCRIPT}</script>` : ""}${options.script ? `<script nonce="${n}">${options.script}</script>` : ""}</body></html>`,
     {
       headers: htmlHeaders(locale, n),
       ...(options.status === undefined ? {} : { status: options.status }),
@@ -672,7 +672,10 @@ async function mindmapData(
   }
   params.push(input.limit + 1);
   const rows = await env.MEMORY_DB.prepare(
-    `SELECT id, title, namespace, updated_at FROM conversations
+    `SELECT id, title, namespace, updated_at,
+       (SELECT COUNT(*) FROM message_nodes node
+         WHERE node.revision_id = conversations.current_revision_id AND node.is_active = 1) AS messages
+     FROM conversations
      WHERE ${where.join(" AND ")} ORDER BY id LIMIT ?`,
   )
     .bind(...params)
@@ -714,6 +717,7 @@ async function mindmap(
   session: DashboardSession,
 ): Promise<Response> {
   const t = copy[locale];
+  const mapCopy = messages(locale).map;
   const initialQuery = z
     .string()
     .max(100)
@@ -731,13 +735,17 @@ async function mindmap(
     emptyLabel: t.noMemories,
     failedLabel: t.mapError,
     loadingLabel: t.loading,
+    messagesLabel: mapCopy.messagesLabel,
+    moreLabel: mapCopy.moreLabel,
+    zoomInLabel: mapCopy.zoomInLabel,
+    zoomOutLabel: mapCopy.zoomOutLabel,
   });
   return page(
     t.memoryMap,
-    `<header class="hero"><p class="eyebrow">${t.memoryMap}</p><h1>${t.memoryMap}</h1><p>${t.mapHint}</p></header><form id="map-search" class="search-form"><label for="map-query">${t.search}</label><div><input id="map-query" name="q" maxlength="100"><button class="button" type="submit">${t.searchButton}</button></div></form><section class="map-panel" aria-labelledby="map-status"><div class="map-toolbar" role="toolbar" aria-label="${escapeHtml(t.memoryMap)}"><div class="map-actions"><button id="map-collapse-all" class="chip-button" type="button">${t.collapseAll}</button><button id="map-expand-all" class="chip-button" type="button">${t.expandAll}</button><button id="map-reset-view" class="chip-button" type="button">${t.resetView}</button></div><div class="map-actions"><button id="map-zoom-out" class="chip-button" type="button" aria-label="Zoom out">−</button><button id="map-zoom-in" class="chip-button" type="button" aria-label="Zoom in">+</button></div></div><div class="map-legend" aria-label="${escapeHtml(t.memoryMap)}"><span><i class="map-dot account" aria-hidden="true"></i>${escapeHtml(accountLabel)}</span><span><i class="map-dot namespace" aria-hidden="true"></i>${escapeHtml(t.namespaces)}</span><span><i class="map-dot conversation" aria-hidden="true"></i>${escapeHtml(t.conversations)}</span></div><div id="map-viewport" class="map-viewport"><p id="map-status" role="status">${t.loading}</p><div id="memory-map" class="mindmap-canvas" aria-hidden="true" tabindex="0"></div><div id="map-tooltip" class="map-tooltip" hidden></div></div><button id="load-more" class="button secondary" type="button" hidden>${t.loadMore}</button></section><section class="card"><h2>${t.accessibleTree}</h2>${accessibleTree(initial, locale)}</section>`,
+    `<div class="map-stage"><div class="map-shell"><div class="map-core"><div id="map-viewport" class="map-viewport"><p id="map-status" role="status">${t.loading}</p><div id="memory-map" class="mindmap-canvas" aria-hidden="true" tabindex="0"></div><div id="map-tooltip" class="map-tooltip" hidden></div></div><div class="map-island" role="group" aria-label="${escapeHtml(t.memoryMap)}"><button id="map-collapse-all" class="map-btn" type="button" aria-label="${escapeHtml(t.collapseAll)}"><span class="map-btn-label">${escapeHtml(t.collapseAll)}</span><span class="map-btn-glyph" aria-hidden="true">−</span></button><button id="map-expand-all" class="map-btn" type="button" aria-label="${escapeHtml(t.expandAll)}"><span class="map-btn-label">${escapeHtml(t.expandAll)}</span><span class="map-btn-glyph" aria-hidden="true">+</span></button><button id="map-reset-view" class="map-btn" type="button" aria-label="${escapeHtml(t.resetView)}"><span class="map-btn-label">${escapeHtml(t.resetView)}</span><span class="map-btn-glyph" aria-hidden="true">↺</span></button><button id="map-zoom-out" class="map-btn map-btn-icon" type="button" aria-label="${escapeHtml(mapCopy.zoomOutLabel)}"><span class="map-btn-glyph" aria-hidden="true">−</span></button><button id="map-zoom-in" class="map-btn map-btn-icon" type="button" aria-label="${escapeHtml(mapCopy.zoomInLabel)}"><span class="map-btn-glyph" aria-hidden="true">+</span></button><form id="map-search" class="map-search" method="get" action="/dashboard/mindmap"><label class="sr-only" for="map-query">${t.search}</label><input id="map-query" name="q" maxlength="100" autocomplete="off" placeholder="${escapeHtml(t.search)}"><button class="map-btn map-btn-icon" type="submit" aria-label="${escapeHtml(t.searchButton)}"><span class="map-btn-glyph" aria-hidden="true">↵</span></button></form><button id="map-list-toggle" class="map-btn" type="button" aria-expanded="false" aria-controls="map-list" aria-label="${escapeHtml(t.accessibleTree)}"><span class="map-btn-label">${escapeHtml(t.accessibleTree)}</span><span class="map-btn-glyph" aria-hidden="true">☰</span></button></div><div class="map-legend" role="group" aria-label="${escapeHtml(t.memoryMap)}"><span><i class="map-dot account" aria-hidden="true"></i>${escapeHtml(accountLabel)}</span><span><i class="map-dot namespace" aria-hidden="true"></i>${escapeHtml(t.namespaces)}</span><span><i class="map-dot conversation" aria-hidden="true"></i>${escapeHtml(t.conversations)}</span></div><div id="map-list" class="map-list-panel" hidden><p class="map-list-title">${escapeHtml(t.accessibleTree)}</p>${accessibleTree(initial, locale)}</div></div></div></div>`,
     locale,
     "/dashboard/mindmap",
-    { session, script },
+    { session, script, fullBleed: true },
   );
 }
 
@@ -999,6 +1007,13 @@ summary.nav-toggle::-webkit-details-marker{display:none}
 .language a[aria-current]{color:var(--accent);font-weight:600}
 .language-sep{color:var(--line);margin:0 1px}
 .dashboard-shell{width:min(1200px,calc(100% - 48px));margin:0 auto;padding:32px 0 64px}
+.dashboard-shell.full-bleed{width:100%;max-width:none;margin:0;padding:0}
+.map-stage{position:relative;min-height:calc(100dvh - 72px);padding:14px;background:var(--canvas)}
+.map-shell{min-height:calc(100dvh - 100px);padding:10px;border-radius:2rem;background:rgba(255,254,250,.72);box-shadow:0 0 0 1px rgba(40,42,37,.05),0 36px 70px -56px rgba(40,42,37,.55)}
+.map-core{position:relative;min-height:calc(100dvh - 120px);border-radius:calc(2rem - 6px);background-color:#161c17;background-image:radial-gradient(circle at 50% 46%,rgba(128,165,113,.16),transparent 46%),radial-gradient(circle,rgba(82,100,82,.5) 1px,transparent 1px);background-size:100% 100%,26px 26px;box-shadow:inset 0 1px 1px rgba(255,255,255,.14),0 30px 60px -46px rgba(22,35,25,.75);overflow:hidden}
+/* The graph box excludes the overlay bands: status/legend on top, island on the bottom,
+   so the layout can never place nodes underneath a floating control. */
+.map-viewport{position:absolute;inset:0;padding:52px 14px 104px}
 .dash-head{display:flex;align-items:flex-end;justify-content:space-between;gap:20px;flex-wrap:wrap;margin-bottom:28px;padding-bottom:22px;border-bottom:1px solid var(--line);min-width:0;max-width:100%}
 .dash-head>div{min-width:0;max-width:100%;flex:1}
 .dash-hero{display:grid;grid-template-columns:minmax(0,1fr) minmax(360px,460px);align-items:end;gap:40px;min-height:190px;padding:20px 0 26px;position:relative}
@@ -1017,7 +1032,7 @@ summary.nav-toggle::-webkit-details-marker{display:none}
 .dash-metric span{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font:500 10px var(--mono);color:var(--muted);text-transform:uppercase;letter-spacing:.08em}
 .dash-main{display:grid;grid-template-columns:320px minmax(0,1fr);gap:24px;align-items:start;margin-bottom:28px}
 .dash-side,.dash-content{display:flex;flex-direction:column;gap:20px;min-width:0;max-width:100%}
-.card,.map-panel{padding:24px 28px;border:1px solid var(--line);background:var(--surface);border-radius:8px;box-shadow:0 1px 3px rgba(40,42,37,.03);min-width:0;max-width:100%}
+.card{padding:24px 28px;border:1px solid var(--line);background:var(--surface);border-radius:8px;box-shadow:0 1px 3px rgba(40,42,37,.03);min-width:0;max-width:100%}
 .card h2{margin:0;font-size:16px;font-weight:500;letter-spacing:-.02em;color:var(--ink)}
 .section-heading{display:flex;align-items:center;justify-content:space-between;gap:16px;margin-bottom:16px;padding-bottom:14px;border-bottom:1px solid var(--line);min-width:0;max-width:100%}
 .section-heading h2{margin:0;min-width:0;max-width:100%}
@@ -1096,26 +1111,34 @@ input:focus-visible{outline:0;border-color:var(--accent);box-shadow:0 0 0 3px rg
 .tags a{display:inline-flex;min-width:0;max-width:100%;text-decoration:none}
 .tags span,.tags a span{padding:3px 8px;border-radius:4px;background:var(--tint);color:var(--accent);font:10px var(--mono);border:1px solid rgba(66,99,74,.15);min-width:0;max-width:min(200px,100%);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .pagination{display:flex;justify-content:space-between;gap:16px;margin-top:28px}
-.search-form{display:grid;gap:10px;margin-bottom:24px}
-.search-form>div{display:flex;gap:10px}
-.map-panel{overflow:hidden;margin-bottom:28px;background:#1b211c;border-color:#3a493c;box-shadow:0 16px 40px -22px rgba(22,35,25,.5)}
-.map-toolbar{display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap;margin:0 0 12px}
-.map-actions{display:flex;align-items:center;gap:8px;flex-wrap:wrap}
-.chip-button{min-height:34px;padding:6px 14px;border:1px solid #536351;border-radius:6px;background:#253027;color:#dce8d5;font:500 11px var(--mono);transition:all .18s var(--ease);cursor:pointer}
-.chip-button:hover{background:#324334;border-color:#9ebd8e;color:#f0f6eb;transform:translateY(-1px)}
-.map-legend{display:flex;align-items:center;gap:16px;flex-wrap:wrap;margin:0 0 12px;font:10px var(--mono);color:#9ead9b}
+#map-status{position:absolute;top:16px;left:16px;z-index:3;margin:0;padding:7px 13px;border:1px solid rgba(255,255,255,.14);border-radius:999px;background:rgba(18,24,19,.55);color:#cfdcc7;font:10px/1.5 var(--mono);letter-spacing:.05em;transition:opacity .5s cubic-bezier(.32,.72,0,1)}
+.mindmap-canvas{display:block;width:100%;height:100%;outline-offset:2px;touch-action:none}
+.mindmap-canvas canvas{cursor:grab}
+.map-tooltip{position:absolute;z-index:4;display:grid;gap:2px;max-width:260px;padding:11px 15px;border:1px solid rgba(40,42,37,.08);border-radius:18px;background:rgba(255,254,250,.9);box-shadow:0 18px 40px -30px rgba(22,35,25,.75);backdrop-filter:blur(14px);-webkit-backdrop-filter:blur(14px);pointer-events:none;font:11px/1.5 var(--mono);color:var(--muted);transition:opacity .5s cubic-bezier(.32,.72,0,1),transform .5s cubic-bezier(.32,.72,0,1)}
+.map-tooltip>*{min-width:0;max-width:100%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.map-tooltip strong{font:500 13px/1.4 Outfit,sans-serif;color:var(--ink);min-width:0;max-width:100%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.map-tooltip span,.map-tooltip p{color:var(--muted);min-width:0;max-width:100%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.map-island,.map-legend,.map-list-panel{animation:map-rise .5s cubic-bezier(.32,.72,0,1) both}
+.map-island{position:absolute;left:16px;right:16px;bottom:16px;z-index:5;display:flex;align-items:center;gap:8px;flex-wrap:wrap;padding:8px;border:1px solid rgba(40,42,37,.07);border-radius:1.5rem;background:rgba(255,254,250,.72);box-shadow:0 20px 45px -32px rgba(22,35,25,.6);backdrop-filter:blur(18px) saturate(1.12);-webkit-backdrop-filter:blur(18px) saturate(1.12)}
+.map-btn{display:inline-flex;align-items:center;gap:9px;min-height:40px;padding:5px 7px 5px 15px;border:1px solid rgba(40,42,37,.07);border-radius:999px;background:rgba(255,254,250,.86);color:var(--ink);font:500 11px/1 var(--mono);white-space:nowrap;transition:transform .5s cubic-bezier(.32,.72,0,1),background .3s cubic-bezier(.32,.72,0,1),box-shadow .5s cubic-bezier(.32,.72,0,1),color .3s cubic-bezier(.32,.72,0,1)}
+.map-btn:hover{background:var(--tint);box-shadow:0 10px 22px -16px rgba(22,35,25,.55)}
+.map-btn:active{transform:scale(.98)}
+.map-btn-icon{padding:5px}
+.map-btn-glyph{display:grid;place-items:center;width:26px;height:26px;border-radius:999px;background:rgba(66,99,74,.1);color:var(--accent);font:500 12px/1 var(--mono);transition:background .3s cubic-bezier(.32,.72,0,1)}
+.map-btn:hover .map-btn-glyph{background:rgba(66,99,74,.18)}
+.map-search{display:flex;align-items:center;gap:6px;flex:1 1 220px;min-width:0;padding:0 5px 0 15px;border:1px solid rgba(40,42,37,.08);border-radius:999px;background:rgba(255,255,255,.7);transition:border-color .3s cubic-bezier(.32,.72,0,1),box-shadow .3s cubic-bezier(.32,.72,0,1)}
+.map-search:focus-within{border-color:rgba(66,99,74,.45);box-shadow:0 0 0 3px rgba(66,99,74,.12)}
+.map-search input{flex:1;min-width:0;height:38px;border:0;background:none;color:var(--ink);font-size:13px}
+.map-search input:focus-visible{outline:0;background:none;box-shadow:none}
+.map-legend{position:absolute;top:16px;right:16px;z-index:5;display:flex;align-items:center;gap:14px;flex-wrap:wrap;padding:9px 15px;border:1px solid rgba(40,42,37,.07);border-radius:999px;background:rgba(255,254,250,.7);box-shadow:0 16px 36px -28px rgba(22,35,25,.6);backdrop-filter:blur(16px);-webkit-backdrop-filter:blur(16px);font:10px/1.4 var(--mono);color:var(--muted)}
 .map-legend span{display:inline-flex;align-items:center;gap:7px}
 .map-dot{display:inline-block;width:9px;height:9px;border-radius:50%;border:1px solid #a9c49a}
 .map-dot.account{width:11px;height:11px;background:#42634a}
 .map-dot.namespace{background:#b9d2aa;border-color:#7e9f70}
 .map-dot.conversation{background:#eef3e8;border-color:#9eaf9a}
-.map-viewport>p{font:11px var(--mono);color:#9ead9b;margin:0 0 10px}
-.mindmap-canvas{display:block;width:100%;height:620px;background-color:#171d18;background-image:radial-gradient(circle at 50% 50%,rgba(128,165,113,.12),transparent 42%),radial-gradient(circle,#526452 1px,transparent 1px);background-size:100% 100%,24px 24px;border:1px solid #3a493c;border-radius:6px;outline-offset:2px;touch-action:none}
-.mindmap-canvas canvas{cursor:grab}
-.map-tooltip{position:absolute;z-index:2;display:grid;gap:2px;max-width:260px;padding:10px 14px;border:1px solid #536351;border-radius:6px;background:#eef3e8;box-shadow:0 12px 28px -18px rgba(0,0,0,.75);pointer-events:none;font:11px/1.5 var(--mono);color:#4f5f50}
-.map-tooltip>*{min-width:0;max-width:100%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-.map-tooltip strong{font:500 13px/1.4 Outfit,sans-serif;color:#1f2b21;min-width:0;max-width:100%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-.map-tooltip span,.map-tooltip p{min-width:0;max-width:100%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.map-list-panel{position:absolute;top:16px;left:16px;z-index:6;width:min(360px,calc(100% - 32px));max-height:calc(100% - 120px);overflow:auto;overscroll-behavior:contain;padding:20px 22px;border:1px solid rgba(40,42,37,.07);border-radius:1.75rem;background:rgba(255,254,250,.92);box-shadow:0 30px 60px -40px rgba(22,35,25,.7);backdrop-filter:blur(20px);-webkit-backdrop-filter:blur(20px)}
+.map-list-title{margin:0 0 12px;font:500 10px/1.5 var(--mono);letter-spacing:.14em;text-transform:uppercase;color:var(--accent)}
+@keyframes map-rise{from{opacity:0;transform:translateY(12px)}to{opacity:1;transform:none}}
 .tree-list ul{margin:8px 0 16px}
 .tree-list li{min-width:0;max-width:100%}
 .tree-list details{min-width:0;max-width:100%}
@@ -1159,10 +1182,25 @@ input:focus-visible{outline:0;border-color:var(--accent);box-shadow:0 0 0 3px rg
   .dash-hero-rail{align-self:stretch;padding:18px 0 0;border-left:0;border-top:1px solid var(--line)}
   .dash-actions{justify-content:flex-start}
   .dash-main{grid-template-columns:minmax(0,1fr);gap:20px}
-  .card,.map-panel{padding:20px 18px}
+  .card{padding:20px 18px}
   .auth-card{padding:28px 20px;margin-top:4vh}
-  .search-form>div{display:grid}
-  .mindmap-canvas{height:460px}
+  .map-stage{padding:8px;min-height:calc(100dvh - 64px)}
+  .map-shell{min-height:calc(100dvh - 84px);padding:8px;border-radius:1.5rem}
+  .map-core{min-height:calc(100dvh - 100px);border-radius:calc(1.5rem - 6px)}
+  .map-island{position:static;order:2;margin:2px;gap:6px;padding:7px;border-radius:1.25rem}
+  .map-btn-label{display:none}
+  /* Below the desktop breakpoint the controls sit in flow under the map, so the graph can
+     never be covered by the island and no pixel reservation has to match the island height.
+     The map needs a definite height for the percentage-sized canvas to resolve. */
+  .map-core{display:flex;flex-direction:column;height:calc(100dvh - 100px);min-height:0}
+  .map-viewport{position:relative;inset:auto;flex:1 1 auto;min-height:0;padding:104px 10px 16px}
+  .map-btn{min-height:36px;padding:4px 6px 4px 12px}
+  .map-btn-icon{padding:4px}
+  .map-btn-glyph{width:24px;height:24px}
+  .map-legend{top:10px;left:10px;right:10px;justify-content:center}
+  #map-status{top:58px;left:10px}
+  .map-search{flex:1 1 100%}
+  .map-list-panel{top:10px;left:10px;right:10px;width:auto;max-height:60%}
   .message{padding:18px}
   .namespace-list>li{flex-wrap:wrap;gap:12px}
   .namespace-actions{width:100%;justify-content:flex-start}

@@ -29,6 +29,12 @@ export const en = {
     indonesian: "Bahasa Indonesia",
     description: "MemPersist — durable AI conversation memory for ChatGPT and coding agents.",
   },
+  map: {
+    messagesLabel: "messages",
+    moreLabel: "more",
+    zoomInLabel: "Zoom in",
+    zoomOutLabel: "Zoom out",
+  },
   runtime: {
     copied: "Copied",
     copiedFeedback: "Copied to clipboard.",

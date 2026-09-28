@@ -5,6 +5,10 @@ export interface MindmapClientCopy {
   emptyLabel: string;
   failedLabel: string;
   loadingLabel: string;
+  messagesLabel: string;
+  moreLabel: string;
+  zoomInLabel: string;
+  zoomOutLabel: string;
 }
 
 export interface MindmapClientConversation {
@@ -13,6 +17,7 @@ export interface MindmapClientConversation {
   title: string;
   tags: string[];
   updated_at: string | null;
+  messages: number;
 }
 
 export interface MindmapClientPayload {

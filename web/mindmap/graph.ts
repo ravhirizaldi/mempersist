@@ -56,6 +56,7 @@ export function buildMindmapGraph(
           namespace: item.namespace,
           conversationId: item.id,
           tags: item.tags.join(", "),
+          messages: item.messages,
         },
       });
       edges.push({
@@ -68,4 +69,47 @@ export function buildMindmapGraph(
     }
   }
   return { nodes, edges };
+}
+
+/** Count dot hanging off a conversation node; `label` is the rendered badge text. */
+export function buildCountDotNode(
+  conversationId: string,
+  messages: number,
+  label: string,
+): NodeDefinition {
+  return {
+    data: {
+      id: `messages:${conversationId}`,
+      kind: "messages",
+      label,
+      messages,
+      source: `conversation:${conversationId}`,
+      conversationId,
+    },
+  };
+}
+
+export function buildCountDotEdge(conversationId: string): EdgeDefinition {
+  return {
+    data: {
+      id: `edge:conversation:${conversationId}:messages:${conversationId}`,
+      source: `conversation:${conversationId}`,
+      target: `messages:${conversationId}`,
+    },
+  };
+}
+
+/** Per-namespace load-more node carrying the remaining conversation count. */
+export function buildMoreNode(namespace: string, remaining: number, label: string): NodeDefinition {
+  return { data: { id: `more:${namespace}`, kind: "more", label, namespace, remaining } };
+}
+
+export function buildMoreEdge(namespace: string): EdgeDefinition {
+  return {
+    data: {
+      id: `edge:namespace:${namespace}:more:${namespace}`,
+      source: `namespace:${namespace}`,
+      target: `more:${namespace}`,
+    },
+  };
 }
