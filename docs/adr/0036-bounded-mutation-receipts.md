@@ -110,30 +110,36 @@ The invariant holds because every supported batch is bounded and every required 
 schema-bounded, so the fully shed floor is far below 49,152 bytes.
 
 `memory_copy_conversations` accepts 1–20 requests. Conversation, revision, and node identifiers are
-lowercase SHA-256 hex (64 characters); MCP-created conversations use UUIDs (36 characters). A
-worst-case required-field item — 64-character conversation, previous-revision, and revision IDs,
-longest enum values, an `error.code` — serializes to 520 bytes, so the fully shed floor is:
+lowercase SHA-256 hex (64 characters); MCP-created conversations use UUIDs (36 characters). The
+fully shed floor is measured with compact JSON and `TextEncoder`, over the required-field set that
+survives the complete ladder (both budget fields and `omitted` included):
 
-| Envelope                                        | Serialized bytes | Share of 49,152 |
-| ----------------------------------------------- | ---------------- | --------------- |
-| 20-item copy, fully shed, all fields worst case | 10,488           | 21%             |
-| 20-item copy, fully shed, UUID identifiers      | 8,808            | 18%             |
+| Receipt shape (fully shed floor)                        | Item bytes | 20 items | 100 items | Share of 49,152 at 100 items |
+| ------------------------------------------------------- | ---------- | -------- | --------- | ---------------------------- |
+| copy item: ids, `status`, `error.code`                  | 241        | 4,949    | 24,309    | 49%                          |
+| edit item (#6): `source_node_id`, `operation`, `status` | 144        | 3,009    | 14,609    | 30%                          |
+| upsert item (#7): 128-char `message_key`, id, `role`    | 288        | 5,889    | 29,009    | 59%                          |
 
-Even the adversarial case — every item failing on the longest field set, every required identifier
-at full SHA-256 width — leaves roughly 4.7× headroom under the documented safe maximum, before any
-of the optimistic paths (fewer items, no error, smaller identifiers) are considered. Readback
-selectors are at most five small fields each and are shed at rung 1 anyway, so they never threaten
-the ceiling. 49,152 bytes is therefore an enforced ceiling with measured margin, not a target.
+The copy receipt therefore uses 4,949 of 49,152 bytes at its maximum batch — 9.9× headroom —
+before any of the optimistic paths (fewer items, no failure, UUID identifiers) are considered.
+Readback selectors are at most five small fields each and are shed at rung 1 anyway, so they never
+threaten the ceiling. 49,152 bytes is an enforced ceiling with measured margin, not a target.
+
+The arithmetic is per-item, not per-receipt: an item that additionally retains non-floor fields
+(per-item `previous_revision_id`/`source_*` ids plus `indexing` and `verification` blocks) measures
+699 bytes, and 100 such items would reach 70,109 bytes. Those fields are shed before any commit
+identity, so that configuration is not a floor — it is the shape the ladder exists to bring back
+under the ceiling.
 
 The rule generalizes: a batch is supported only while
 `item_count × required_field_floor + envelope <= 49,152`. Issue #6 (`memory_edit_messages`) and
-issue #7 (`memory_upsert_messages`) adopt this contract for their 1–100 item batches; their item
-schemas must keep the fully shed floor within the same ceiling, and the builder enforces the rest.
-For calibration, the identical all-required-fields worst case at 100 items is 52,359 bytes — over
-the ceiling — so those tools must either keep per-item required identifiers narrower than the
-copy receipt's three full-width IDs or bound the item count their schemas admit; the copy tool
-needs neither. If a future batch shape cannot meet the floor, the item count is the thing to
-bound, not the required fields.
+issue #7 (`memory_upsert_messages`) adopt this contract for their 1–100 item batches. With the
+measured floors above, 100-item batches fit for both shapes (14,609 and 29,009 bytes), so their
+schemas need no additional item bound or identifier narrowing beyond their own validation limits;
+they must still route every receipt through the builder so error prose, readback, selectors, and
+provenance fields shed deterministically. If a future shape's required-field floor cannot fit the
+ceiling, the item count an envelope may carry is the thing to bound — required fields are never
+dropped to make room.
 
 ### 5. Readback exposure
 
