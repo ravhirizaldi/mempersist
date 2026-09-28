@@ -103,12 +103,20 @@ Before a task is complete, run:
 
 ```bash
 yarn format:check
+yarn types:bindings:check
 yarn lint
 yarn typecheck
+yarn typecheck:web
+yarn check:mindmap
 yarn test
 yarn test:integration
 yarn deploy:dry-run
 ```
+
+`yarn verify` runs exactly that set, in that order. Run it rather than the commands
+individually, and read the script in `package.json` when the composition matters: the browser
+project under `web/mindmap/` is checked only by `yarn typecheck:web`, and pipeline helpers can
+mask a non-zero exit unless the shell runs with `set -o pipefail`.
 
 For D1 work, also apply migrations to a fresh local database with `yarn db:migrate:local`. For retrieval changes, run `yarn retrieval:evaluate`. For binding changes, run `yarn types:bindings` and ensure the generated file is current.
 
