@@ -1,5 +1,5 @@
 import cytoscape from "cytoscape";
-import type { Css, EdgeDefinition, NodeDefinition } from "cytoscape";
+import type { EdgeDefinition, ElementAnimateOptionsBase, NodeDefinition } from "cytoscape";
 import {
   buildCountDotEdge,
   buildCountDotNode,
@@ -31,9 +31,8 @@ interface GraphPointerEvent extends GraphEvent {
 
 type MindmapElementDefinition = NodeDefinition | EdgeDefinition;
 
-/** Cytoscape accepts `spring(250, 20)`; its typings list easing names only. */
-const SPRING_EASING = "spring(250, 20)" as unknown as Css.TransitionTimingFunction;
-const SPRING_ANIMATION = { duration: 460, easing: SPRING_EASING } as const;
+/** Cytoscape accepts parameterized easings such as `spring(tension, friction)`; its typings list keywords only. */
+const SPRING_ANIMATION = { duration: 460, easing: "spring(250, 20)" } as ElementAnimateOptionsBase;
 const FADE_ANIMATION = { duration: 500, easing: "ease-out-cubic" } as const;
 const EXIT_ANIMATION = { duration: 220, easing: "ease-out-cubic" } as const;
 const EXIT_DURATION = 240;
@@ -301,6 +300,9 @@ function init(): void {
     }
     for (const namespace of expanded) {
       if (!known.has(namespace)) continue;
+      // A search loads a single page for every match, and `namespaces[].conversations` counts
+      // the whole namespace, so a paging node there would promise page 2 of a filtered list.
+      if (query) continue;
       const cursor = cursors.get(namespace) ?? null;
       const total = namespaces.find((entry) => entry.namespace === namespace)?.conversations ?? 0;
       const remaining = total - (cache.get(namespace)?.length ?? 0);
