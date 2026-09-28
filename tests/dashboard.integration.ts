@@ -424,6 +424,53 @@ describe("dashboard authentication and isolation", () => {
     expect(html).toContain('class="tree-list"');
   });
 
+  it("gives the mindmap a back control inside the island and keeps nav exits", async () => {
+    const test = dashboardEnv();
+    const auth = await signIn(test.env, test.sent, "map-exit@example.com");
+    const user = await getOrCreateUser(test.env, "map-exit@example.com");
+    await grantNamespace(test.env, user.id, "work");
+
+    const response = await handleDashboardRequest(
+      new Request("https://mempersist.codifiedtech.id/dashboard/mindmap", {
+        headers: { cookie: auth.cookie },
+      }),
+      test.env,
+    );
+    expect(response.status).toBe(200);
+    const html = await response.text();
+
+    expect(html).toMatch(/<a[^>]*href="\/dashboard"[^>]*>\s*Dashboard\s*<\/a>/);
+    expect(html).toMatch(/<a[^>]*href="\/dashboard\/mindmap"[^>]*>\s*Memory map\s*<\/a>/);
+    expect(html).toMatch(/<a[^>]*href="\/dashboard\/export"[^>]*>\s*Export JSON\s*<\/a>/);
+
+    const islandIndex = html.indexOf('class="map-island"');
+    const controlIndex = html.indexOf('id="map-collapse-all"');
+    expect(islandIndex).toBeGreaterThanOrEqual(0);
+    const back = html.match(/<a[^>]*id="map-back"[\s\S]*?<\/a>/)?.[0];
+    expect(back).toBeTruthy();
+    expect(back).toContain('href="/dashboard"');
+    expect(back).toMatch(/\bclass="[^"]*\bmap-btn\b[^"]*"/);
+    expect(back).toMatch(/\baria-label="[^"]+"/);
+    expect(back).toMatch(/class="[^"]*\bmap-btn-label\b[^"]*"/);
+
+    const backIndex = html.indexOf(back!);
+    expect(backIndex).toBeGreaterThan(islandIndex);
+    expect(backIndex).toBeLessThan(controlIndex);
+
+    for (const id of [
+      "map-collapse-all",
+      "map-expand-all",
+      "map-reset-view",
+      "map-zoom-in",
+      "map-zoom-out",
+      "map-search",
+      "map-query",
+      "map-list-toggle",
+    ]) {
+      expect(html).toContain(`id="${id}"`);
+    }
+  });
+
   it("scopes mindmap drill-down data to the requested namespace", async () => {
     const test = dashboardEnv();
     const first = await signIn(test.env, test.sent, "drill-one@example.com");
