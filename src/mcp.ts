@@ -1,8 +1,43 @@
 import { McpServer } from "@modelcontextprotocol/server";
 import { z } from "zod";
 import { createMcpConversation } from "./chatgpt";
-import { deleteConversations, deleteNamespace, MAX_CONVERSATION_DELETE_BATCH } from "./deletion";
+import { deleteConversations, deleteNamespace } from "./deletion";
 import type { AppEnv } from "./domain";
+import { AppError } from "./errors";
+import {
+  BATCH_DEFAULT_SERIALIZED_BYTES,
+  BATCH_MAX_SERIALIZED_BYTES,
+  BATCH_MIN_SERIALIZED_BYTES,
+  DEFAULT_PAGE_ITEMS,
+  DEFAULT_SEARCH_ITEMS,
+  MAX_APPEND_MESSAGES,
+  MAX_BATCH_CURSOR_CHARS,
+  MAX_BATCH_ITEMS,
+  MAX_CHUNK_CONTEXT_MESSAGES,
+  MAX_CONTEXT_REQUIRED_ITEMS,
+  MAX_CONTEXT_RETRIEVE_QUERIES,
+  MAX_CONTEXT_TAIL_MESSAGES,
+  MAX_COPY_ITEMS,
+  MAX_DELETE_ITEMS,
+  MAX_IDEMPOTENCY_KEY_CHARS,
+  MAX_MESSAGE_CONTENT_CHARS,
+  MAX_MESSAGE_ROLE_CHARS,
+  MAX_NAMESPACE_CHARS,
+  MAX_PAGE_ITEMS,
+  MAX_REPLACE_MESSAGES,
+  MAX_RESOLVE_ITEMS,
+  MAX_SEARCH_ITEMS,
+  MAX_SEARCH_QUERY_CHARS,
+  MAX_SERIALIZED_BYTES_LIMIT,
+  MAX_STORE_MESSAGES,
+  MAX_TAGS_PER_CONVERSATION,
+  MAX_TAG_CHARS,
+  MAX_TITLE_CHARS,
+  MAX_TOOL_OUTPUT_BYTES,
+  assertInlineWriteBudget,
+  memoryCapabilities,
+  type MemoryCapabilities,
+} from "./limits";
 import {
   completeMemoryCopy,
   completeMemoryRestore,
@@ -12,9 +47,6 @@ import {
   type MutationReceiptReadbackSelector,
 } from "./writes";
 import {
-  BATCH_DEFAULT_SERIALIZED_BYTES,
-  BATCH_MAX_SERIALIZED_BYTES,
-  BATCH_MIN_SERIALIZED_BYTES,
   boundCompactPage,
   compactConversationPage,
   getChunkContext,
@@ -34,16 +66,11 @@ import {
   updateConversationTags,
   writeCanonicalConversation,
 } from "./storage";
-import {
-  buildContext,
-  MAX_SERIALIZED_BYTES_LIMIT,
-  type BuildContextInput,
-  type BuildContextFollowItem,
-} from "./context";
+import { buildContext, type BuildContextInput, type BuildContextFollowItem } from "./context";
 
 const messageSchema = z.object({
-  role: z.string().min(1).max(40),
-  content: z.string().max(1_000_000),
+  role: z.string().min(1).max(MAX_MESSAGE_ROLE_CHARS),
+  content: z.string().max(MAX_MESSAGE_CONTENT_CHARS),
   timestamp: z.iso.datetime().optional(),
 });
 
@@ -55,23 +82,26 @@ const conversationIdSchema = z.union([
 const conversationIdsSchema = z
   .array(conversationIdSchema)
   .min(1)
-  .max(MAX_CONVERSATION_DELETE_BATCH)
+  .max(MAX_DELETE_ITEMS)
   .refine((ids) => new Set(ids).size === ids.length, "Conversation IDs must be unique");
 
 const nonEmptyNamespaceSchema = z
   .string()
   .min(1)
-  .max(100)
+  .max(MAX_NAMESPACE_CHARS)
   .refine((value) => /\S/u.test(value), "Namespace must not be empty");
 
-const tagsSchema = z.array(z.string().trim().min(1).max(64)).max(20).default([]);
+const tagsSchema = z
+  .array(z.string().trim().min(1).max(MAX_TAG_CHARS))
+  .max(MAX_TAGS_PER_CONVERSATION)
+  .default([]);
 
 const revisionIdSchema = z.string().regex(/^[a-f0-9]{64}$/u);
 const readFormatSchema = z.enum(["compact", "canonical"]).default("canonical");
 const conversationRequestSchema = z.object({
   conversation_id: conversationIdSchema,
   offset: z.number().int().min(0).max(Number.MAX_SAFE_INTEGER).default(0),
-  limit: z.number().int().min(1).max(100).default(20),
+  limit: z.number().int().min(1).max(MAX_PAGE_ITEMS).default(DEFAULT_PAGE_ITEMS),
   branch: z.enum(["active", "all"]).default("active"),
   revision_id: revisionIdSchema.optional(),
 });
@@ -182,8 +212,8 @@ const batchOutputSchema = z.object({
       error: z.object({ code: z.string(), message: z.string() }).optional(),
     }),
   ),
-  completed: z.number().int().min(0).max(20),
-  remaining: z.number().int().min(0).max(20),
+  completed: z.number().int().min(0).max(MAX_BATCH_ITEMS),
+  remaining: z.number().int().min(0).max(MAX_BATCH_ITEMS),
   nextCursor: nullableStringSchema,
   usedSerializedBytes: z.number().int().nonnegative(),
   maxSerializedBytes: z
@@ -194,12 +224,8 @@ const batchOutputSchema = z.object({
 });
 const batchInputSchema = z
   .object({
-    requests: z.array(conversationRequestSchema).min(1).max(20).optional(),
-    cursor: z
-      .string()
-      .min(1)
-      .max(16 * 1024)
-      .optional(),
+    requests: z.array(conversationRequestSchema).min(1).max(MAX_BATCH_ITEMS).optional(),
+    cursor: z.string().min(1).max(MAX_BATCH_CURSOR_CHARS).optional(),
     max_serialized_bytes: z
       .number()
       .int()
@@ -267,14 +293,14 @@ const conversationResolveRequestSchema = z.object({
   title: z
     .string()
     .min(1)
-    .max(500)
+    .max(MAX_TITLE_CHARS)
     .refine((value) => value.trim().length > 0, "Title must not be empty or whitespace-only"),
-  namespace: z.string().min(1).max(100).optional(),
+  namespace: z.string().min(1).max(MAX_NAMESPACE_CHARS).optional(),
   tags: tagsSchema.optional(),
   tag_mode: z.enum(["any", "all"]).default("all"),
 });
 const conversationResolveInputSchema = z.object({
-  requests: z.array(conversationResolveRequestSchema).min(1).max(20),
+  requests: z.array(conversationResolveRequestSchema).min(1).max(MAX_RESOLVE_ITEMS),
 });
 export const buildContextRequiredSelectorSchema = z
   .object({
@@ -282,10 +308,10 @@ export const buildContextRequiredSelectorSchema = z
     title: z
       .string()
       .min(1)
-      .max(500)
+      .max(MAX_TITLE_CHARS)
       .refine((value) => value.trim().length > 0, "Title must not be empty or whitespace-only")
       .optional(),
-    namespace: z.string().min(1).max(100).optional(),
+    namespace: z.string().min(1).max(MAX_NAMESPACE_CHARS).optional(),
     tags: tagsSchema.optional(),
     tag_mode: z.enum(["any", "all"]).default("all"),
   })
@@ -304,7 +330,7 @@ const followLeafSchema = z.object({
   priority: z.number().default(100),
   mode: z.enum(["full", "tail"]).default("full"),
   branch: z.enum(["active", "all"]).default("active"),
-  tail_messages: z.number().int().min(1).max(100).optional(),
+  tail_messages: z.number().int().min(1).max(MAX_CONTEXT_TAIL_MESSAGES).optional(),
 });
 
 const followLevel2Schema = followLeafSchema.extend({
@@ -325,7 +351,7 @@ export const buildContextRequiredItemSchema = z.object({
   mode: z.enum(["full", "tail"]).default("full"),
   branch: z.enum(["active", "all"]).default("active"),
   priority: z.number().default(100),
-  tail_messages: z.number().int().min(1).max(100).optional(),
+  tail_messages: z.number().int().min(1).max(MAX_CONTEXT_TAIL_MESSAGES).optional(),
   follow: z.array(buildContextFollowItemSchema).max(10).optional(),
 });
 
@@ -333,14 +359,14 @@ export const buildContextRetrieveItemSchema = z.object({
   query: z
     .string()
     .min(1)
-    .max(2000)
+    .max(MAX_SEARCH_QUERY_CHARS)
     .refine((val) => val.trim().length > 0, "Query must not be empty or whitespace-only"),
-  namespace: z.string().min(1).max(100).optional(),
+  namespace: z.string().min(1).max(MAX_NAMESPACE_CHARS).optional(),
   tags: tagsSchema.optional(),
   tag_mode: z.enum(["any", "all"]).default("all"),
-  limit: z.number().int().min(1).max(20).default(8),
-  context_before: z.number().int().min(0).max(10).default(2),
-  context_after: z.number().int().min(0).max(10).default(2),
+  limit: z.number().int().min(1).max(MAX_SEARCH_ITEMS).default(DEFAULT_SEARCH_ITEMS),
+  context_before: z.number().int().min(0).max(MAX_CHUNK_CONTEXT_MESSAGES).default(2),
+  context_after: z.number().int().min(0).max(MAX_CHUNK_CONTEXT_MESSAGES).default(2),
   priority: z.number().default(50),
 });
 
@@ -362,14 +388,14 @@ export const buildContextOptionsSchema = z
   });
 
 export const buildContextInputSchema = z.object({
-  namespace: z.string().min(1).max(100).optional(),
+  namespace: z.string().min(1).max(MAX_NAMESPACE_CHARS).optional(),
   task: z
     .string()
     .min(1)
     .max(1000)
     .refine((val) => val.trim().length > 0, "Task must not be empty or whitespace-only"),
-  required: z.array(buildContextRequiredItemSchema).min(1).max(20),
-  retrieve: z.array(buildContextRetrieveItemSchema).max(8).optional(),
+  required: z.array(buildContextRequiredItemSchema).min(1).max(MAX_CONTEXT_REQUIRED_ITEMS),
+  retrieve: z.array(buildContextRetrieveItemSchema).max(MAX_CONTEXT_RETRIEVE_QUERIES).optional(),
   budget: buildContextBudgetSchema,
   options: buildContextOptionsSchema.optional(),
 });
@@ -588,9 +614,48 @@ const emptyNamespaceOutputSchema = z.object({
   complete: z.boolean(),
 });
 
+/**
+ * Capability document contract. Mirrors MemoryCapabilities so a shape change
+ * fails to compile; tool limit fields are exactOptional so an absent key stays
+ * absent under exactOptionalPropertyTypes.
+ */
+export const capabilitiesOutputSchema: z.ZodType<MemoryCapabilities> = z.object({
+  protocol_version: z.string(),
+  capabilities_version: z.string(),
+  limits: z.object({
+    max_tool_output_bytes: z.number(),
+    recommended_tool_output_bytes: z.number(),
+    max_inline_json_write_bytes: z.number(),
+    max_direct_import_bytes: z.number(),
+    max_multipart_part_bytes: z.number(),
+    max_message_content_chars: z.number(),
+    max_receipt_bytes: z.number(),
+  }),
+  tools: z.record(
+    z.string(),
+    z.object({
+      max_items: z.exactOptional(z.number()),
+      default_items: z.exactOptional(z.number()),
+      max_request_bytes: z.exactOptional(z.number()),
+      max_response_bytes: z.exactOptional(z.number()),
+      default_response_bytes: z.exactOptional(z.number()),
+      max_tail_messages: z.exactOptional(z.number()),
+      supports_cursor: z.exactOptional(z.boolean()),
+      supports_verify: z.exactOptional(z.boolean()),
+    }),
+  ),
+  features: z.object({
+    revision_pinning: z.boolean(),
+    verified_writes: z.boolean(),
+    cursor_reads: z.boolean(),
+    message_keys: z.boolean(),
+    atomic_multi_conversation_commit: z.boolean(),
+  }),
+});
+
 function toolResult<T extends object>(value: T) {
   const text = JSON.stringify(value);
-  if (new TextEncoder().encode(text).byteLength > 64 * 1024) {
+  if (new TextEncoder().encode(text).byteLength > MAX_TOOL_OUTPUT_BYTES) {
     return {
       isError: true,
       content: [
@@ -606,6 +671,18 @@ function toolResult<T extends object>(value: T) {
   return { structuredContent: value, content: [{ type: "text" as const, text }] };
 }
 
+function requestTooLargeResult(error: AppError) {
+  return {
+    isError: true,
+    content: [
+      {
+        type: "text" as const,
+        text: JSON.stringify({ ...error.details, message: error.message }),
+      },
+    ],
+  };
+}
+
 export function createMemoryMcpServer(env: AppEnv, tenant: Tenant): McpServer {
   const server = new McpServer({ name: "Ravhi Rizaldi", version: "0.1.0" });
 
@@ -617,9 +694,9 @@ export function createMemoryMcpServer(env: AppEnv, tenant: Tenant): McpServer {
       annotations: readOnlyAnnotations,
       outputSchema: searchOutputSchema,
       inputSchema: z.object({
-        query: z.string().min(1).max(2000),
-        limit: z.number().int().min(1).max(20).default(8),
-        namespace: z.string().min(1).max(100).optional(),
+        query: z.string().min(1).max(MAX_SEARCH_QUERY_CHARS),
+        limit: z.number().int().min(1).max(MAX_SEARCH_ITEMS).default(DEFAULT_SEARCH_ITEMS),
+        namespace: z.string().min(1).max(MAX_NAMESPACE_CHARS).optional(),
         tags: tagsSchema.optional(),
         tag_mode: z.enum(["any", "all"]).default("all"),
       }),
@@ -646,8 +723,8 @@ export function createMemoryMcpServer(env: AppEnv, tenant: Tenant): McpServer {
       outputSchema: contextOutputSchema,
       inputSchema: z.object({
         chunk_id: z.string().min(1),
-        before: z.number().int().min(0).max(10).default(2),
-        after: z.number().int().min(0).max(10).default(2),
+        before: z.number().int().min(0).max(MAX_CHUNK_CONTEXT_MESSAGES).default(2),
+        after: z.number().int().min(0).max(MAX_CHUNK_CONTEXT_MESSAGES).default(2),
         format: readFormatSchema,
       }),
     },
@@ -726,9 +803,9 @@ export function createMemoryMcpServer(env: AppEnv, tenant: Tenant): McpServer {
       annotations: readOnlyAnnotations,
       outputSchema: listConversationsOutputSchema,
       inputSchema: z.object({
-        limit: z.number().int().min(1).max(100).default(20),
+        limit: z.number().int().min(1).max(MAX_PAGE_ITEMS).default(DEFAULT_PAGE_ITEMS),
         cursor: z.string().optional(),
-        namespace: z.string().min(1).max(100).optional(),
+        namespace: z.string().min(1).max(MAX_NAMESPACE_CHARS).optional(),
         tags: tagsSchema.optional(),
         tag_mode: z.enum(["any", "all"]).default("all"),
       }),
@@ -756,7 +833,7 @@ export function createMemoryMcpServer(env: AppEnv, tenant: Tenant): McpServer {
       outputSchema: revisionHistoryOutputSchema,
       inputSchema: z.object({
         conversation_id: conversationIdSchema,
-        limit: z.number().int().min(1).max(100).default(20),
+        limit: z.number().int().min(1).max(MAX_PAGE_ITEMS).default(DEFAULT_PAGE_ITEMS),
         cursor: z.string().min(1).optional(),
       }),
     },
@@ -882,14 +959,23 @@ export function createMemoryMcpServer(env: AppEnv, tenant: Tenant): McpServer {
       },
       outputSchema: memoryWriteOutputSchema,
       inputSchema: z.object({
-        title: z.string().min(1).max(500),
-        namespace: z.string().min(1).max(100).default("personal"),
+        title: z.string().min(1).max(MAX_TITLE_CHARS),
+        namespace: z.string().min(1).max(MAX_NAMESPACE_CHARS).default("personal"),
         tags: tagsSchema,
-        messages: z.array(messageSchema).min(1).max(1000),
+        messages: z.array(messageSchema).min(1).max(MAX_STORE_MESSAGES),
         verify: z.boolean().default(false),
       }),
     },
     async (input) => {
+      const serialized = JSON.stringify(input);
+      try {
+        assertInlineWriteBudget(serialized, input.messages.length);
+      } catch (error) {
+        if (error instanceof AppError && error.code === "REQUEST_TOO_LARGE") {
+          return requestTooLargeResult(error);
+        }
+        throw error;
+      }
       const namespace = input.namespace ?? tenant.defaultNamespace;
       if (!tenant.namespaces.includes(namespace)) {
         await grantNamespace(env, tenant.userId, namespace);
@@ -921,11 +1007,22 @@ export function createMemoryMcpServer(env: AppEnv, tenant: Tenant): McpServer {
         conversation_id: z.string().min(1),
         base_revision_id: z.string().min(1),
         tags: tagsSchema.optional(),
-        messages: z.array(messageSchema).min(1).max(100),
+        messages: z.array(messageSchema).min(1).max(MAX_APPEND_MESSAGES),
         verify: z.boolean().default(false),
       }),
     },
-    async ({ conversation_id, base_revision_id, tags, messages, verify }) => {
+    async (input) => {
+      const { conversation_id, base_revision_id, tags, messages, verify } = input;
+      const serialized = JSON.stringify(input);
+      try {
+        assertInlineWriteBudget(serialized, messages.length);
+      } catch (error) {
+        if (error instanceof AppError && error.code === "REQUEST_TOO_LARGE") {
+          return requestTooLargeResult(error);
+        }
+        throw error;
+      }
+
       const stored = await appendConversation(
         env,
         conversation_id,
@@ -954,11 +1051,22 @@ export function createMemoryMcpServer(env: AppEnv, tenant: Tenant): McpServer {
       inputSchema: z.object({
         conversation_id: conversationIdSchema,
         base_revision_id: z.string().min(1),
-        messages: z.array(messageSchema).min(1).max(1000),
+        messages: z.array(messageSchema).min(1).max(MAX_REPLACE_MESSAGES),
         verify: z.boolean().default(false),
       }),
     },
-    async ({ conversation_id, base_revision_id, messages, verify }) => {
+    async (input) => {
+      const { conversation_id, base_revision_id, messages, verify } = input;
+      const serialized = JSON.stringify(input);
+      try {
+        assertInlineWriteBudget(serialized, messages.length);
+      } catch (error) {
+        if (error instanceof AppError && error.code === "REQUEST_TOO_LARGE") {
+          return requestTooLargeResult(error);
+        }
+        throw error;
+      }
+
       const stored = await replaceConversation(
         env,
         conversation_id,
@@ -1021,7 +1129,7 @@ export function createMemoryMcpServer(env: AppEnv, tenant: Tenant): McpServer {
         idempotency_key: z
           .string()
           .min(1)
-          .max(128)
+          .max(MAX_IDEMPOTENCY_KEY_CHARS)
           .refine((v) => /\S/u.test(v), "idempotency_key must not be empty"),
         verify: z.boolean().default(false),
         requests: z
@@ -1029,7 +1137,7 @@ export function createMemoryMcpServer(env: AppEnv, tenant: Tenant): McpServer {
             z.object({
               conversation_id: conversationIdSchema,
               revision_id: revisionIdSchema.optional(),
-              title: z.string().min(1).max(500).optional(),
+              title: z.string().min(1).max(MAX_TITLE_CHARS).optional(),
               tags: z
                 .object({
                   mode: z.enum(["inherit", "replace"]).default("inherit"),
@@ -1040,7 +1148,7 @@ export function createMemoryMcpServer(env: AppEnv, tenant: Tenant): McpServer {
             }),
           )
           .min(1)
-          .max(20),
+          .max(MAX_COPY_ITEMS),
       }),
     },
     async (input) => {
@@ -1354,6 +1462,18 @@ export function createMemoryMcpServer(env: AppEnv, tenant: Tenant): McpServer {
         .first();
       return toolResult(status ?? { error: "Import not found" });
     },
+  );
+
+  server.registerTool(
+    "memory_get_capabilities",
+    {
+      description:
+        "Returns the deployed runtime capability contract with negotiated limits, per-tool budgets, and feature flags.",
+      annotations: readOnlyAnnotations,
+      outputSchema: capabilitiesOutputSchema,
+      inputSchema: z.object({}),
+    },
+    () => toolResult(memoryCapabilities()),
   );
   return server;
 }

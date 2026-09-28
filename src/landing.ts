@@ -1,8 +1,15 @@
-import { localeHeaders, messages, type Locale } from "./i18n";
+import { interpolate, localeHeaders, messages, type Locale } from "./i18n";
 import { localizePageMarkup } from "./locales/pages-id";
 import { BASE_CSS, brand, FAVICON } from "./ui";
 import { CRITICAL_SITE_CSS } from "./site";
 import { PUBLIC_ASSET_VERSION, PUBLIC_ORIGIN } from "./discovery";
+import {
+  MAX_DIRECT_IMPORT_BYTES,
+  MAX_INLINE_JSON_WRITE_BYTES,
+  MAX_MULTIPART_PART_BYTES,
+  MAX_TOOL_OUTPUT_BYTES,
+  RECOMMENDED_TOOL_OUTPUT_BYTES,
+} from "./limits";
 
 const SEO: Record<Locale, Record<string, { title: string; description: string }>> = {
   en: {
@@ -78,6 +85,19 @@ function escapeHtml(value: string): string {
     (character) =>
       ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[character]!,
   );
+}
+
+const BYTE_UNITS = ["B", "KiB", "MiB", "GiB"] as const;
+
+/** Renders a byte budget in the human-readable notation the public copy uses. */
+function formatBytes(bytes: number): string {
+  let value = bytes;
+  let unit = 0;
+  while (value >= 1024 && unit < BYTE_UNITS.length - 1) {
+    value /= 1024;
+    unit += 1;
+  }
+  return `${value} ${BYTE_UNITS[unit]!}`;
 }
 
 function page(title: string, body: string, active: string, locale: Locale, intro = ""): string {
@@ -266,6 +286,7 @@ export function landingPage(locale: Locale = "en"): Response {
         <tr><td><code>memory_build_context</code></td><td>compile revision-pinned context pack from owners and search evidence</td></tr>
         <tr><td><code>memory_list_namespaces</code></td><td>namespaces your account owns</td></tr>
         <tr><td><code>memory_stats</code></td><td>counts and indexing health</td></tr>
+        <tr><td><code>memory_get_capabilities</code></td><td>returns the runtime limits contract</td></tr>
         <tr><td><code>memory_store</code></td><td>durable new memory</td></tr>
         <tr><td><code>memory_append</code></td><td>extend a conversation, optimistic revision check</td></tr>
         <tr><td><code>memory_replace</code></td><td>replace its transcript, optimistic revision check</td></tr>
@@ -614,6 +635,13 @@ function architecturePage(locale: Locale = "en"): Response {
 }
 
 function securityPage(locale: Locale = "en"): Response {
+  const sizeLimits = interpolate(messages(locale).limits.sizeLimits, {
+    jsonwrite: formatBytes(MAX_INLINE_JSON_WRITE_BYTES),
+    directimport: formatBytes(MAX_DIRECT_IMPORT_BYTES),
+    multipartpart: formatBytes(MAX_MULTIPART_PART_BYTES),
+    tooloutput: formatBytes(MAX_TOOL_OUTPUT_BYTES),
+    recommendedoutput: formatBytes(RECOMMENDED_TOOL_OUTPUT_BYTES),
+  });
   const body = `
   <p class="eyebrow">SECURITY</p>
   <h1>Threat model and controls</h1>
@@ -630,7 +658,7 @@ function securityPage(locale: Locale = "en"): Response {
       <li>Dashboard sessions are hash-only, expire after 30 days, use a secure host-only cookie, and protect mutations with same-origin and session-derived CSRF checks.</li>
       <li>A pending account deletion keeps reading, export, logout, and cancellation available while every write returns <code>409 DELETION_PENDING</code>.</li>
       <li>Authentication runs before protected bodies are parsed; Zod validates every external input.</li>
-      <li>Size limits: JSON writes 1 MiB, direct imports 16 MiB, multipart parts 16 MiB, MCP responses 64 KiB.</li>
+      <li>${sizeLimits}</li>
       <li>R2 is private; no public bucket, presigned anonymous upload, or wildcard CORS.</li>
       <li>Structured logs contain event names, request/job ids, paths, and error categories — never bodies, queries, tokens, or authorization headers.</li>
     </ul>
@@ -681,6 +709,7 @@ function adrsPage(locale: Locale = "en"): Response {
     ["0034", "Deterministic pointer follow expansion"],
     ["0035", "Cursor-driven batch conversation pagination"],
     ["0036", "Bounded mutation receipts"],
+    ["0037", "Runtime capabilities and aggregate byte budgets"],
   ];
   const rows = adrs
     .map(

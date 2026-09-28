@@ -44,6 +44,10 @@ export const id = {
     copyFailed: "Papan klip tidak tersedia. Teks dipilih; salin secara manual.",
     decisionCount: "{visible} dari {total} keputusan",
   },
+  limits: {
+    sizeLimits:
+      "Batas ukuran: tulis JSON {jsonwrite}, impor langsung {directimport}, bagian multipart {multipartpart}, keluaran alat MCP {tooloutput} ({recommendedoutput} disarankan).",
+  },
   oauth: {
     privateConnection: "KONEKSI PRIVAT",
     contextConnected: "KONTEKS ANDA, TERHUBUNG",

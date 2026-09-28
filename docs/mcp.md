@@ -79,6 +79,7 @@ See [SKILLS.md](../SKILLS.md) for the memory conventions coding agents should fo
 | `memory_build_context`         | task, 1–20 required selectors, max 8 retrieve, budgets, options                   | deterministic revision-pinned context pack within token/byte caps         |
 | `memory_list_namespaces`       | —                                                                                 | namespaces you own with conversation counts                               |
 | `memory_stats`                 | —                                                                                 | per-namespace counts plus indexing health                                 |
+| `memory_get_capabilities`      | —                                                                                 | deployed capability contract: versions, limits, per-tool bounds, flags    |
 | `memory_store`                 | title, tags, 1–1000 messages                                                      | bounded durable receipt plus queued index job                             |
 | `memory_append`                | conversation ID, base revision, tags, messages                                    | bounded optimistic durable receipt plus queued index job                  |
 | `memory_replace`               | conversation ID, base revision, messages                                          | bounded replacement receipt plus queued index job                         |
@@ -105,6 +106,124 @@ memory, `memory_restore_revision` to revert to an earlier known good revision wi
 duplicate transcripts, and `memory_copy_conversations` for lossless copying into another owned namespace.
 Administrative retry/reindex/integrity operations remain HTTP/CLI only so
 ordinary LLM tool calls cannot trigger expensive maintenance accidentally.
+
+## Runtime capabilities and aggregate byte budgets
+
+`memory_get_capabilities` is a read-only tool — `readOnlyHint: true`, `destructiveHint: false`,
+`openWorldHint: false`, `idempotentHint: true` — with an empty input object. It returns the deployed
+capability contract, assembled from the same constants the transports enforce, so a reported limit
+cannot drift from its enforcement. Its output schema mirrors `memoryCapabilities()` exactly. It
+exposes no secret binding names, account, bucket, database, or queue identifiers, and no plan or
+pricing metadata. A `features` flag states protocol availability, never authorization: a true flag
+grants no access to another account's namespaces, and no flag implies administrative capability.
+
+Output:
+
+```json
+{
+  "protocol_version": "1",
+  "capabilities_version": "2026-09-28",
+  "limits": {
+    "max_tool_output_bytes": 65536,
+    "recommended_tool_output_bytes": 49152,
+    "max_inline_json_write_bytes": 1048576,
+    "max_direct_import_bytes": 16777216,
+    "max_multipart_part_bytes": 16777216,
+    "max_message_content_chars": 1000000,
+    "max_receipt_bytes": 49152
+  },
+  "tools": {
+    "memory_get_conversations": {
+      "max_items": 20,
+      "default_response_bytes": 32768,
+      "max_response_bytes": 49152,
+      "supports_cursor": true
+    },
+    "memory_append": {
+      "max_items": 100,
+      "max_request_bytes": 1048576,
+      "supports_verify": true
+    }
+  },
+  "features": {
+    "revision_pinning": true,
+    "verified_writes": true,
+    "cursor_reads": true,
+    "message_keys": false,
+    "atomic_multi_conversation_commit": false
+  }
+}
+```
+
+`tools` lists every tool with a bounded item count, response budget, or verification flag, using
+only the fields `max_items`, `default_items`, `max_request_bytes`, `max_response_bytes`,
+`default_response_bytes`, `max_tail_messages`, `supports_cursor`, and `supports_verify`.
+
+### Versions
+
+Both identifiers are scoped to the deployed Worker version and are identical for every caller; they
+never describe the caller's data volume, account, or Cloudflare billing plan.
+
+- `protocol_version` (`1`) identifies the shape of this document and of the rejection object
+  described below. It changes only when a field is removed, renamed, or changes meaning: an additive
+  optional field keeps the current value, a breaking shape change increments it.
+- `capabilities_version` (`2026-09-28`) identifies the set of enforced limits. It changes when any
+  reported value or feature flag changes, including a change made in another module. Any change to a
+  value reported by `memory_get_capabilities` updates `capabilities_version` in the same change, plus
+  the documentation that quotes the value.
+
+### Aggregate byte budgets
+
+Aggregate budgets are measured in UTF-8 bytes, never `String.prototype.length`, and are checked
+before any canonical work — before `writeCanonicalConversation`, `appendConversation`,
+`replaceConversation`, queue enqueue, or any embedding call. A rejected request writes nothing and
+leaves canonical-data invariants unchanged.
+
+- **MCP:** the bytes of the complete serialized tool input as the transport receives it, produced by
+  `JSON.stringify` of the parsed input and measured with `TextEncoder`, so roles, timestamps, tags,
+  keys, and the envelope are all counted.
+- **HTTP inline JSON writes:** the same measurement of the parsed body, plus the existing
+  `content-length` guard as a pre-parse defense for an oversized body.
+- **HTTP import routes:** the `content-length` of the streamed body or part, unchanged in mechanism.
+
+The same measured ceiling applies to inline JSON writes on both transports —
+`max_inline_json_write_bytes` (1,048,576 bytes, 1 MiB) — so an MCP `memory_store` that HTTP would
+reject is rejected identically. Import ceilings stay transport-specific because those routes stream
+to R2 rather than holding a parsed object: `max_direct_import_bytes` (16,777,216 bytes, 16 MiB) for a
+direct body and `max_multipart_part_bytes` (16,777,216 bytes, 16 MiB) per multipart part. The
+recommended response budget is `recommended_tool_output_bytes` (49,152 bytes, 48 KiB), below the
+`max_tool_output_bytes` transport guard of 65,536 bytes (64 KiB).
+
+### Rejection shape
+
+Every aggregate rejection is an `AppError` with code `REQUEST_TOO_LARGE`, status `413`, and
+`retryable: false`. Its details are stable:
+
+```json
+{
+  "code": "REQUEST_TOO_LARGE",
+  "request_bytes": 1824100,
+  "max_request_bytes": 1048576,
+  "suggested_max_items": 42
+}
+```
+
+`suggested_max_items` is `floor(item_count * max_request_bytes / request_bytes)`, clamped to at
+least 1, and is omitted when the item count is unknown (a pre-parse `content-length` reject and a
+streamed import body). It is a conservative proportional estimate, never a guarantee: it assumes
+every item is the size of the average item in the rejected request, so a retry with differently
+sized messages can still be rejected. Treat it as an upper bound to shrink toward, not a promise.
+
+Transport envelopes differ:
+
+- **HTTP:** `{ "error": { "code", "message", "request_bytes", "max_request_bytes", "suggested_max_items" } }`
+  with status `413`, produced by the existing `app.onError` handler merging `AppError.details`.
+- **MCP:** `isError: true` with a single text content block containing the same JSON object plus a
+  human-readable `message`, and no `structuredContent`, because an error result must not claim the
+  tool's declared output schema.
+
+Validation still follows Zod input validation: schemas reject malformed input, and the byte budget
+only rejects well-formed requests that are too large to accept.
 
 ## Compact reads and batches
 

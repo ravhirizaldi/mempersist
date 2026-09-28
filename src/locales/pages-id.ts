@@ -127,6 +127,7 @@ const replacements: ReadonlyArray<readonly [string, string]> = [
   ["metadata and tags", "metadata dan tag"],
   ["namespaces your account owns", "namespace milik akun Anda"],
   ["counts and indexing health", "jumlah dan kesehatan pengindeksan"],
+  ["returns the runtime limits contract", "mengembalikan kontrak batas runtime"],
   ["durable new memory", "memori baru yang tahan lama"],
   [
     "extend a conversation, optimistic revision check",

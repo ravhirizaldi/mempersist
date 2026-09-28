@@ -8,6 +8,7 @@ import {
 } from "./domain";
 import { AppError } from "./errors";
 import { estimateTokens } from "./chunking";
+import { MAX_FOLLOW_TARGETS_LIMIT, MAX_SERIALIZED_BYTES_LIMIT } from "./limits";
 import { expandPointerNeighborhood, jsonBytes } from "./retrieval";
 import {
   loadCanonicalRevision,
@@ -19,8 +20,6 @@ import { scopeNamespaces, type Tenant } from "./tenant";
 
 export const BUILDER_VERSION = "mempersist-context-pack-v2";
 export const ESTIMATOR_VERSION = "mempersist-token-estimate-v1";
-export const MAX_SERIALIZED_BYTES_LIMIT = 49152;
-export const MAX_FOLLOW_TARGETS_LIMIT = 20;
 const MAX_CONTEXT_WARNINGS = 20;
 
 export interface BuildContextRequiredSelector {

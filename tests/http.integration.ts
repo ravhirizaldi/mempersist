@@ -1,7 +1,13 @@
 import { env } from "cloudflare:workers";
 import { describe, expect, it } from "vitest";
+import { z } from "zod";
 import app from "../src/app";
 import type { AppEnv } from "../src/domain";
+import {
+  MAX_DIRECT_IMPORT_BYTES,
+  MAX_INLINE_JSON_WRITE_BYTES,
+  MAX_MESSAGE_CONTENT_CHARS,
+} from "../src/limits";
 
 describe("HTTP security boundary", () => {
   it("serves the landing page at the root without authentication", async () => {
@@ -155,5 +161,167 @@ describe("HTTP security boundary", () => {
       appEnv,
     );
     expect(allowed.status).toBe(200);
+  });
+});
+
+describe("aggregate byte budgets", () => {
+  const authorization = "Bearer integration-test-token";
+  const jsonHeaders = { authorization, "content-type": "application/json" };
+  const tooLargeResponse = z.object({
+    error: z.object({
+      code: z.literal("REQUEST_TOO_LARGE"),
+      message: z.string(),
+      request_bytes: z.number(),
+      max_request_bytes: z.number(),
+      suggested_max_items: z.number().optional(),
+    }),
+  });
+
+  async function tooLarge(response: Response) {
+    expect(response.status).toBe(413);
+    return tooLargeResponse.parse(await response.json());
+  }
+
+  it("rejects an oversized inline memory write with a measured 413", async () => {
+    const chunk = "a".repeat(600_000);
+    const body = JSON.stringify({
+      title: "Oversized inline write",
+      messages: [
+        { role: "user", content: chunk },
+        { role: "assistant", content: chunk },
+      ],
+    });
+    const response = await app.request(
+      "/api/memories",
+      { method: "POST", headers: jsonHeaders, body },
+      env,
+    );
+    const { error } = await tooLarge(response);
+    expect(error.code).toBe("REQUEST_TOO_LARGE");
+    expect(error.request_bytes).toBeGreaterThan(error.max_request_bytes);
+    expect(error.max_request_bytes).toBe(MAX_INLINE_JSON_WRITE_BYTES);
+    expect(error.max_request_bytes).toBe(1048576);
+    expect(Number.isInteger(error.suggested_max_items)).toBe(true);
+    expect(error.suggested_max_items ?? 0).toBeGreaterThanOrEqual(1);
+  });
+
+  it("accepts an inline write exactly at the byte ceiling", async () => {
+    const scaffold = JSON.stringify({
+      title: "Exactly at the ceiling",
+      namespace: "personal",
+      messages: [
+        { role: "user", content: "" },
+        { role: "user", content: "" },
+      ],
+      verify: false,
+    });
+    const padding = MAX_INLINE_JSON_WRITE_BYTES - new TextEncoder().encode(scaffold).byteLength;
+    const half = Math.floor(padding / 2);
+    const body = JSON.stringify({
+      title: "Exactly at the ceiling",
+      namespace: "personal",
+      messages: [
+        { role: "user", content: "a".repeat(half) },
+        { role: "user", content: "a".repeat(padding - half) },
+      ],
+      verify: false,
+    });
+    expect(new TextEncoder().encode(body).byteLength).toBe(MAX_INLINE_JSON_WRITE_BYTES);
+    const response = await app.request(
+      "/api/memories",
+      { method: "POST", headers: jsonHeaders, body },
+      env,
+    );
+    expect(response.status).toBe(201);
+  });
+
+  it("rejects a multibyte body under the character limit but over 1 MiB of bytes", async () => {
+    const content = "é".repeat(600_000);
+    const body = JSON.stringify({ title: "Multibyte", messages: [{ role: "user", content }] });
+    expect(content.length).toBeLessThan(MAX_MESSAGE_CONTENT_CHARS);
+    expect(body.length).toBeLessThan(MAX_INLINE_JSON_WRITE_BYTES);
+    expect(new TextEncoder().encode(body).byteLength).toBeGreaterThan(MAX_INLINE_JSON_WRITE_BYTES);
+    const response = await app.request(
+      "/api/memories",
+      { method: "POST", headers: jsonHeaders, body },
+      env,
+    );
+    const { error } = await tooLarge(response);
+    expect(error.code).toBe("REQUEST_TOO_LARGE");
+    expect(error.request_bytes).toBeGreaterThan(MAX_INLINE_JSON_WRITE_BYTES);
+    expect(error.max_request_bytes).toBe(MAX_INLINE_JSON_WRITE_BYTES);
+    expect(Number.isInteger(error.suggested_max_items)).toBe(true);
+    expect(error.suggested_max_items ?? 0).toBeGreaterThanOrEqual(1);
+  });
+
+  it("rejects an oversized inline append before writing a new revision", async () => {
+    const created = await app.request(
+      "/api/memories",
+      {
+        method: "POST",
+        headers: jsonHeaders,
+        body: JSON.stringify({
+          title: "Append target",
+          messages: [{ role: "user", content: "seed" }],
+        }),
+      },
+      env,
+    );
+    expect(created.status).toBe(201);
+    const receiptSchema = z.object({ conversation_id: z.string(), revision_id: z.string() });
+    const receipt = receiptSchema.parse(await created.json());
+    const chunk = "b".repeat(600_000);
+    const response = await app.request(
+      `/api/conversations/${receipt.conversation_id}/append`,
+      {
+        method: "POST",
+        headers: jsonHeaders,
+        body: JSON.stringify({
+          base_revision_id: receipt.revision_id,
+          messages: [
+            { role: "user", content: chunk },
+            { role: "assistant", content: chunk },
+          ],
+        }),
+      },
+      env,
+    );
+    const { error } = await tooLarge(response);
+    expect(error.code).toBe("REQUEST_TOO_LARGE");
+    expect(error.request_bytes).toBeGreaterThan(error.max_request_bytes);
+    expect(error.max_request_bytes).toBe(MAX_INLINE_JSON_WRITE_BYTES);
+    expect(Number.isInteger(error.suggested_max_items)).toBe(true);
+    expect(error.suggested_max_items ?? 0).toBeGreaterThanOrEqual(1);
+
+    const pageResponse = await app.request(
+      `/api/conversations/${receipt.conversation_id}`,
+      { headers: jsonHeaders },
+      env,
+    );
+    expect(pageResponse.status).toBe(200);
+    const page = z.object({ messages: z.array(z.unknown()) }).parse(await pageResponse.json());
+    expect(page.messages).toHaveLength(1);
+  });
+
+  it("rejects a direct import whose Content-Length exceeds the streamed ceiling", async () => {
+    const oversized = MAX_DIRECT_IMPORT_BYTES + 1;
+    const response = await app.request(
+      "/api/imports/direct",
+      {
+        method: "POST",
+        headers: {
+          authorization: "Bearer integration-test-token",
+          "content-length": String(oversized),
+        },
+        body: "x".repeat(oversized),
+      },
+      env,
+    );
+    const { error } = await tooLarge(response);
+    expect(error.code).toBe("REQUEST_TOO_LARGE");
+    expect(error.request_bytes).toBe(oversized);
+    expect(error.max_request_bytes).toBe(MAX_DIRECT_IMPORT_BYTES);
+    expect(error.max_request_bytes).toBe(16777216);
+    expect(error.suggested_max_items).toBeUndefined();
   });
 });

@@ -76,7 +76,10 @@ MEMPERSIST_TOKEN='your-token' \
 yarn import:chatgpt /path/to/conversations.json
 ```
 
-Files up to 16 MiB use direct streaming upload. Larger files use 16 MiB R2 multipart parts. The Worker hashes the completed object, preserves it unchanged, detects exact duplicate exports, and processes at most 25 conversations per queue turn. Check progress with:
+Files up to 16 MiB use direct streaming upload. Larger files use 16 MiB R2 multipart parts — the
+deployed `max_direct_import_bytes` and `max_multipart_part_bytes` values from
+`memory_get_capabilities`. The Worker hashes the completed object, preserves it unchanged, detects
+exact duplicate exports, and processes at most 25 conversations per queue turn. Check progress with:
 
 ```bash
 MEMPERSIST_TOKEN='your-token' yarn import:status <import-id>
@@ -136,6 +139,7 @@ Available tools:
 - `memory_replace`
 - `memory_restore_revision`
 - `memory_copy_conversations`
+- `memory_get_capabilities`
 
 `memory_store` and `memory_append` accept optional tags (lowercased, deduplicated, up to 20);
 `memory_search` filters by tags with AND semantics and returns each conversation's tags. See
@@ -147,14 +151,24 @@ Available tools:
 
 Search returns compact references; call `memory_get_context` only for selected results. See [docs/mcp.md](docs/mcp.md).
 
+`memory_get_capabilities` returns the deployed capability contract: protocol and capabilities
+versions, transport and message limits, per-tool item and byte bounds, and feature flags. The
+limits quoted below are the same enforced values it reports, so treat that tool as the single
+contract rather than independent figures. Aggregate limits are measured as UTF-8 bytes of the
+complete serialized request before any canonical write begins: inline JSON writes on both
+transports are limited to 1,048,576 bytes (1 MiB), and imports are limited to 16 MiB direct and
+16 MiB per multipart part. An oversized request fails with code `REQUEST_TOO_LARGE` and a
+conservative `suggested_max_items` estimate, never a silent truncation.
+
 For known memories, start `memory_get_conversations` with a `requests` array of 1–20
 conversation requests and optional `max_serialized_bytes` (default 32,768; minimum 4,096;
-maximum 49,152). A continuation sends exactly one opaque `cursor` plus the optional budget —
+maximum 49,152 — the deployed values `memory_get_capabilities` reports). A continuation sends
+exactly one opaque `cursor` plus the optional budget —
 never both `requests` and `cursor`, and never neither. Results use the established camelCase
 batch fields `batchId`, `results`, `completed`, `remaining`, `nextCursor`,
 `usedSerializedBytes`, and `maxSerializedBytes`; `results` retain `requestIndex` and isolate
 individual errors. The complete UTF-8 JSON response, including its envelope and cursor, stays
-within the requested budget and 49,152-byte ceiling.
+within the requested budget and the reported 49,152-byte ceiling.
 
 The first call pins every resolved revision before canonical bodies load; cursor calls keep
 those pins, so concurrent writes cannot mix revisions. Its response lists every requested
@@ -186,7 +200,8 @@ committed R2 revision and return compact readback with separate indexing/verific
 
 Store, append, replace, and restore return a bounded durable receipt: a committed revision reports
 `durable: true` with separate indexing and verification status, and the whole receipt is fitted to a
-documented safe maximum of 49,152 bytes (48 KiB) below the 64 KiB MCP tool guard. Inline readback is
+documented safe maximum of 49,152 bytes (48 KiB) below the 64 KiB MCP tool guard — the deployed
+`max_receipt_bytes` and `max_tool_output_bytes` values from `memory_get_capabilities`. Inline readback is
 returned only when it fits; otherwise the receipt carries `readback_requests` — selectors that are
 directly reusable as `memory_get_conversations` first-call `requests` (loop `nextCursor` until `null`)
 — plus an `omitted` list naming the shed field paths. Fitting sheds verbose fields in a fixed order and
@@ -197,7 +212,8 @@ See the [RP workflow and reviewable runtime-rule amendment](docs/rp-workflow.md)
 For prompt and task execution, `memory_build_context` compiles a deterministic, revision-pinned context pack
 from 1–20 required canonical conversations (exact title or conversation ID, full or tail mode,
 active or all branch, and optional `follow` pointer-expansion fields) and up to 8 optional hybrid-search retrieval
-requests within caller-specified token and serialized-byte limits (at most 49,152 bytes / 48 KiB). It pins required
+requests within caller-specified token and serialized-byte limits (at most `max_response_bytes`,
+49,152 bytes / 48 KiB, from `memory_get_capabilities`). It pins required
 current revisions before loading canonical bodies, follows exact structured pointers (such as `current_scene` and
 `active_arc.owner`) deterministically without semantic fallback, deduplicates source messages structurally on
 `(conversation_id, revision_id, source_node_id)`, orders content deterministically by authority (explicit required,

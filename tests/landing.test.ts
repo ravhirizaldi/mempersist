@@ -2,6 +2,13 @@ import { readdirSync } from "node:fs";
 import { Script } from "node:vm";
 import { describe, expect, it } from "vitest";
 import { landingRoutes } from "../src/landing";
+import {
+  MAX_DIRECT_IMPORT_BYTES,
+  MAX_INLINE_JSON_WRITE_BYTES,
+  MAX_MULTIPART_PART_BYTES,
+  MAX_TOOL_OUTPUT_BYTES,
+  RECOMMENDED_TOOL_OUTPUT_BYTES,
+} from "../src/limits";
 import { SITE_SCRIPT } from "../src/site";
 
 // Every recorded decision must be discoverable on the public decision log.
@@ -103,6 +110,26 @@ describe("Minimalist public pages", () => {
     expect(html).toContain("Hubungkan ChatGPT");
     expect(html).toContain('data-copied="Disalin"');
     expect(html).toContain('aria-label="Navigasi utama"');
+  });
+
+  it("quotes the runtime capability contract from src/limits.ts in both locales", async () => {
+    const mib = (bytes: number) => `${bytes / 1024 / 1024} MiB`;
+    const kib = (bytes: number) => `${bytes / 1024} KiB`;
+    const sizeLimits = {
+      en: `Size limits: JSON writes ${mib(MAX_INLINE_JSON_WRITE_BYTES)}, direct imports ${mib(MAX_DIRECT_IMPORT_BYTES)}, multipart parts ${mib(MAX_MULTIPART_PART_BYTES)}, MCP tool output ${kib(MAX_TOOL_OUTPUT_BYTES)} (${kib(RECOMMENDED_TOOL_OUTPUT_BYTES)} recommended).`,
+      id: `Batas ukuran: tulis JSON ${mib(MAX_INLINE_JSON_WRITE_BYTES)}, impor langsung ${mib(MAX_DIRECT_IMPORT_BYTES)}, bagian multipart ${mib(MAX_MULTIPART_PART_BYTES)}, keluaran alat MCP ${kib(MAX_TOOL_OUTPUT_BYTES)} (${kib(RECOMMENDED_TOOL_OUTPUT_BYTES)} disarankan).`,
+    };
+    for (const locale of ["en", "id"] as const) {
+      const security = await landingRoutes["/security"]!(locale).text();
+      expect(security, locale).toContain(sizeLimits[locale]);
+      const landing = await landingRoutes["/"]!(locale).text();
+      expect(landing, locale).toContain("<code>memory_get_capabilities</code>");
+      expect(landing, locale).toContain(
+        locale === "en"
+          ? "returns the runtime limits contract"
+          : "mengembalikan kontrak batas runtime",
+      );
+    }
   });
 
   it("emits syntactically valid browser JavaScript", () => {

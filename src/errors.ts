@@ -1,5 +1,6 @@
 export type ErrorCode =
   | "VALIDATION"
+  | "REQUEST_TOO_LARGE"
   | "AUTHENTICATION"
   | "NOT_FOUND"
   | "IMPORT_CONFLICT"
@@ -16,6 +17,7 @@ export class AppError extends Error {
     message: string,
     public readonly status = 500,
     public readonly retryable = false,
+    public readonly details: Record<string, unknown> = {},
   ) {
     super(message);
     this.name = "AppError";
