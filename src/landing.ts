@@ -680,6 +680,7 @@ function adrsPage(locale: Locale = "en"): Response {
     ["0033", "Pointer-aware deterministic expansion"],
     ["0034", "Deterministic pointer follow expansion"],
     ["0035", "Cursor-driven batch conversation pagination"],
+    ["0036", "Bounded mutation receipts"],
   ];
   const rows = adrs
     .map(

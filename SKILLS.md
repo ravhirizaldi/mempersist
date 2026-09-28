@@ -70,8 +70,12 @@ identity, source node, offset, and byte size without text; recover it with an au
 canonical HTTP read or account export rather than retrying the same cursor.
 Single conversation/context reads support `format: "compact"` without
 changing original text. For intentional saves, request `verify: true`: the server reloads the
-exact committed R2 revision and returns persisted compact readback. Check its semantics
-and finish any readback pages using the returned `revision_id` before relying on it. Treat
+exact committed R2 revision and returns persisted compact readback. Verification always reports
+`readback_available`; inline readback is returned only when it fits the bounded receipt
+(documented safe maximum 49,152 bytes / 48 KiB). When it does not fit, take the receipt's
+`readback_requests` selectors and pass them directly as the `memory_get_conversations` first-call
+`requests`, then loop `nextCursor` until `null` to complete the readback. Check its semantics
+before relying on it. Treat
 durability, verification, and indexing as separate outcomes; do not duplicate a committed
 write because a later verification/indexing step failed. See [the RP workflow](docs/rp-workflow.md)
 for explicit `simpan state` and existing owner boundaries.
@@ -97,27 +101,27 @@ suggested minimums without leaking text. The tool is strictly read-only and extr
 
 ## Tool reference
 
-| Tool                           | Use                                                         |
-| ------------------------------ | ----------------------------------------------------------- |
-| `memory_search`                | find memories; tags + `tag_mode` filter                     |
-| `memory_get_context`           | original messages around a search hit                       |
-| `memory_get_conversation`      | page a full conversation                                    |
-| `memory_get_conversations`     | batch 1–20 via requests, then opaque cursor loop            | fair, revision-pinned compact pages |
-| `memory_list_conversations`    | metadata + tags per conversation                            |
-| `memory_list_revisions`        | immutable revision history of one owned conversation        |
-| `memory_resolve_conversations` | resolve up to 20 exact titles without semantic search       |
-| `memory_build_context`         | deterministic revision-pinned context pack for a task       |
-| `memory_list_namespaces`       | namespaces you own                                          |
-| `memory_stats`                 | counts + indexing health                                    |
-| `memory_store`                 | durable new memory (claims `project/<slug>` on first write) |
-| `memory_append`                | extend an existing conversation, optimistic revision check  |
-| `memory_replace`               | replace its transcript, optimistic revision check           |
-| `memory_restore_revision`      | restore historical revision, optimistic revision check      |
-| `memory_copy_conversations`    | lossless copy into another owned namespace                  |
-| `memory_update_tags`           | change tags on an existing conversation                     |
-| `memory_delete_conversations`  | delete specific memories (user-confirmed)                   |
-| `memory_empty_namespace`       | empty one of your namespaces (exact confirmation)           |
-| `memory_import_status`         | ChatGPT import progress (owner only)                        |
+| Tool                           | Use                                                                           |
+| ------------------------------ | ----------------------------------------------------------------------------- |
+| `memory_search`                | find memories; tags + `tag_mode` filter                                       |
+| `memory_get_context`           | original messages around a search hit                                         |
+| `memory_get_conversation`      | page a full conversation                                                      |
+| `memory_get_conversations`     | batch 1–20 via requests, then opaque cursor loop                              | fair, revision-pinned compact pages |
+| `memory_list_conversations`    | metadata + tags per conversation                                              |
+| `memory_list_revisions`        | immutable revision history of one owned conversation                          |
+| `memory_resolve_conversations` | resolve up to 20 exact titles without semantic search                         |
+| `memory_build_context`         | deterministic revision-pinned context pack for a task                         |
+| `memory_list_namespaces`       | namespaces you own                                                            |
+| `memory_stats`                 | counts + indexing health                                                      |
+| `memory_store`                 | durable new memory (claims `project/<slug>` on first write) + bounded receipt |
+| `memory_append`                | extend an existing conversation, optimistic revision check, bounded receipt   |
+| `memory_replace`               | replace its transcript, optimistic revision check, bounded receipt            |
+| `memory_restore_revision`      | restore historical revision, optimistic revision check, bounded receipt       |
+| `memory_copy_conversations`    | lossless copy into another owned namespace, per-item bounded receipts         |
+| `memory_update_tags`           | change tags on an existing conversation                                       |
+| `memory_delete_conversations`  | delete specific memories (user-confirmed)                                     |
+| `memory_empty_namespace`       | empty one of your namespaces (exact confirmation)                             |
+| `memory_import_status`         | ChatGPT import progress (owner only)                                          |
 
 ## Pair with git
 

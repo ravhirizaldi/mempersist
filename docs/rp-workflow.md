@@ -49,11 +49,18 @@ branch relationships, raw source fields, or multimodal references are needed.
    and `verify: true`. Use `memory_store` with verification only for a genuinely new owner.
 3. Inspect `durable`, `revision_id`, `indexing`, and `verification` independently. A passed
    verification means the server reloaded that exact committed R2 revision, checked its
-   integrity, and compared all intended messages. The compact readback is persisted data.
-4. Check the readback semantically. Append readback starts at the first new message's active
-   offset. Follow `readback.nextOffset` through `memory_get_conversation` with the receipt's
-   conversation ID, `revision_id`, `format: "compact"`, and that offset until complete.
-   A successful persistence check does not mean the AI included every fact it should have.
+   integrity, and compared all intended messages. Read `verification.readback_available`: when it
+   is `true`, the persisted compact readback is in this response; when the response budget was
+   tight, the receipt lists the shed fields in `omitted` and returns `readback_requests` instead.
+4. Check the persisted readback semantically. When `verification.readback` is present, append
+   readback starts at the first new message's active offset; follow `readback.nextOffset` through
+   `memory_get_conversation` with the receipt's conversation ID, `revision_id`,
+   `format: "compact"`, and that offset until complete. When inline readback was shed, send the
+   `readback_requests` selectors as the `requests` array of a first-call
+   `memory_get_conversations`, then repeat `memory_get_conversations({ cursor: nextCursor })` with
+   only that cursor until `nextCursor` is `null`; each selector pins the committed `revision_id`.
+   Shedding is disclosure, not a verification failure, and no readback text is lost. A successful
+   persistence check does not mean the AI included every fact it should have.
 5. A conflict requires rereading the current owner and reconciling before another write.
    A post-commit verification/indexing failure requires inspecting the returned revision,
    not blindly repeating the write. Report which owners committed if a later owner fails;

@@ -195,6 +195,116 @@ describe("MCP server", () => {
     }
   });
 
+  it("advertises the bounded receipt contract on mutation tools", async () => {
+    const client = await connectedClient();
+    const listed = await client.listTools();
+    type SchemaNode = {
+      type?: unknown;
+      const?: unknown;
+      enum?: unknown[];
+      required?: string[];
+      properties?: Record<string, SchemaNode>;
+      items?: SchemaNode;
+      anyOf?: SchemaNode[];
+      maximum?: unknown;
+    };
+    const schemaFor = (name: string): SchemaNode => {
+      const tool = listed.tools.find((candidate) => candidate.name === name);
+      expect(tool, name).toBeDefined();
+      return tool!.outputSchema as SchemaNode;
+    };
+    const receiptBudget = (label: string, schema: SchemaNode) => {
+      const properties = schema.properties ?? {};
+      expect(properties.used_serialized_bytes, `${label} used_serialized_bytes`).toMatchObject({
+        type: "number",
+      });
+      expect(properties.max_serialized_bytes, `${label} max_serialized_bytes`).toMatchObject({
+        type: "number",
+      });
+      expect(properties.readback_requests, `${label} readback_requests`).toMatchObject({
+        type: "array",
+      });
+      expect(properties.omitted, `${label} omitted`).toMatchObject({ type: "array" });
+      expect(schema.required, `${label} required`).toEqual(
+        expect.arrayContaining(["used_serialized_bytes", "max_serialized_bytes"]),
+      );
+    };
+    // readback_requests entries are a valid first-call memory_get_conversations request payload.
+    const readbackSelectors = (label: string, schema: SchemaNode) => {
+      const selector = schema.properties?.readback_requests?.items;
+      expect(selector, `${label} readback selector`).toBeDefined();
+      expect(Object.keys(selector!.properties ?? {}).sort(), `${label} selector fields`).toEqual([
+        "branch",
+        "conversation_id",
+        "limit",
+        "offset",
+        "revision_id",
+      ]);
+      expect(selector!.required, `${label} selector required`).toEqual(
+        expect.arrayContaining(["conversation_id", "revision_id", "offset", "limit", "branch"]),
+      );
+      expect(selector!.properties?.branch?.enum, `${label} selector branch`).toEqual([
+        "active",
+        "all",
+      ]);
+    };
+    const readbackAvailable = (label: string, verification: SchemaNode | undefined) => {
+      expect(verification, `${label} verification`).toBeDefined();
+      expect(
+        verification!.properties?.readback_available,
+        `${label} readback_available`,
+      ).toMatchObject({ type: "boolean" });
+      expect(verification!.required, `${label} verification required`).toEqual(
+        expect.arrayContaining(["readback_available"]),
+      );
+    };
+    // Canonical response-budget ceiling: the largest max_serialized_bytes any tool may advertise.
+    const guardCeiling = (
+      listed.tools.find((tool) => tool.name === "memory_get_conversations")!
+        .inputSchema as SchemaNode
+    ).properties?.max_serialized_bytes?.maximum;
+    expect(typeof guardCeiling, "batch read ceiling").toBe("number");
+
+    for (const name of [
+      "memory_store",
+      "memory_append",
+      "memory_replace",
+      "memory_restore_revision",
+    ]) {
+      const schema = schemaFor(name);
+      receiptBudget(name, schema);
+      readbackSelectors(name, schema);
+      readbackAvailable(name, schema.properties?.verification);
+      const advertisedMaximum = schema.properties?.max_serialized_bytes?.maximum;
+      if (advertisedMaximum !== undefined) {
+        expect(advertisedMaximum, `${name} advertised maximum`).toBeLessThanOrEqual(
+          guardCeiling as number,
+        );
+      }
+    }
+
+    const copy = schemaFor("memory_copy_conversations");
+    const copyMaximum = copy.properties?.max_serialized_bytes?.maximum;
+    if (copyMaximum !== undefined) {
+      expect(copyMaximum, "copy advertised maximum").toBeLessThanOrEqual(guardCeiling as number);
+    }
+    expect(copy.properties?.results, "copy results").toMatchObject({ type: "array" });
+    receiptBudget("memory_copy_conversations", copy);
+    readbackSelectors("memory_copy_conversations", copy);
+    const branches = copy.properties?.results?.items?.anyOf ?? [];
+    const copied = branches.find((branch) => branch.properties?.status?.const === "copied");
+    const failed = branches.find((branch) => branch.properties?.status?.const === "failed");
+    expect(copied, "copied result branch").toBeDefined();
+    expect(failed, "failed result branch").toBeDefined();
+    expect(copied!.properties?.durable, "copied durable").toMatchObject({
+      type: "boolean",
+      const: true,
+    });
+    expect(copied!.required, "copied result required").toEqual(expect.arrayContaining(["durable"]));
+    readbackAvailable("copy copied result", copied!.properties?.verification);
+    expect(failed!.required, "failed result required").toEqual(expect.arrayContaining(["error"]));
+  });
+
   it("rejects malformed tool arguments before business logic", async () => {
     const client = await connectedClient();
     const result = await client.callTool({

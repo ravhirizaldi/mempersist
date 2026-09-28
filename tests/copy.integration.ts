@@ -45,6 +45,7 @@ const pageResult = z.object({
 const verificationResult = z.object({
   status: z.enum(["passed", "failed"]),
   revision_id: z.string(),
+  readback_available: z.boolean(),
   checked_messages: z.number().optional(),
   readback: pageResult.optional(),
   error: z.unknown().optional(),
@@ -57,6 +58,7 @@ const copyResultItemSuccess = z.object({
   source_revision_id: z.string(),
   conversation_id: z.string(),
   revision_id: z.string(),
+  durable: z.literal(true),
   indexing: z.object({
     status: z.enum(["queued", "failed"]),
     job_id: z.string().optional(),
@@ -85,6 +87,45 @@ const copyResultItem = z.union([copyResultItemSuccess, copyResultItemFailure]);
 
 const copyOutputSchema = z.object({
   results: z.array(copyResultItem),
+  readback_requests: z
+    .array(
+      z.object({
+        conversation_id: z.string(),
+        revision_id: z.string(),
+        offset: z.number(),
+        limit: z.number(),
+        branch: z.string(),
+      }),
+    )
+    .optional(),
+  omitted: z.array(z.string()).optional(),
+  used_serialized_bytes: z.number(),
+  max_serialized_bytes: z.number(),
+});
+
+const batchReadOutputSchema = z.object({
+  results: z.array(
+    z.object({
+      requestIndex: z.number(),
+      status: z.enum(["ok", "error", "deferred"]),
+      page: z
+        .object({
+          conversation: z.object({ id: z.string(), revisionId: z.string() }),
+          messages: z.array(messageResult),
+          offset: z.number(),
+          nextOffset: z.number().nullable(),
+          total: z.number(),
+          oversizedMessage: z.unknown().optional(),
+        })
+        .optional(),
+      error: z.object({ code: z.string(), message: z.string() }).optional(),
+    }),
+  ),
+  completed: z.number(),
+  remaining: z.number(),
+  nextCursor: z.string().nullable(),
+  usedSerializedBytes: z.number(),
+  maxSerializedBytes: z.number(),
 });
 
 const searchOutputSchema = z.object({
@@ -154,6 +195,48 @@ async function callValue(client: Client, name: string, args: Record<string, unkn
   const result = await call(client, name, args);
   if (result.isError) throw new Error(result.text);
   return result.value;
+}
+
+// ~44 KiB of multi-byte text per conversation. Larger than the whole receipt budget, so no
+// single inline verification readback can fit the max-size bulk envelope.
+const MULTIBYTE_FILLER = "雨🌙";
+const OVERSIZED_UNITS = 6300;
+
+function oversizedText(index: number): string {
+  return `${index}:${MULTIBYTE_FILLER.repeat(OVERSIZED_UNITS)}`;
+}
+
+async function storeSources(
+  namespace: string,
+  prefix: string,
+  conversations: string[][],
+  userId = OWNER_DB_USER_ID,
+): Promise<Array<{ id: string; revisionId: string; texts: string[] }>> {
+  const sources: Array<{ id: string; revisionId: string; texts: string[] }> = [];
+  for (const [index, texts] of conversations.entries()) {
+    const conversation = await createMcpConversation({
+      title: `${prefix} ${index}`,
+      namespace,
+      messages: texts.map((content) => ({ role: "user", content })),
+    });
+    const stored = await writeCanonicalConversation(env, conversation, null, null, userId);
+    sources.push({ id: conversation.id, revisionId: stored.revisionId, texts });
+  }
+  return sources;
+}
+
+function accumulatePageTexts(
+  target: Map<string, string[]>,
+  value: z.infer<typeof batchReadOutputSchema>,
+): void {
+  for (const entry of value.results) {
+    if (entry.status !== "ok" || !entry.page) continue;
+    const conversationId = entry.page.conversation.id;
+    target.set(conversationId, [
+      ...(target.get(conversationId) ?? []),
+      ...entry.page.messages.map((message) => message.text),
+    ]);
+  }
 }
 
 describe("memory_copy_conversations integration", () => {
@@ -727,13 +810,15 @@ describe("memory_copy_conversations integration", () => {
 
     vi.spyOn(env.INDEX_QUEUE, "send").mockRejectedValue(new Error("Queue offline / unreachable"));
 
-    const rawCopy = await callValue(client, "memory_copy_conversations", {
+    const copyCall = await call(client, "memory_copy_conversations", {
       target_namespace: destNs,
       idempotency_key: `idemp-queue-fail-${crypto.randomUUID()}`,
       requests: [{ conversation_id: sourceConv.id }],
     });
+    expect(copyCall.isError).toBe(false);
+    if (copyCall.isError) throw new Error(copyCall.text);
 
-    const parsed = copyOutputSchema.parse(rawCopy);
+    const parsed = copyOutputSchema.parse(copyCall.value);
     const item = parsed.results[0]!;
     expect(item.status).toBe("copied");
     if (item.status !== "copied") throw new Error("Expected copied");
@@ -741,6 +826,14 @@ describe("memory_copy_conversations integration", () => {
     expect(item.indexing.status).toBe("failed");
     expect(item.indexing.error?.code).toBe("DERIVED_INDEXING");
     expect(item.indexing.error?.retryable).toBe(true);
+
+    // A failed enqueue is still a durable, bounded post-commit receipt: never the 64 KiB guard.
+    expect(item.durable).toBe(true);
+    expect(item.indexing.error?.message.length).toBeLessThanOrEqual(200);
+    expect(parsed.results).toHaveLength(1);
+    expect(copyCall.bytes).toBeLessThanOrEqual(64 * 1024);
+    expect(parsed.max_serialized_bytes).toBe(49152);
+    expect(parsed.used_serialized_bytes).toBeLessThanOrEqual(parsed.max_serialized_bytes);
 
     // Destination conversation is still durably persisted in D1
     const destRow = await env.MEMORY_DB.prepare(
@@ -783,6 +876,9 @@ describe("memory_copy_conversations integration", () => {
     try {
       const receipt = await completeMemoryCopy(env, copyResult.stored, true);
       expect(receipt.verification?.status).toBe("failed");
+      expect(receipt.verification?.readback_available).toBe(false);
+      expect(receipt.verification?.readback).toBeUndefined();
+      expect(receipt.durable).toBe(true);
     } finally {
       await env.MEMORY_BUCKET.put(copyResult.stored.manifestKey, manifestText);
     }
@@ -795,6 +891,92 @@ describe("memory_copy_conversations integration", () => {
       .first<{ current_revision_id: string; namespace: string }>();
     expect(destRow?.current_revision_id).toBe(copyResult.stored.revisionId);
     expect(destRow?.namespace).toBe(destNs);
+  });
+
+  it("returns a durable bounded tool receipt when verification fails post-commit through the copy tool", async () => {
+    const srcNs = `ns-copy-src-${crypto.randomUUID().slice(0, 8)}`;
+    const destNs = `ns-copy-dest-${crypto.randomUUID().slice(0, 8)}`;
+    await grantNamespace(env, OWNER_DB_USER_ID, srcNs);
+    await grantNamespace(env, OWNER_DB_USER_ID, destNs);
+    const client = await ownerClient(srcNs);
+
+    const sourceConv = await createMcpConversation({
+      title: "Tool Post Commit Failure",
+      namespace: srcNs,
+      messages: [{ role: "user", content: "Post commit verification failure content" }],
+    });
+    const storedSource = await writeCanonicalConversation(
+      env,
+      sourceConv,
+      null,
+      null,
+      OWNER_DB_USER_ID,
+    );
+
+    const idempotencyKey = `idemp-tool-vf-${crypto.randomUUID()}`;
+    // Same deterministic destination identity the copy path derives, so the manifest read can
+    // be made to fail after the canonical commit has already succeeded.
+    const destConversationId = await domainId(
+      "copy-conversation",
+      OWNER_DB_USER_ID,
+      idempotencyKey,
+      "0",
+      sourceConv.id,
+      storedSource.revisionId,
+      destNs,
+    );
+    const destManifestPrefix = `canonical/conversations/${destConversationId}/revisions/`;
+
+    const originalGet = env.MEMORY_BUCKET.get.bind(env.MEMORY_BUCKET);
+    vi.spyOn(env.MEMORY_BUCKET, "get").mockImplementation((...args) => {
+      const key = args[0];
+      if (typeof key === "string" && key.startsWith(destManifestPrefix)) {
+        return Promise.resolve(null);
+      }
+      return originalGet(...args);
+    });
+
+    const result = await call(client, "memory_copy_conversations", {
+      target_namespace: destNs,
+      idempotency_key: idempotencyKey,
+      verify: true,
+      requests: [{ conversation_id: sourceConv.id }],
+    });
+    vi.restoreAllMocks();
+
+    expect(result.isError).toBe(false);
+    if (result.isError) throw new Error(result.text);
+    expect(result.text).not.toContain("Response exceeds 64 KiB");
+    expect(result.bytes).toBeLessThanOrEqual(64 * 1024);
+
+    const parsed = copyOutputSchema.parse(result.value);
+    expect(parsed.results).toHaveLength(1);
+    expect(parsed.max_serialized_bytes).toBe(49152);
+    expect(parsed.used_serialized_bytes).toBeLessThanOrEqual(parsed.max_serialized_bytes);
+
+    const item = parsed.results[0]!;
+    expect(item.status).toBe("copied");
+    if (item.status !== "copied") throw new Error("Expected copied");
+
+    expect(item.durable).toBe(true);
+    expect(item.conversation_id).toBe(destConversationId);
+    expect(item.revision_id).toEqual(expect.any(String));
+    expect(item.verification?.status).toBe("failed");
+    expect(item.verification?.readback_available).toBe(false);
+    expect(item.verification?.readback).toBeUndefined();
+    // No usable readback means no continuation is advertised for this item.
+    expect(parsed.readback_requests ?? []).toHaveLength(0);
+
+    // The commit itself survived: D1 head and the R2 manifest are both intact.
+    const destRow = await env.MEMORY_DB.prepare(
+      "SELECT current_revision_id, namespace FROM conversations WHERE id = ?",
+    )
+      .bind(destConversationId)
+      .first<{ current_revision_id: string; namespace: string }>();
+    expect(destRow?.current_revision_id).toBe(item.revision_id);
+    expect(destRow?.namespace).toBe(destNs);
+    const manifestKey = `canonical/conversations/${destConversationId}/revisions/${item.revision_id}.json`;
+    expect(await env.MEMORY_BUCKET.head(manifestKey)).not.toBeNull();
   });
 
   it("supports destination-scoped search and cross-namespace search exposing both source and copy without dedup", async () => {
@@ -864,4 +1046,298 @@ describe("memory_copy_conversations integration", () => {
       expect(allFoundIds).toContain(destConvId);
     }
   });
+
+  it("keeps a maximum verified bulk receipt bounded and served by readback_requests", async () => {
+    const srcNs = `ns-copy-src-${crypto.randomUUID().slice(0, 8)}`;
+    const destNs = `ns-copy-dest-${crypto.randomUUID().slice(0, 8)}`;
+    await grantNamespace(env, OWNER_DB_USER_ID, srcNs);
+    await grantNamespace(env, OWNER_DB_USER_ID, destNs);
+    const client = await ownerClient(srcNs);
+
+    const sources = await storeSources(
+      srcNs,
+      "Bulk receipt source",
+      Array.from({ length: 20 }, (_, index) => [oversizedText(index)]),
+    );
+
+    const result = await call(client, "memory_copy_conversations", {
+      target_namespace: destNs,
+      idempotency_key: `idemp-max-${crypto.randomUUID()}`,
+      verify: true,
+      requests: sources.map((source) => ({ conversation_id: source.id })),
+    });
+    expect(result.isError).toBe(false);
+    if (result.isError) throw new Error(result.text);
+    expect(result.bytes).toBeLessThanOrEqual(64 * 1024);
+
+    const parsed = copyOutputSchema.parse(result.value);
+    expect(parsed.results).toHaveLength(20);
+    expect(parsed.max_serialized_bytes).toBe(49152);
+    expect(parsed.used_serialized_bytes).toBeLessThanOrEqual(parsed.max_serialized_bytes);
+    expect(parsed.used_serialized_bytes).toBeLessThanOrEqual(result.bytes);
+
+    const copiedItems = parsed.results.flatMap((item) => (item.status === "copied" ? [item] : []));
+    expect(copiedItems).toHaveLength(20);
+    for (const item of copiedItems) {
+      const source = sources[item.request_index]!;
+      expect(source).toBeDefined();
+      expect(item.source_conversation_id).toBe(source.id);
+      expect(item.source_revision_id).toBe(source.revisionId);
+      expect(item.durable).toBe(true);
+      expect(item.conversation_id).not.toBe(source.id);
+      expect(item.revision_id).toEqual(expect.any(String));
+      expect(item.indexing.status).toBe("queued");
+      expect(item.verification?.status).toBe("passed");
+      expect(item.verification?.revision_id).toBe(item.revision_id);
+      expect(item.verification?.readback_available).toBe(true);
+      expect(item.verification?.checked_messages).toBe(1);
+    }
+
+    // Every verified copy advertises exactly one canonical readback request.
+    const readbackRequests = parsed.readback_requests ?? [];
+    expect(readbackRequests).toHaveLength(copiedItems.length);
+    for (const item of copiedItems) {
+      const advertised = readbackRequests.filter(
+        (request) => request.conversation_id === item.conversation_id,
+      );
+      expect(advertised).toHaveLength(1);
+      expect(advertised[0]).toMatchObject({
+        revision_id: item.revision_id,
+        offset: 0,
+        limit: 20,
+        branch: "active",
+      });
+    }
+
+    // ~44 KiB readbacks cannot fit the max envelope, so the ledger names the omission and no
+    // item may still carry the inline readback the receipt says it dropped.
+    const omitted = parsed.omitted ?? [];
+    expect(omitted).toContain("verification.readback");
+    expect(copiedItems.filter((item) => item.verification?.readback !== undefined)).toHaveLength(0);
+
+    // The opposite direction: a receipt that ledgers no omission keeps every inline readback.
+    const smallText = `${MULTIBYTE_FILLER.repeat(40)} small verified`;
+    const [smallSource] = await storeSources(srcNs, "Small receipt source", [[smallText]]);
+    const smallResult = await call(client, "memory_copy_conversations", {
+      target_namespace: destNs,
+      idempotency_key: `idemp-max-small-${crypto.randomUUID()}`,
+      verify: true,
+      requests: [{ conversation_id: smallSource!.id }],
+    });
+    expect(smallResult.isError).toBe(false);
+    if (smallResult.isError) throw new Error(smallResult.text);
+    const smallParsed = copyOutputSchema.parse(smallResult.value);
+    expect(smallParsed.omitted ?? []).not.toContain("verification.readback");
+    const smallItem = smallParsed.results[0]!;
+    expect(smallItem.status).toBe("copied");
+    if (smallItem.status !== "copied") throw new Error("Expected copied");
+    expect(smallItem.durable).toBe(true);
+    expect(smallItem.verification?.readback_available).toBe(true);
+    expect(smallItem.verification?.readback?.messages.map((message) => message.text)).toEqual([
+      smallText,
+    ]);
+  }, 60_000);
+
+  it("serves every verified bulk conversation through canonical batch readback with cursor continuation", async () => {
+    const srcNs = `ns-copy-src-${crypto.randomUUID().slice(0, 8)}`;
+    const destNs = `ns-copy-dest-${crypto.randomUUID().slice(0, 8)}`;
+    await grantNamespace(env, OWNER_DB_USER_ID, srcNs);
+    await grantNamespace(env, OWNER_DB_USER_ID, destNs);
+    const client = await ownerClient(srcNs);
+
+    const perMessage = MULTIBYTE_FILLER.repeat(150);
+    const sources = await storeSources(
+      srcNs,
+      "Batch readback source",
+      Array.from({ length: 20 }, (_, index) => [
+        `${index}:${perMessage}`,
+        `${index}-tail:${perMessage}`,
+      ]),
+    );
+
+    const copyResult = await call(client, "memory_copy_conversations", {
+      target_namespace: destNs,
+      idempotency_key: `idemp-batch-readback-${crypto.randomUUID()}`,
+      verify: true,
+      requests: sources.map((source) => ({ conversation_id: source.id })),
+    });
+    expect(copyResult.isError).toBe(false);
+    if (copyResult.isError) throw new Error(copyResult.text);
+    const parsed = copyOutputSchema.parse(copyResult.value);
+
+    const readbackRequests = parsed.readback_requests ?? [];
+    expect(readbackRequests).toHaveLength(20);
+
+    // Results come back in request order, so request_index maps a readback request to its source.
+    const destinationByIndex = new Map<number, string>();
+    for (const item of parsed.results) {
+      if (item.status !== "copied") throw new Error("Expected every copy to succeed");
+      destinationByIndex.set(item.request_index, item.conversation_id);
+    }
+    for (const [index, request] of readbackRequests.entries()) {
+      expect(request.conversation_id).toBe(destinationByIndex.get(index));
+      expect(request.offset).toBe(0);
+      expect(request.limit).toBe(20);
+      expect(request.branch).toBe("active");
+    }
+
+    const observed = new Map<string, string[]>();
+    let page = batchReadOutputSchema.parse(
+      await callValue(client, "memory_get_conversations", { requests: readbackRequests }),
+    );
+    let pages = 1;
+    for (;;) {
+      expect(page.results.filter((entry) => entry.status === "error")).toHaveLength(0);
+      accumulatePageTexts(observed, page);
+      const nextCursor = page.nextCursor;
+      if (nextCursor === null) break;
+      expect(pages).toBeLessThan(50);
+      pages += 1;
+      page = batchReadOutputSchema.parse(
+        await callValue(client, "memory_get_conversations", { cursor: nextCursor }),
+      );
+    }
+    // The batch budget is smaller than this content, so the content needed continuation pages.
+    expect(pages).toBeGreaterThan(1);
+    expect(observed.size).toBe(20);
+
+    let observedMessages = 0;
+    for (const [index, source] of sources.entries()) {
+      const destinationId = destinationByIndex.get(index)!;
+      expect(observed.get(destinationId)).toEqual(source.texts);
+      observedMessages += observed.get(destinationId)!.length;
+    }
+    const sourceMessages = sources.reduce((count, source) => count + source.texts.length, 0);
+    expect(sourceMessages).toBe(40);
+    expect(observedMessages).toBe(sourceMessages);
+  }, 60_000);
+
+  it("keeps a mixed success and failure maximum batch bounded with per-item error codes", async () => {
+    const srcNs = `ns-copy-src-${crypto.randomUUID().slice(0, 8)}`;
+    const destNs = `ns-copy-dest-${crypto.randomUUID().slice(0, 8)}`;
+    const foreignNs = `ns-copy-foreign-${crypto.randomUUID().slice(0, 8)}`;
+    await grantNamespace(env, OWNER_DB_USER_ID, srcNs);
+    await grantNamespace(env, OWNER_DB_USER_ID, destNs);
+    const client = await ownerClient(srcNs);
+
+    const foreignUser = await getOrCreateUser(
+      env,
+      `copy-foreign-${crypto.randomUUID().slice(0, 6)}@example.com`,
+    );
+    await grantNamespace(env, foreignUser.id, foreignNs);
+    const foreignSources = await storeSources(
+      foreignNs,
+      "Foreign receipt source",
+      Array.from({ length: 5 }, (_, index) => [`foreign ${index}`]),
+      foreignUser.id,
+    );
+    const validSources = await storeSources(
+      srcNs,
+      "Mixed receipt source",
+      Array.from({ length: 10 }, (_, index) => [oversizedText(index)]),
+    );
+    const missingIds = Array.from({ length: 5 }, () => crypto.randomUUID());
+
+    const requests: Array<{ conversation_id: string }> = [];
+    let validCursor = 0;
+    let missingCursor = 0;
+    let foreignCursor = 0;
+    for (let index = 0; index < 20; index += 1) {
+      if (index % 2 === 0) {
+        requests.push({ conversation_id: validSources[validCursor++]!.id });
+      } else if (index % 4 === 1) {
+        requests.push({ conversation_id: missingIds[missingCursor++]! });
+      } else {
+        requests.push({ conversation_id: foreignSources[foreignCursor++]!.id });
+      }
+    }
+    expect(validCursor).toBe(10);
+    expect(missingCursor).toBe(5);
+    expect(foreignCursor).toBe(5);
+
+    const result = await call(client, "memory_copy_conversations", {
+      target_namespace: destNs,
+      idempotency_key: `idemp-mixed-max-${crypto.randomUUID()}`,
+      verify: true,
+      requests,
+    });
+    expect(result.isError).toBe(false);
+    if (result.isError) throw new Error(result.text);
+    expect(result.bytes).toBeLessThanOrEqual(64 * 1024);
+
+    const parsed = copyOutputSchema.parse(result.value);
+    expect(parsed.results).toHaveLength(20);
+    expect(parsed.results.map((item) => item.request_index)).toEqual(
+      Array.from({ length: 20 }, (_, index) => index),
+    );
+    expect(parsed.max_serialized_bytes).toBe(49152);
+    expect(parsed.used_serialized_bytes).toBeLessThanOrEqual(parsed.max_serialized_bytes);
+
+    const copiedItems = parsed.results.flatMap((item) => (item.status === "copied" ? [item] : []));
+    const failedItems = parsed.results.flatMap((item) => (item.status === "failed" ? [item] : []));
+    expect(copiedItems).toHaveLength(10);
+    expect(failedItems).toHaveLength(10);
+
+    for (const item of failedItems) {
+      expect(item.source_conversation_id).toBe(requests[item.request_index]!.conversation_id);
+      expect(item.error.code).toBe("NOT_FOUND");
+      expect(item.error.message.length).toBeGreaterThan(0);
+      expect(item.error.message.length).toBeLessThanOrEqual(200);
+    }
+    for (const item of copiedItems) {
+      expect(item.durable).toBe(true);
+      expect(item.conversation_id).toEqual(expect.any(String));
+      expect(item.revision_id).toEqual(expect.any(String));
+      expect(item.indexing.status).toBe("queued");
+      expect(item.verification?.status).toBe("passed");
+      expect(item.verification?.readback_available).toBe(true);
+    }
+    // Only successful verified copies advertise readback continuations.
+    expect(parsed.readback_requests ?? []).toHaveLength(copiedItems.length);
+  }, 60_000);
+
+  it("replays an identical maximum batch receipt byte-for-byte with the same idempotency key", async () => {
+    const srcNs = `ns-copy-src-${crypto.randomUUID().slice(0, 8)}`;
+    const destNs = `ns-copy-dest-${crypto.randomUUID().slice(0, 8)}`;
+    await grantNamespace(env, OWNER_DB_USER_ID, srcNs);
+    await grantNamespace(env, OWNER_DB_USER_ID, destNs);
+    const client = await ownerClient(srcNs);
+
+    const sources = await storeSources(
+      srcNs,
+      "Replay receipt source",
+      Array.from({ length: 20 }, (_, index) => [oversizedText(index)]),
+    );
+    const args = {
+      target_namespace: destNs,
+      idempotency_key: `idemp-replay-max-${crypto.randomUUID()}`,
+      verify: true,
+      requests: sources.map((source) => ({ conversation_id: source.id })),
+    };
+
+    const first = await call(client, "memory_copy_conversations", args);
+    const second = await call(client, "memory_copy_conversations", args);
+    expect(first.isError).toBe(false);
+    expect(second.isError).toBe(false);
+    if (first.isError || second.isError) throw new Error("Expected both copies to succeed");
+
+    expect(first.bytes).toBeLessThanOrEqual(64 * 1024);
+    expect(second.bytes).toBe(first.bytes);
+    expect(second.text).toBe(first.text);
+
+    const firstParsed = copyOutputSchema.parse(first.value);
+    const secondParsed = copyOutputSchema.parse(second.value);
+    expect(secondParsed).toEqual(firstParsed);
+    expect(secondParsed.used_serialized_bytes).toBe(firstParsed.used_serialized_bytes);
+    expect(firstParsed.max_serialized_bytes).toBe(49152);
+    expect(firstParsed.used_serialized_bytes).toBeLessThanOrEqual(firstParsed.max_serialized_bytes);
+
+    // Replay reused the same committed destinations instead of creating new ones.
+    const destinationRows = await env.MEMORY_DB.prepare(
+      "SELECT COUNT(*) AS total FROM conversations WHERE namespace = ?",
+    )
+      .bind(destNs)
+      .first<{ total: number }>();
+    expect(destinationRows?.total).toBe(20);
+  }, 60_000);
 });

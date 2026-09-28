@@ -41,6 +41,31 @@ const pageResult = z.object({
   total: z.number(),
 });
 
+const readbackSelectorResult = z.object({
+  conversation_id: z.string(),
+  revision_id: z.string(),
+  offset: z.number(),
+  limit: z.number(),
+  branch: z.enum(["active", "all"]),
+});
+
+const batchPageResult = z.object({
+  messages: z.array(messageResult),
+  nextOffset: z.number().nullable(),
+  total: z.number(),
+});
+
+const batchResult = z.object({
+  results: z.array(
+    z.object({
+      requestIndex: z.number(),
+      status: z.string(),
+      page: batchPageResult.optional(),
+    }),
+  ),
+  nextCursor: z.string().nullable(),
+});
+
 const restoreReceiptResult = z.object({
   conversation_id: z.string(),
   previous_revision_id: z.string(),
@@ -61,11 +86,19 @@ const restoreReceiptResult = z.object({
     .object({
       status: z.enum(["passed", "failed"]),
       revision_id: z.string(),
+      readback_available: z.boolean(),
       checked_messages: z.number().optional(),
       readback: pageResult.optional(),
+      readback_error: z
+        .object({ code: z.string(), message: z.string(), offset: z.number() })
+        .optional(),
       error: z.unknown().optional(),
     })
     .optional(),
+  readback_requests: z.array(readbackSelectorResult).optional(),
+  omitted: z.array(z.string()).optional(),
+  used_serialized_bytes: z.number(),
+  max_serialized_bytes: z.number(),
 });
 
 type CallResult =
@@ -116,6 +149,16 @@ async function callValue(client: Client, name: string, args: Record<string, unkn
   const result = await call(client, name, args);
   if (result.isError) throw new Error(result.text);
   return result.value;
+}
+
+function collectPageTexts(target: Map<number, string[]>, value: z.infer<typeof batchResult>): void {
+  for (const entry of value.results) {
+    if (entry.page?.messages?.length)
+      target.set(entry.requestIndex, [
+        ...(target.get(entry.requestIndex) ?? []),
+        ...entry.page.messages.map((message) => message.text),
+      ]);
+  }
 }
 
 describe("memory_restore_revision integration", () => {
@@ -648,5 +691,71 @@ describe("memory_restore_revision integration", () => {
       .first<{ status: string; applied_at: string | null }>();
     expect(transitionRow?.status).toBe("applied");
     expect(transitionRow?.applied_at).not.toBeNull();
+  });
+
+  it("returns a bounded restore receipt whose readback_requests pin the restored revision", async () => {
+    const ns = `ns-restore-${crypto.randomUUID().slice(0, 8)}`;
+    await grantNamespace(env, OWNER_DB_USER_ID, ns);
+    const client = await ownerClient(ns);
+
+    const restoredMessages = [
+      { role: "user", content: 'Restored rule: keep the gate open.\n"Quoted" \\ 雨 🌙' },
+      { role: "assistant", content: "Restored acknowledgement." },
+    ];
+    const conv = await createMcpConversation({
+      title: "Bounded Restore Receipt",
+      namespace: ns,
+      messages: restoredMessages,
+    });
+    const stored1 = await writeCanonicalConversation(env, conv, null, null, OWNER_DB_USER_ID);
+    const stored2 = await appendConversation(env, conv.id, stored1.revisionId, [
+      { role: "user", content: "Append that the restore rolls back." },
+    ]);
+
+    const result = await call(client, "memory_restore_revision", {
+      conversation_id: conv.id,
+      revision_id: stored1.revisionId,
+      base_revision_id: stored2.revisionId,
+      verify: true,
+    });
+    expect(result.isError).toBe(false);
+    expect(result.bytes).toBeLessThanOrEqual(64 * 1024);
+    const receipt = restoreReceiptResult.parse(result.isError ? result.text : result.value);
+
+    expect(receipt.durable).toBe(true);
+    expect(receipt.previous_revision_id).toBe(stored2.revisionId);
+    expect(receipt.revision_id).toBe(stored1.revisionId);
+    expect(receipt.verification?.status).toBe("passed");
+    expect(receipt.verification?.readback_available).toBe(true);
+    expect(receipt.verification?.readback?.messages.map((m) => m.text)).toEqual(
+      restoredMessages.map((message) => message.content),
+    );
+    expect(receipt.max_serialized_bytes).toBe(49152);
+    expect(receipt.used_serialized_bytes).toBeLessThanOrEqual(receipt.max_serialized_bytes);
+    expect(result.bytes).toBe(receipt.used_serialized_bytes);
+
+    const readbackRequests = receipt.readback_requests ?? [];
+    expect(readbackRequests).toHaveLength(1);
+    expect(readbackRequests[0]).toEqual({
+      conversation_id: conv.id,
+      revision_id: stored1.revisionId,
+      offset: 0,
+      limit: 20,
+      branch: "active",
+    });
+
+    const seen = new Map<number, string[]>();
+    let page = batchResult.parse(
+      await callValue(client, "memory_get_conversations", { requests: readbackRequests }),
+    );
+    collectPageTexts(seen, page);
+    for (let pageNumber = 0; page.nextCursor; pageNumber++) {
+      expect(pageNumber).toBeLessThan(20);
+      const cursor = page.nextCursor;
+      page = batchResult.parse(await callValue(client, "memory_get_conversations", { cursor }));
+      collectPageTexts(seen, page);
+    }
+    expect(page.nextCursor).toBeNull();
+    expect(seen.get(0)).toEqual(restoredMessages.map((message) => message.content));
   });
 });

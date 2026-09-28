@@ -135,6 +135,14 @@ Query-plan evidence (D1 `EXPLAIN QUERY PLAN`): title resolution queries use the 
 filtering by namespace and title. In single-user and bounded-tenant workloads, this index scan is
 bounded to the caller's active conversations. No additional migration or index was added.
 
+## Mutation receipts
+
+Post-commit receipt serialization is a response contract only (ADR 0036). The shared bounded
+builder in `src/writes.ts` sizes a receipt to at most 49,152 serialized UTF-8 bytes and may shed
+optional readback or error detail into `omitted` and `readback_requests`; it does not rewrite
+canonical R2 objects, reduce verification depth, change revision identity, or alter index
+generation state. Everything below is unchanged by receipt size.
+
 ## Deletion consistency
 
 Conversation deletion first sets the existing D1 `deleted_at` tombstone, immediately excluding the

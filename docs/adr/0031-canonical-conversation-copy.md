@@ -159,3 +159,5 @@ The `memory_copy_conversations` tool accepts 1 to 20 conversation requests in a 
 - **Deterministic and safe retries**: Pre-persisted `copiedAt` and D1 idempotency records prevent duplicate R2 allocations, split-brain revisions, or re-pinning drift.
 - **Tenant isolation**: All copy operations are strictly bounded to namespaces owned by the same authenticated user account.
 - **Index synchronization**: Search indexing remains decoupled from durability, ensuring consistent hybrid retrieval across source and destination namespaces.
+
+Superseded in part by [ADR 0036](0036-bounded-mutation-receipts.md): the bulk receipt's serialization is now produced by the shared bounded builder, while this ADR's commit, verification, idempotency, and provenance semantics remain in force.

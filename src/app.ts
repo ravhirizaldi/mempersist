@@ -221,6 +221,10 @@ app.post("/api/conversations/:id/append", async (c) => {
     durable: result.durable,
     indexing: result.indexing,
     ...(result.verification ? { verification: result.verification } : {}),
+    ...(result.readback_requests ? { readback_requests: result.readback_requests } : {}),
+    ...(result.omitted ? { omitted: result.omitted } : {}),
+    used_serialized_bytes: result.used_serialized_bytes,
+    max_serialized_bytes: result.max_serialized_bytes,
   });
 });
 

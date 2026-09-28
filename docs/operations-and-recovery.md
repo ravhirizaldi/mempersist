@@ -55,17 +55,49 @@ fails (`indexing.status: "failed"`). Look up the index job in D1 `jobs` by `subj
 to that revision ID, then retry the job after fixing the cause. If job creation itself
 failed, enqueue current revisions through the existing reindex operation. Obtain normal
 authorization before remote maintenance; do not resend the conversation write.
+`indexing.status` is a required receipt field (ADR 0036), so it is reported even when the response
+budget forces other receipt detail to be shed.
 
 ### Verified save reports a failure
 
 Retain the durable receipt and read the returned conversation with the exact `revision_id`.
-A newer current revision is not evidence that the original save failed. Inspect that
-revision's manifest/segment in R2 if readback reports missing data or a checksum mismatch.
+A newer current revision is not evidence that the original save failed. A committed receipt with
+`verification.status: "failed"` is likewise not a lost commit: never blindly replay a mutation the
+receipt reports as `durable: true` (ADR 0036). Inspect that revision's manifest/segment in R2 if
+readback reports missing data or a checksum mismatch.
 Restore missing/corrupt objects from an independent canonical backup; do not reconstruct
 original prose from D1 chunks or overwrite a later revision by retrying blindly. A
 `readback_error` or `oversizedMessage` requires an authorized canonical HTTP read/export;
 it does not mean a committed write vanished. Semantic omissions still require a reviewed
 replacement with the latest base revision.
+
+### Inline readback shed from a mutation receipt
+
+Mutation receipts are bounded by construction, so a large verification readback is shed from the
+receipt instead of failing the response (ADR 0036). Shedding is always disclosed and never removes
+commit identity: `durable`, `revision_id`, `indexing.status`, `verification.status`, and
+`verification.readback_available` are present on every receipt, and each removed field path is
+listed in `omitted`. A shed readback is not evidence that verification failed, and no readback text
+is lost.
+
+Recover the shed readback through the receipt's own selectors:
+
+1. Read `omitted`. `verification.readback` in that list means inline readback was removed.
+2. Send the entries of `readback_requests` as the `requests` array of a first-call
+   `memory_get_conversations` (1–20 selectors, exactly the shape the tool accepts).
+3. Repeat `memory_get_conversations({ cursor: nextCursor })` with only that cursor until
+   `nextCursor` is `null`. Each selector is pinned to the committed `revision_id`, so the walk
+   cannot drift to a newer head.
+4. If `readback_requests` is absent or empty, the item was not verified with `verify: true` or
+   reported `verification.readback_available: false`; read the conversation directly with the
+   receipt's `conversation_id` and `revision_id`.
+5. `verification.readback_error` (`code: "RESPONSE_TOO_LARGE"`) means the server could not produce a
+   compact page at the recorded `offset`; use an authorized canonical HTTP read/export for that
+   revision instead of retrying the mutation.
+
+Selectors carry only identifiers the receipt already returned and are rechecked by the read tool
+under the caller's normal authorization. `readback_requests` is reconstructible from the required
+`conversation_id`/`revision_id`, so no receipt cursor needs to be persisted server-side.
 
 ### Revision restore and head-transition recovery
 

@@ -54,6 +54,13 @@ const pageResult = z.object({
   offset: z.number().optional(),
   oversizedMessage: z.unknown().optional(),
 });
+const readbackSelectorResult = z.object({
+  conversation_id: z.string(),
+  revision_id: z.string(),
+  offset: z.number(),
+  limit: z.number(),
+  branch: z.enum(["active", "all"]),
+});
 const receiptResult = z.object({
   conversation_id: z.string(),
   revision_id: z.string(),
@@ -63,10 +70,18 @@ const receiptResult = z.object({
     .object({
       status: z.string(),
       revision_id: z.string(),
+      readback_available: z.boolean(),
       checked_messages: z.number().optional(),
       readback: pageResult.optional(),
+      readback_error: z
+        .object({ code: z.string(), message: z.string(), offset: z.number() })
+        .optional(),
     })
     .optional(),
+  readback_requests: z.array(readbackSelectorResult).optional(),
+  omitted: z.array(z.string()).optional(),
+  used_serialized_bytes: z.number(),
+  max_serialized_bytes: z.number(),
 });
 
 const connections: Array<{ client: Client; server: ReturnType<typeof createMemoryMcpServer> }> = [];
@@ -1030,6 +1045,140 @@ describe("compact readback and committed write verification", () => {
     });
     await env.MEMORY_BUCKET.delete(owner.stored.manifestKey);
     expect((await verifyCommittedWrite(env, owner.stored, messages)).status).toBe("failed");
+  });
+
+  it("returns a bounded store receipt whose readback_requests replay the committed messages", async () => {
+    const client = await connectedClient();
+    const result = await callRaw(client, "memory_store", {
+      title: "Bounded store receipt",
+      messages,
+      verify: true,
+    });
+    expect(result.result.isError).not.toBe(true);
+    expect(result.bytes).toBeLessThanOrEqual(64 * 1024);
+    const receipt = receiptResult.parse(JSON.parse(result.text));
+    expect(receipt.durable).toBe(true);
+    expect(receipt.verification?.status).toBe("passed");
+    expect(receipt.verification?.readback_available).toBe(true);
+    expect(receipt.max_serialized_bytes).toBe(49152);
+    expect(receipt.used_serialized_bytes).toBeLessThanOrEqual(receipt.max_serialized_bytes);
+    expect(result.bytes).toBe(receipt.used_serialized_bytes);
+    expect(receipt.verification?.readback?.messages.map((m) => m.text)).toEqual(
+      messages.map((m) => m.content),
+    );
+    const readbackRequests = receipt.readback_requests ?? [];
+    expect(readbackRequests).toHaveLength(1);
+    expect(readbackRequests[0]).toMatchObject({
+      conversation_id: receipt.conversation_id,
+      revision_id: receipt.revision_id,
+      offset: 0,
+      branch: "active",
+    });
+    const seen = new Map<number, string[]>();
+    let page = batch(
+      (await call(client, "memory_get_conversations", { requests: readbackRequests })).value,
+    );
+    addPageTexts(seen, page);
+    for (let pageNumber = 0; page.nextCursor; pageNumber++) {
+      expect(pageNumber).toBeLessThan(20);
+      const cursor = page.nextCursor;
+      page = batch(
+        (
+          await call(client, "memory_get_conversations", {
+            cursor,
+            max_serialized_bytes: 49152,
+          })
+        ).value,
+      );
+      addPageTexts(seen, page);
+    }
+    expect(page.nextCursor).toBeNull();
+    expect(seen.get(0)).toEqual(messages.map((m) => m.content));
+  });
+
+  it("keeps post-commit store receipts inside the 64 KiB guard by shedding the inline readback page", async () => {
+    const client = await connectedClient();
+    const many = Array.from({ length: 200 }, (_, index) => ({
+      ...messages[0]!,
+      content: `${index}:${"雨🌙".repeat(48)}`,
+    }));
+    const result = await callRaw(client, "memory_store", {
+      title: "Shed inline readback",
+      messages: many,
+      verify: true,
+    });
+    expect(result.result.isError).not.toBe(true);
+    expect(result.bytes).toBeLessThanOrEqual(64 * 1024);
+    const receipt = receiptResult.parse(JSON.parse(result.text));
+    expect(receipt.durable).toBe(true);
+    expect(receipt.verification?.status).toBe("passed");
+    expect(receipt.verification?.readback_available).toBe(true);
+    expect(receipt.max_serialized_bytes).toBe(49152);
+    expect(receipt.used_serialized_bytes).toBeLessThanOrEqual(49152);
+    expect(result.bytes).toBe(receipt.used_serialized_bytes);
+    const omitted = receipt.omitted ?? [];
+    expect(omitted).toContain("verification.readback");
+    expect(receipt.verification?.readback).toBeUndefined();
+    const readbackRequests = receipt.readback_requests ?? [];
+    expect(readbackRequests).toHaveLength(1);
+    const seen = new Map<number, string[]>();
+    let page = batch(
+      (
+        await call(client, "memory_get_conversations", {
+          requests: readbackRequests,
+          max_serialized_bytes: 49152,
+        })
+      ).value,
+    );
+    addPageTexts(seen, page);
+    for (let pageNumber = 0; page.nextCursor; pageNumber++) {
+      expect(pageNumber).toBeLessThan(40);
+      const cursor = page.nextCursor;
+      page = batch(
+        (
+          await call(client, "memory_get_conversations", {
+            cursor,
+            max_serialized_bytes: 49152,
+          })
+        ).value,
+      );
+      addPageTexts(seen, page);
+    }
+    expect(page.nextCursor).toBeNull();
+    expect(seen.get(0)).toEqual(many.map((m) => m.content));
+  }, 30_000);
+
+  it("returns a durable verification-failed receipt when the committed canonical objects vanish", async () => {
+    const client = await connectedClient();
+    const originalPut = env.MEMORY_BUCKET.put.bind(env.MEMORY_BUCKET);
+    let removedManifest = false;
+    vi.spyOn(env.MEMORY_BUCKET, "put").mockImplementation(async (...args) => {
+      const written = await originalPut(...args);
+      const key = String(args[0]);
+      if (!removedManifest && key.includes("/revisions/") && key.endsWith(".json")) {
+        removedManifest = true;
+        await env.MEMORY_BUCKET.delete(key);
+      }
+      return written;
+    });
+    const result = await callRaw(client, "memory_store", {
+      title: "Post-commit corruption",
+      messages,
+      verify: true,
+    });
+    expect(removedManifest).toBe(true);
+    expect(result.result.isError).not.toBe(true);
+    expect(result.bytes).toBeLessThanOrEqual(64 * 1024);
+    const receipt = receiptResult.parse(JSON.parse(result.text));
+    expect(receipt.durable).toBe(true);
+    expect(receipt.max_serialized_bytes).toBe(49152);
+    expect(receipt.used_serialized_bytes).toBeLessThanOrEqual(49152);
+    expect(result.bytes).toBe(receipt.used_serialized_bytes);
+    expect(receipt.verification?.status).toBe("failed");
+    expect(receipt.verification?.readback_available).toBe(false);
+    expect(receipt.verification?.revision_id).toBe(receipt.revision_id);
+    expect(receipt.verification?.readback).toBeUndefined();
+    expect(receipt.readback_requests).toBeUndefined();
   });
 
   it("verifies all saved messages even when compact readback needs another page or cannot fit one message", async () => {
