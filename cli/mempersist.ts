@@ -1,5 +1,6 @@
 import { open, readFile, stat } from "node:fs/promises";
 import { basename } from "node:path";
+import { MAX_MULTIPART_PART_BYTES } from "../src/limits";
 
 const baseUrl = (process.env.MEMPERSIST_URL ?? "http://localhost:8787").replace(/\/$/u, "");
 const token = process.env.MEMPERSIST_TOKEN;
@@ -29,8 +30,7 @@ async function api(path: string, init: RequestInit = {}): Promise<unknown> {
 async function importFile(path: string): Promise<unknown> {
   const info = await stat(path);
   const filename = basename(path);
-  const partSize = 16 * 1024 * 1024;
-  if (info.size <= partSize) {
+  if (info.size <= MAX_MULTIPART_PART_BYTES) {
     return api("/api/imports/direct", {
       method: "POST",
       headers: {
@@ -51,7 +51,7 @@ async function importFile(path: string): Promise<unknown> {
     let position = 0;
     let partNumber = 1;
     while (position < info.size) {
-      const size = Math.min(partSize, info.size - position);
+      const size = Math.min(MAX_MULTIPART_PART_BYTES, info.size - position);
       const buffer = new Uint8Array(size);
       const { bytesRead } = await file.read(buffer, 0, size, position);
       await api(`/api/imports/${created.importId}/parts/${partNumber}`, {

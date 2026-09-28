@@ -41,6 +41,10 @@ export const en = {
     copyFailed: "Clipboard unavailable. Text selected; copy it manually.",
     decisionCount: "{visible} of {total} decisions",
   },
+  limits: {
+    sizeLimits:
+      "Size limits: JSON writes {jsonwrite}, direct imports {directimport}, multipart parts {multipartpart}, MCP tool output {tooloutput} ({recommendedoutput} recommended).",
+  },
   oauth: {
     privateConnection: "PRIVATE CONNECTION",
     contextConnected: "YOUR CONTEXT, CONNECTED",

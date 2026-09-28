@@ -1,12 +1,12 @@
 import type { AppEnv } from "./domain";
 import { enqueueIndex } from "./jobs";
+import { COMPACT_RESPONSE_BYTES, MUTATION_RECEIPT_MAX_SERIALIZED_BYTES } from "./limits";
 import {
   boundCompactPage,
   compactConversationPage,
   conversationPage,
   jsonBytes,
   type CompactPage,
-  COMPACT_RESPONSE_BYTES,
 } from "./retrieval";
 import {
   loadCanonicalRevision,
@@ -19,7 +19,6 @@ type WrittenMessage = { role: string; content: string; timestamp?: string | unde
 
 // Bounded receipts: post-commit mutation receipts must never fail on the 64 KiB
 // toolResult guard, so oversized envelopes drop fields in a fixed ladder order.
-export const MUTATION_RECEIPT_MAX_SERIALIZED_BYTES = 48 * 1024;
 export const MUTATION_RECEIPT_ENVELOPE_HEADROOM = 512;
 export const MUTATION_RECEIPT_ERROR_MESSAGE_LIMIT = 200;
 export const MUTATION_RECEIPT_ERROR_MESSAGE_FLOOR = 80;

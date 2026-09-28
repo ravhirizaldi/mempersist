@@ -7,6 +7,7 @@ import {
   buildContextInputSchema,
   buildContextOutputSchema,
   buildContextRequiredBudgetExceededOutputSchema,
+  capabilitiesOutputSchema,
   createMemoryMcpServer,
 } from "../src/mcp";
 
@@ -21,10 +22,10 @@ describe("MCP server", () => {
     }
   });
 
-  async function connectedClient(): Promise<Client> {
+  async function connectedClient(env: AppEnv = {} as AppEnv): Promise<Client> {
     const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
     const client = new Client({ name: "mempersist-test", version: "1.0.0" });
-    const server = createMemoryMcpServer({} as AppEnv, {
+    const server = createMemoryMcpServer(env, {
       userId: "owner",
       defaultNamespace: "personal",
       namespaces: ["personal"],
@@ -33,6 +34,32 @@ describe("MCP server", () => {
     await client.connect(clientTransport);
     connections.push({ client, server });
     return client;
+  }
+
+  /** Parses the JSON details of a REQUEST_TOO_LARGE tool error result. */
+  function rejectionDetails(result: {
+    isError?: boolean | undefined;
+    content: Array<{ type: string; text?: string | undefined }>;
+  }): Record<string, unknown> {
+    const block = result.content.find((item) => item.type === "text");
+    return JSON.parse(block?.text ?? "{}") as Record<string, unknown>;
+  }
+
+  /**
+   * Env whose storage bindings throw on first access, so a handler that reaches
+   * storage records it while a handler that rejects the request first does not.
+   */
+  function recordingEnv(accesses: string[]): AppEnv {
+    const env = {} as AppEnv;
+    for (const key of ["MEMORY_DB", "MEMORY_BUCKET"]) {
+      Object.defineProperty(env, key, {
+        get() {
+          accesses.push(key);
+          throw new Error(`storage access: ${key}`);
+        },
+      });
+    }
+    return env;
   }
 
   it("discovers the compact V1 tool surface", async () => {
@@ -44,6 +71,7 @@ describe("MCP server", () => {
       "memory_copy_conversations",
       "memory_delete_conversations",
       "memory_empty_namespace",
+      "memory_get_capabilities",
       "memory_get_context",
       "memory_get_conversation",
       "memory_get_conversations",
@@ -67,6 +95,7 @@ describe("MCP server", () => {
     };
     for (const name of [
       "memory_build_context",
+      "memory_get_capabilities",
       "memory_search",
       "memory_get_context",
       "memory_get_conversation",
@@ -1056,5 +1085,196 @@ describe("MCP server", () => {
     const parsedOutput = buildContextOutputSchema.safeParse(expansionOutput);
     expect(parsedOutput.success).toBe(true);
     expect(buildContextCompleteOutputSchema.safeParse(expansionOutput).success).toBe(true);
+  });
+
+  it("returns the capability document its output schema describes", async () => {
+    const client = await connectedClient();
+    const result = await client.callTool({ name: "memory_get_capabilities", arguments: {} });
+
+    expect(result.isError).toBeFalsy();
+    const capabilities = capabilitiesOutputSchema.parse(result.structuredContent);
+    expect(capabilities.protocol_version).toBe("1");
+    expect(capabilities.limits.max_tool_output_bytes).toBe(65536);
+    expect(capabilities.limits.max_inline_json_write_bytes).toBe(1048576);
+    expect(capabilities.tools.memory_store).toEqual({
+      max_items: 1000,
+      max_request_bytes: 1048576,
+      supports_verify: true,
+    });
+    expect(capabilities.features).toEqual({
+      revision_pinning: true,
+      verified_writes: true,
+      cursor_reads: true,
+      message_keys: false,
+      atomic_multi_conversation_commit: false,
+    });
+  });
+
+  it("caps the capability tool map to the registered tools that carry a budget", async () => {
+    const client = await connectedClient();
+    const registered = (await client.listTools()).tools.map((tool) => tool.name).sort();
+    expect(registered).toEqual([
+      "memory_append",
+      "memory_build_context",
+      "memory_copy_conversations",
+      "memory_delete_conversations",
+      "memory_empty_namespace",
+      "memory_get_capabilities",
+      "memory_get_context",
+      "memory_get_conversation",
+      "memory_get_conversations",
+      "memory_import_status",
+      "memory_list_conversations",
+      "memory_list_namespaces",
+      "memory_list_revisions",
+      "memory_replace",
+      "memory_resolve_conversations",
+      "memory_restore_revision",
+      "memory_search",
+      "memory_stats",
+      "memory_store",
+      "memory_update_tags",
+    ]);
+
+    const result = await client.callTool({ name: "memory_get_capabilities", arguments: {} });
+    const capabilities = capabilitiesOutputSchema.parse(result.structuredContent);
+    expect(Object.keys(capabilities.tools).sort()).toEqual([
+      "memory_append",
+      "memory_build_context",
+      "memory_copy_conversations",
+      "memory_delete_conversations",
+      "memory_get_context",
+      "memory_get_conversation",
+      "memory_get_conversations",
+      "memory_list_conversations",
+      "memory_list_revisions",
+      "memory_replace",
+      "memory_resolve_conversations",
+      "memory_restore_revision",
+      "memory_search",
+      "memory_store",
+      "memory_update_tags",
+    ]);
+
+    const uncapped = [
+      "memory_get_capabilities",
+      "memory_empty_namespace",
+      "memory_list_namespaces",
+      "memory_stats",
+      "memory_import_status",
+    ];
+    expect(registered).toHaveLength(Object.keys(capabilities.tools).length + uncapped.length);
+    for (const name of registered) {
+      expect(Object.hasOwn(capabilities.tools, name), `${name} capability coverage`).toBe(
+        !uncapped.includes(name),
+      );
+    }
+  });
+
+  it("rejects aggregate writes over 1 MiB before touching storage", async () => {
+    const accesses: string[] = [];
+    const client = await connectedClient(recordingEnv(accesses));
+    const result = await client.callTool({
+      name: "memory_store",
+      arguments: {
+        title: "Oversized",
+        messages: [
+          { role: "user", content: "a".repeat(600_000) },
+          { role: "assistant", content: "a".repeat(600_000) },
+        ],
+      },
+    });
+
+    expect(result.isError).toBe(true);
+    expect(result.structuredContent).toBeUndefined();
+    const details = rejectionDetails(result);
+    expect(details.code).toBe("REQUEST_TOO_LARGE");
+    expect(details.max_request_bytes).toBe(1048576);
+    expect(details.request_bytes).toBeGreaterThan(1048576);
+    expect(Number.isInteger(details.suggested_max_items)).toBe(true);
+    expect(details.suggested_max_items).toBeGreaterThanOrEqual(1);
+    expect(accesses).toEqual([]);
+
+    const oversized = [
+      { role: "user", content: "b".repeat(600_000) },
+      { role: "assistant", content: "b".repeat(600_000) },
+    ];
+    const calls: Array<{ name: string; arguments: Record<string, unknown> }> = [
+      {
+        name: "memory_append",
+        arguments: {
+          conversation_id: crypto.randomUUID(),
+          base_revision_id: "a".repeat(64),
+          messages: oversized,
+        },
+      },
+      {
+        name: "memory_replace",
+        arguments: {
+          conversation_id: crypto.randomUUID(),
+          base_revision_id: "a".repeat(64),
+          messages: oversized,
+        },
+      },
+    ];
+    for (const call of calls) {
+      const rejected = await client.callTool(call);
+      expect(rejected.isError, call.name).toBe(true);
+      expect(rejectionDetails(rejected).code, call.name).toBe("REQUEST_TOO_LARGE");
+    }
+    expect(accesses).toEqual([]);
+  });
+
+  it("measures the aggregate write budget in UTF-8 bytes, not characters", async () => {
+    const multibyte = "é".repeat(600_000);
+    expect(multibyte.length).toBeLessThan(1_000_000);
+    expect(new TextEncoder().encode(multibyte).byteLength).toBeGreaterThan(1048576);
+
+    const accesses: string[] = [];
+    const client = await connectedClient(recordingEnv(accesses));
+    const rejected = await client.callTool({
+      name: "memory_store",
+      arguments: { title: "Multibyte", messages: [{ role: "user", content: multibyte }] },
+    });
+    expect(rejectionDetails(rejected).code).toBe("REQUEST_TOO_LARGE");
+    expect(accesses).toEqual([]);
+
+    const accepted = await client.callTool({
+      name: "memory_store",
+      arguments: { title: "Ascii", messages: [{ role: "user", content: "a".repeat(600_000) }] },
+    });
+    expect(JSON.stringify(accepted)).not.toContain("REQUEST_TOO_LARGE");
+    expect(accesses).toEqual(["MEMORY_DB"]);
+  });
+
+  it("accepts a write exactly at the inline JSON byte budget", async () => {
+    const accesses: string[] = [];
+    const client = await connectedClient(recordingEnv(accesses));
+    const empty = {
+      title: "Boundary",
+      namespace: "personal",
+      tags: [],
+      messages: [
+        { role: "user", content: "" },
+        { role: "assistant", content: "" },
+      ],
+      verify: false,
+    };
+    const overhead = JSON.stringify(empty).length;
+    const atLimit = {
+      title: "Boundary",
+      namespace: "personal",
+      tags: [],
+      messages: [
+        { role: "user", content: "a".repeat(1_000_000) },
+        { role: "assistant", content: "a".repeat(1_048_576 - overhead - 1_000_000) },
+      ],
+      verify: false,
+    };
+    expect(JSON.stringify(atLimit)).toHaveLength(1_048_576);
+
+    const result = await client.callTool({ name: "memory_store", arguments: atLimit });
+    expect(JSON.stringify(result)).not.toContain("REQUEST_TOO_LARGE");
+    expect(accesses).toEqual(["MEMORY_DB"]);
   });
 });

@@ -113,6 +113,7 @@ suggested minimums without leaking text. The tool is strictly read-only and extr
 | `memory_build_context`         | deterministic revision-pinned context pack for a task                         |
 | `memory_list_namespaces`       | namespaces you own                                                            |
 | `memory_stats`                 | counts + indexing health                                                      |
+| `memory_get_capabilities`      | deployed limits, per-tool budgets, and feature flags                          |
 | `memory_store`                 | durable new memory (claims `project/<slug>` on first write) + bounded receipt |
 | `memory_append`                | extend an existing conversation, optimistic revision check, bounded receipt   |
 | `memory_replace`               | replace its transcript, optimistic revision check, bounded receipt            |

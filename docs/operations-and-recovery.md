@@ -99,6 +99,19 @@ Selectors carry only identifiers the receipt already returned and are rechecked 
 under the caller's normal authorization. `readback_requests` is reconstructible from the required
 `conversation_id`/`revision_id`, so no receipt cursor needs to be persisted server-side.
 
+### Oversized inline request rejected (`REQUEST_TOO_LARGE`)
+
+An inline write whose complete serialized request exceeds the deployed inline ceiling is rejected
+before any canonical work, with HTTP status 413 (MCP: a tool result with `isError: true` and no
+`structuredContent`) and a stable `REQUEST_TOO_LARGE` object carrying `request_bytes`,
+`max_request_bytes`, and — when the item count is known — a conservative `suggested_max_items`.
+Nothing is written, queued, or indexed, so there is no partial state to repair and no receipt to
+retain. This is a request-shape failure, not a storage failure: split the mutation into smaller
+`memory_append` calls, or resubmit with fewer or smaller messages, rather than retrying the same
+body. `suggested_max_items` assumes average-sized items, so a retry with differently sized messages
+can still be rejected; treat it as an upper bound to shrink toward. The deployed ceilings are
+reported by `memory_get_capabilities`; see [MCP](mcp.md) for the transport-specific envelope.
+
 ### Revision restore and head-transition recovery
 
 `memory_restore_revision` restores an owned conversation's active head (`current_revision_id` and

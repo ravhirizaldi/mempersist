@@ -21,6 +21,19 @@ import {
   uploadImportPart,
 } from "./jobs";
 import {
+  assertInlineWriteBudget,
+  MAX_APPEND_MESSAGES,
+  MAX_DIRECT_IMPORT_BYTES,
+  MAX_INLINE_JSON_WRITE_BYTES,
+  MAX_MESSAGE_CONTENT_CHARS,
+  MAX_MESSAGE_ROLE_CHARS,
+  MAX_MULTIPART_PART_BYTES,
+  MAX_NAMESPACE_CHARS,
+  MAX_STORE_MESSAGES,
+  MAX_TITLE_CHARS,
+  requestTooLargeError,
+} from "./limits";
+import {
   boundCompactPage,
   compactConversationPage,
   getChunkContext,
@@ -57,19 +70,19 @@ type Variables = { requestId: string; locale: Locale };
 const app = new Hono<{ Bindings: AppEnv; Variables: Variables }>();
 
 const messageSchema = z.object({
-  role: z.string().min(1).max(40),
-  content: z.string().max(1_000_000),
+  role: z.string().min(1).max(MAX_MESSAGE_ROLE_CHARS),
+  content: z.string().max(MAX_MESSAGE_CONTENT_CHARS),
   timestamp: z.iso.datetime().optional(),
 });
 const storeSchema = z.object({
-  title: z.string().min(1).max(500),
-  namespace: z.string().min(1).max(100).default("personal"),
-  messages: z.array(messageSchema).min(1).max(1000),
+  title: z.string().min(1).max(MAX_TITLE_CHARS),
+  namespace: z.string().min(1).max(MAX_NAMESPACE_CHARS).default("personal"),
+  messages: z.array(messageSchema).min(1).max(MAX_STORE_MESSAGES),
   verify: z.boolean().default(false),
 });
 const appendSchema = z.object({
   base_revision_id: z.string().min(1),
-  messages: z.array(messageSchema).min(1).max(100),
+  messages: z.array(messageSchema).min(1).max(MAX_APPEND_MESSAGES),
   verify: z.boolean().default(false),
 });
 
@@ -123,7 +136,12 @@ app.get("/language/:locale", (c) => {
 app.get("/api/search", async (c) => {
   const query = z.string().min(1).max(2000).parse(c.req.query("q"));
   const limit = z.coerce.number().int().min(1).max(20).default(8).parse(c.req.query("limit"));
-  const namespace = z.string().min(1).max(100).optional().parse(c.req.query("namespace"));
+  const namespace = z
+    .string()
+    .min(1)
+    .max(MAX_NAMESPACE_CHARS)
+    .optional()
+    .parse(c.req.query("namespace"));
   const tenant = await ownerTenant(c.env);
   const namespaces = scopeNamespaces(tenant, namespace);
   return c.json(await searchMemory(c.env, { query, limit, namespaces, userId: tenant.userId }));
@@ -132,7 +150,12 @@ app.get("/api/search", async (c) => {
 app.get("/api/conversations", async (c) => {
   const limit = z.coerce.number().int().min(1).max(100).default(20).parse(c.req.query("limit"));
   const cursor = z.string().optional().parse(c.req.query("cursor"));
-  const namespace = z.string().min(1).max(100).optional().parse(c.req.query("namespace"));
+  const namespace = z
+    .string()
+    .min(1)
+    .max(MAX_NAMESPACE_CHARS)
+    .optional()
+    .parse(c.req.query("namespace"));
   const tenant = await ownerTenant(c.env);
   const namespaces = scopeNamespaces(tenant, namespace);
   return c.json(
@@ -191,8 +214,15 @@ app.get("/api/chunks/:id/context", async (c) => {
 
 app.post("/api/memories", async (c) => {
   const length = Number(c.req.header("content-length") ?? 0);
-  if (length > 1024 * 1024) throw new AppError("VALIDATION", "JSON body exceeds 1 MiB", 413);
+  if (length > MAX_INLINE_JSON_WRITE_BYTES) {
+    throw requestTooLargeError(
+      `JSON body exceeds the ${MAX_INLINE_JSON_WRITE_BYTES} byte inline write limit; split the messages across multiple requests`,
+      length,
+      MAX_INLINE_JSON_WRITE_BYTES,
+    );
+  }
   const input = storeSchema.parse(await c.req.json());
+  assertInlineWriteBudget(JSON.stringify(input), input.messages.length);
   const tenant = await ownerTenant(c.env);
   const namespace = input.namespace ?? tenant.defaultNamespace;
   if (!tenant.namespaces.includes(namespace)) {
@@ -205,6 +235,7 @@ app.post("/api/memories", async (c) => {
 
 app.post("/api/conversations/:id/append", async (c) => {
   const input = appendSchema.parse(await c.req.json());
+  assertInlineWriteBudget(JSON.stringify(input), input.messages.length);
   const tenant = await ownerTenant(c.env);
   const stored = await appendConversation(
     c.env,
@@ -234,8 +265,12 @@ app.post("/api/imports/direct", async (c) => {
   if (length === null || !Number.isFinite(length) || length <= 0) {
     throw new AppError("VALIDATION", "Content-Length is required for direct imports", 411);
   }
-  if (length > 16 * 1024 * 1024) {
-    throw new AppError("VALIDATION", "Direct import limit is 16 MiB; use multipart upload", 413);
+  if (length > MAX_DIRECT_IMPORT_BYTES) {
+    throw requestTooLargeError(
+      `Direct import body exceeds the ${MAX_DIRECT_IMPORT_BYTES} byte limit; use multipart upload instead`,
+      length,
+      MAX_DIRECT_IMPORT_BYTES,
+    );
   }
   if (!c.req.raw.body) throw new AppError("VALIDATION", "Import body is required", 400);
   const filename = c.req.header("x-filename") ?? "conversations.json";
@@ -251,8 +286,12 @@ app.put("/api/imports/:id/parts/:part", async (c) => {
   const part = z.coerce.number().int().min(1).max(10_000).parse(c.req.param("part"));
   const lengthHeader = c.req.header("content-length");
   const length = lengthHeader ? Number(lengthHeader) : null;
-  if (length !== null && length > 16 * 1024 * 1024) {
-    throw new AppError("VALIDATION", "Multipart part exceeds 16 MiB", 413);
+  if (length !== null && length > MAX_MULTIPART_PART_BYTES) {
+    throw requestTooLargeError(
+      `Multipart part exceeds the ${MAX_MULTIPART_PART_BYTES} byte limit; split the upload into smaller parts`,
+      length,
+      MAX_MULTIPART_PART_BYTES,
+    );
   }
   if (!c.req.raw.body) throw new AppError("VALIDATION", "Part body is required", 400);
   return c.json(await uploadImportPart(c.env, c.req.param("id"), part, c.req.raw.body, length));
@@ -306,7 +345,7 @@ app.onError((error, c) => {
       path: c.req.path,
     }),
   );
-  return new Response(JSON.stringify({ error: { code, message } }), {
+  return new Response(JSON.stringify({ error: { code, message, ...(appError?.details ?? {}) } }), {
     status,
     headers: { "content-type": "application/json; charset=UTF-8" },
   });

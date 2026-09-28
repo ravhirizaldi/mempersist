@@ -2,7 +2,6 @@ import type { AppEnv } from "./domain";
 import { errorDetails } from "./errors";
 import { assertAccountWritable } from "./tenant";
 
-export const MAX_CONVERSATION_DELETE_BATCH = 100;
 const SCOPE_PAGE_SIZE = 50;
 const SCOPE_DELETE_LIMIT = 500;
 const REVISION_PAGE_SIZE = 25;

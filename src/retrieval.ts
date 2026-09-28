@@ -1,5 +1,11 @@
 import type { AppEnv, CanonicalConversation, CanonicalNode } from "./domain";
 import { AppError } from "./errors";
+import {
+  BATCH_DEFAULT_SERIALIZED_BYTES,
+  BATCH_MAX_SERIALIZED_BYTES,
+  BATCH_MIN_SERIALIZED_BYTES,
+  COMPACT_RESPONSE_BYTES,
+} from "./limits";
 import { loadCanonicalRevision, loadConversationTags } from "./storage";
 
 interface ChunkSourceRow {
@@ -254,8 +260,6 @@ export function conversationPage(
   };
 }
 
-export const COMPACT_RESPONSE_BYTES = 48 * 1024;
-
 export function jsonBytes(value: unknown): number {
   return new TextEncoder().encode(JSON.stringify(value)).byteLength;
 }
@@ -375,10 +379,6 @@ export interface ConversationBatchInput {
   maxSerializedBytes?: number;
   max_serialized_bytes?: number;
 }
-
-export const BATCH_DEFAULT_SERIALIZED_BYTES = 32 * 1024;
-export const BATCH_MIN_SERIALIZED_BYTES = 4 * 1024;
-export const BATCH_MAX_SERIALIZED_BYTES = COMPACT_RESPONSE_BYTES;
 
 type BatchItemError = { code: string; message: string };
 

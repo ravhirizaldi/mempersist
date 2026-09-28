@@ -1,10 +1,10 @@
 import { describe, expect, it } from "vitest";
+import { MUTATION_RECEIPT_MAX_SERIALIZED_BYTES } from "../src/limits";
 import { jsonBytes, type CompactPage } from "../src/retrieval";
 import {
   fitMutationReceipt,
   MUTATION_RECEIPT_ERROR_MESSAGE_FLOOR,
   MUTATION_RECEIPT_ERROR_MESSAGE_LIMIT,
-  MUTATION_RECEIPT_MAX_SERIALIZED_BYTES,
   type MutationReceiptItem,
   type MutationReceiptReadbackSelector,
 } from "../src/writes";
