@@ -183,6 +183,15 @@ canonical R2 copy of 1–20 owned conversations into another owned namespace usi
 `idempotency_key` and attaching first-class `derivedFrom` provenance, rather than a compact-message
 restorable via `memory_store`. Store/append/replace/restore/copy accept `verify: true` to reload the
 committed R2 revision and return compact readback with separate indexing/verification status.
+
+Store, append, replace, and restore return a bounded durable receipt: a committed revision reports
+`durable: true` with separate indexing and verification status, and the whole receipt is fitted to a
+documented safe maximum of 49,152 bytes (48 KiB) below the 64 KiB MCP tool guard. Inline readback is
+returned only when it fits; otherwise the receipt carries `readback_requests` — selectors that are
+directly reusable as `memory_get_conversations` first-call `requests` (loop `nextCursor` until `null`)
+— plus an `omitted` list naming the shed field paths. Fitting sheds verbose fields in a fixed order and
+never drops identity, durable, or status fields, so a durable committed mutation never becomes a
+generic response-size error.
 See the [RP workflow and reviewable runtime-rule amendment](docs/rp-workflow.md).
 
 For prompt and task execution, `memory_build_context` compiles a deterministic, revision-pinned context pack

@@ -3,7 +3,14 @@ import { z } from "zod";
 import { createMcpConversation } from "./chatgpt";
 import { deleteConversations, deleteNamespace, MAX_CONVERSATION_DELETE_BATCH } from "./deletion";
 import type { AppEnv } from "./domain";
-import { completeMemoryCopy, completeMemoryRestore, completeMemoryWrite } from "./writes";
+import {
+  completeMemoryCopy,
+  completeMemoryRestore,
+  completeMemoryWrite,
+  fitMutationReceipt,
+  type MutationReceiptItem,
+  type MutationReceiptReadbackSelector,
+} from "./writes";
 import {
   BATCH_DEFAULT_SERIALIZED_BYTES,
   BATCH_MAX_SERIALIZED_BYTES,
@@ -478,9 +485,23 @@ export const buildContextOutputSchema = z.union([
   buildContextCompleteOutputSchema,
   buildContextRequiredBudgetExceededOutputSchema,
 ]);
+const readbackSelectorSchema = z.object({
+  conversation_id: z.string(),
+  revision_id: z.string(),
+  offset: z.number().int().min(0),
+  limit: z.number().int().min(1),
+  branch: z.enum(["active", "all"]),
+});
+const receiptBudgetFields = {
+  readback_requests: z.array(readbackSelectorSchema).optional(),
+  omitted: z.array(z.string()).optional(),
+  used_serialized_bytes: z.number(),
+  max_serialized_bytes: z.number(),
+};
 const verificationOutputSchema = z.object({
   status: z.enum(["passed", "failed"]),
   revision_id: z.string(),
+  readback_available: z.boolean(),
   checked_messages: z.number().optional(),
   error: z.object({ code: z.string(), message: z.string() }).optional(),
   readback: compactPageOutputSchema.optional(),
@@ -500,6 +521,7 @@ const memoryWriteOutputSchema = z.object({
     }),
   ]),
   verification: verificationOutputSchema.optional(),
+  ...receiptBudgetFields,
 });
 const memoryRestoreOutputSchema = z.object({
   conversation_id: z.string(),
@@ -514,6 +536,7 @@ const memoryRestoreOutputSchema = z.object({
     }),
   ]),
   verification: verificationOutputSchema.optional(),
+  ...receiptBudgetFields,
 });
 const copyResultItemSchema = z.union([
   z.object({
@@ -523,6 +546,7 @@ const copyResultItemSchema = z.union([
     source_revision_id: z.string(),
     conversation_id: z.string(),
     revision_id: z.string(),
+    durable: z.literal(true),
     indexing: z.union([
       z.object({ status: z.literal("queued"), job_id: z.string() }),
       z.object({
@@ -541,6 +565,7 @@ const copyResultItemSchema = z.union([
 ]);
 const copyConversationsOutputSchema = z.object({
   results: z.array(copyResultItemSchema),
+  ...receiptBudgetFields,
 });
 const deleteFailureOutputSchema = z.object({
   conversation_id: z.string(),
@@ -982,7 +1007,7 @@ export function createMemoryMcpServer(env: AppEnv, tenant: Tenant): McpServer {
     "memory_copy_conversations",
     {
       description:
-        "Copy 1–20 owned conversations by canonical R2 revision into another namespace you own; optional create_target_namespace; required idempotency_key; optional verify.",
+        "Copy 1–20 owned conversations by canonical R2 revision into another namespace you own; optional create_target_namespace; required idempotency_key; optional verify. The receipt is bounded to fit the response budget and lists any fields omitted from it; readback_requests are directly usable as memory_get_conversations requests.",
       annotations: {
         readOnlyHint: false,
         destructiveHint: false,
@@ -1045,7 +1070,7 @@ export function createMemoryMcpServer(env: AppEnv, tenant: Tenant): McpServer {
         })),
       });
 
-      const results = await Promise.all(
+      const items: MutationReceiptItem[] = await Promise.all(
         copyResults.map(async (item) => {
           if (item.status === "failed") {
             return {
@@ -1063,13 +1088,41 @@ export function createMemoryMcpServer(env: AppEnv, tenant: Tenant): McpServer {
             source_revision_id: item.sourceRevisionId,
             conversation_id: item.stored.conversationId,
             revision_id: item.stored.revisionId,
+            durable: completed.durable,
             indexing: completed.indexing,
             ...(completed.verification ? { verification: completed.verification } : {}),
           };
         }),
       );
 
-      return toolResult({ results });
+      const readbackRequests: MutationReceiptReadbackSelector[] = items.flatMap((item) =>
+        item.status === "copied" &&
+        item.verification?.readback_available &&
+        item.conversation_id &&
+        item.revision_id
+          ? [
+              {
+                conversation_id: item.conversation_id,
+                revision_id: item.revision_id,
+                offset: 0,
+                limit: 20,
+                branch: "active" as const,
+              },
+            ]
+          : [],
+      );
+
+      const fitted = fitMutationReceipt({
+        items,
+        readbackRequests,
+        wrap: ({ items: wrapped, readback_requests, omitted }) => ({
+          results: wrapped,
+          ...(readback_requests.length ? { readback_requests } : {}),
+          ...(omitted.length ? { omitted } : {}),
+        }),
+      });
+
+      return toolResult(fitted.value);
     },
   );
 
