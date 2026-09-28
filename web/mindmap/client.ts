@@ -1,5 +1,5 @@
 import cytoscape from "cytoscape";
-import type { EdgeDefinition, ElementAnimateOptionsBase, NodeDefinition } from "cytoscape";
+import type { Css, EdgeDefinition, NodeDefinition } from "cytoscape";
 import {
   buildCountDotEdge,
   buildCountDotNode,
@@ -31,8 +31,13 @@ interface GraphPointerEvent extends GraphEvent {
 
 type MindmapElementDefinition = NodeDefinition | EdgeDefinition;
 
-/** Cytoscape accepts parameterized easings such as `spring(tension, friction)`; its typings list keywords only. */
-const SPRING_ANIMATION = { duration: 460, easing: "spring(250, 20)" } as ElementAnimateOptionsBase;
+/** Cytoscape accepts parameterized easings such as `spring(tension, friction)`; its typings list keywords only.
+ *  Widening to `string` first keeps the single assertion comparable (a literal is not). */
+const SPRING_EASING: string = "spring(250, 20)";
+const SPRING_ANIMATION = {
+  duration: 460,
+  easing: SPRING_EASING as Css.TransitionTimingFunction,
+} as const;
 const FADE_ANIMATION = { duration: 500, easing: "ease-out-cubic" } as const;
 const EXIT_ANIMATION = { duration: 220, easing: "ease-out-cubic" } as const;
 const EXIT_DURATION = 240;
