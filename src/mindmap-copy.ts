@@ -5,4 +5,8 @@ export interface MindmapClientCopy {
   emptyLabel: string;
   failedLabel: string;
   loadingLabel: string;
+  messagesLabel: string;
+  moreLabel: string;
+  zoomInLabel: string;
+  zoomOutLabel: string;
 }

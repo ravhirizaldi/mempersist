@@ -17,11 +17,15 @@ export function showMindmapTooltip(
   item: MindmapClientConversation,
   x: number,
   y: number,
+  messagesLabel: string,
 ): void {
   tooltip.replaceChildren();
   const title = document.createElement("strong");
   title.textContent = item.title;
   tooltip.append(title);
+  const count = document.createElement("span");
+  count.textContent = `${String(item.messages)} ${messagesLabel}`;
+  tooltip.append(count);
   const date = formatMindmapDate(item.updated_at);
   if (date) {
     const meta = document.createElement("span");

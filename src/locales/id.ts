@@ -32,6 +32,12 @@ export const id = {
     description:
       "MemPersist — memori percakapan AI yang tahan lama untuk ChatGPT dan agen pemrograman.",
   },
+  map: {
+    messagesLabel: "pesan",
+    moreLabel: "lagi",
+    zoomInLabel: "Perbesar",
+    zoomOutLabel: "Perkecil",
+  },
   runtime: {
     copied: "Disalin",
     copiedFeedback: "Disalin ke papan klip.",
