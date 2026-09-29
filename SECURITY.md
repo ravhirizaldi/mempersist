@@ -12,7 +12,9 @@ and accidental deletion of canonical storage.
 - All `/api/*` traffic requires the static `MEMORY_API_TOKEN`; `/mcp` accepts either that developer token or an OAuth access token issued by this Worker.
 - `MEMORY_API_TOKEN` is a Wrangler secret in production and an ignored `.dev.vars` value locally.
 - Both token values are SHA-256 hashed before a constant-time comparison.
-- ChatGPT uses OAuth 2.1 authorization code with PKCE S256. The official Cloudflare provider stores only hashes of codes and tokens in private KV and encrypts grant props.
+- Interactive MCP clients use OAuth 2.1 authorization code with PKCE S256; the flow is
+  client-neutral, so any compliant remote MCP client can connect. The official Cloudflare provider
+  stores only hashes of codes and tokens in private KV and encrypts grant props.
 - OAuth consent uses a 256-bit double-submit CSRF value in an `HttpOnly`, `Secure`, `SameSite=Lax`, `__Host-` cookie. Client metadata is HTML-escaped and the page denies framing, external content, and referrers with response headers.
 - The consent page sends a one-use, 15-minute magic link and never stores or logs the raw form.
   Existing emails reconnect to their archive; unknown emails create an isolated account only

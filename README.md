@@ -60,19 +60,23 @@ Requires WSL2/Linux, Node.js 22+, Yarn 1.22, and Wrangler 4.x authenticated with
 Vectorize point at real remote bindings in the main configuration, while unit and integration
 tests never call remote AI.
 
-## Connect a client
+## Connect any MCP client
 
-### ChatGPT
+MemPersist is a standard remote MCP server: stateless Streamable HTTP at
+`https://mempersist.codifiedtech.id/mcp`, OAuth 2.1 authorization code with PKCE S256, scope
+`memory`. Nothing in the endpoint is client-specific — the same handshake, tool contracts, and
+server instructions serve every caller. Point a client at the URL and it works:
 
-Add `https://mempersist.codifiedtech.id/mcp` as a custom MCP app in Developer mode. ChatGPT
-discovers OAuth automatically, opens the consent page, and keeps the issued access and refresh
-tokens. Never paste `MEMORY_API_TOKEN` into a connector. Already-configured connections keep
-working across upgrades without re-authorization; the legacy hostname stays supported, and moving
-one client to the primary hostname costs exactly one new authorization.
+| Client                                    | How to add it                                                                                                          |
+| ----------------------------------------- | ---------------------------------------------------------------------------------------------------------------------- |
+| Claude Code                               | `claude mcp add --transport http mempersist https://mempersist.codifiedtech.id/mcp`, then finish the email prompt      |
+| Codex CLI, ChatGPT desktop, IDE extension | `~/.codex/config.toml` (or project `.codex/config.toml`), then `codex mcp login mempersist`                            |
+| Cursor, Claude Desktop, VS Code, Zed      | add the URL as a remote (HTTP) MCP server in the client's MCP settings; the client starts the OAuth flow               |
+| ChatGPT                                   | Developer mode, then add the URL as a custom MCP app                                                                   |
+| MCP Inspector, custom SDK clients         | `npx @modelcontextprotocol/inspector`, or the official SDK client; use the URL and either OAuth or the developer token |
+| stdio-only clients                        | keep the server remote and bridge stdio to HTTP with an OAuth-capable proxy; MemPersist itself never needs `npx`       |
 
-### Coding agents
-
-Codex (`~/.codex/config.toml`, or project-scoped `.codex/config.toml`):
+Codex configuration:
 
 ```toml
 [mcp_servers.mempersist]
@@ -81,9 +85,23 @@ url = "https://mempersist.codifiedtech.id/mcp"
 # auth = "oauth" is the default; run `codex mcp login mempersist` to authorize
 ```
 
-Claude Code: `claude mcp add --transport http mempersist https://mempersist.codifiedtech.id/mcp`,
-then complete the email prompt. Cursor, the ChatGPT desktop app, and the IDE extension share the
-Codex configuration.
+The client discovers OAuth from the `401` challenge, opens the consent page, and stores the issued
+access and refresh tokens. The consent page takes an email and sends a single-use, 15-minute magic
+link through the `EMAIL` binding; the connection completes only after that link is opened, and an
+existing email reconnects to its archive. The single scope is `memory`, and the sender address is
+configuration (`AUTH_EMAIL_FROM`, `LEGACY_AUTH_EMAIL_FROM`), not part of the API contract. Never
+paste `MEMORY_API_TOKEN` into a connector.
+
+Already-configured connections keep working across upgrades without re-authorization; the legacy
+hostname stays supported, and moving one client to the primary hostname costs exactly one new
+authorization.
+
+### Developer token
+
+Scripts, the CLI, and non-interactive automation may send
+`Authorization: Bearer <MEMORY_API_TOKEN>` instead of OAuth, which always maps to the owner
+archive. Every account may own multiple namespaces; the same namespace name in two accounts is
+separate data, and a supplied `namespace` is honored only when the caller owns it.
 
 ### Local, without deploying
 
@@ -98,18 +116,6 @@ Discovery, consent, and token audiences then use `https://127.0.0.1:8787`, and b
 `.dev.vars` developer token and the full OAuth flow work. Local `send_email` writes each magic
 link to `.wrangler/tmp/email/<id>/email-text/`. See
 [docs/development.md](docs/development.md).
-
-### Authentication
-
-Interactive clients use the OAuth 2.1 authorization-code flow with PKCE S256. The consent page
-takes an email and sends a single-use, 15-minute magic link through the `EMAIL` binding; the
-connection completes only after that link is opened. An existing email reconnects to its archive.
-The single scope is `memory`, and the sender address is configuration
-(`AUTH_EMAIL_FROM`, `LEGACY_AUTH_EMAIL_FROM`), not part of the API contract.
-
-Developer clients may send `Authorization: Bearer <MEMORY_API_TOKEN>` instead, which always maps
-to the owner archive. Every account may own multiple namespaces; the same namespace name in two
-accounts is separate data. A supplied `namespace` is honored only when the caller owns it.
 
 ## Tools
 
