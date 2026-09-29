@@ -32,36 +32,6 @@ type Claim = {
 
 const claims: Claim[] = [
   {
-    file: "README.md",
-    claim: "64 KiB MCP tool guard",
-    pattern: /below the ([\d,]+) KiB MCP tool guard/u,
-    expected: [MAX_TOOL_OUTPUT_BYTES / 1024],
-  },
-  {
-    file: "README.md",
-    claim: "48 KiB mutation receipt maximum",
-    pattern: /documented safe maximum of ([\d,]+) bytes \((\d+) KiB\)/u,
-    expected: [MUTATION_RECEIPT_MAX_SERIALIZED_BYTES, MUTATION_RECEIPT_MAX_SERIALIZED_BYTES / 1024],
-  },
-  {
-    file: "README.md",
-    claim: "1 MiB inline write ceiling",
-    pattern: /on both\s+transports are limited to ([\d,]+) bytes \((\d+) MiB\)/u,
-    expected: [MAX_INLINE_JSON_WRITE_BYTES, MAX_INLINE_JSON_WRITE_BYTES / (1024 * 1024)],
-  },
-  {
-    file: "README.md",
-    claim: "16 MiB direct import ceiling",
-    pattern: /Files up to (\d+) MiB use direct streaming upload/u,
-    expected: [MAX_DIRECT_IMPORT_BYTES / (1024 * 1024)],
-  },
-  {
-    file: "README.md",
-    claim: "16 MiB multipart part ceiling",
-    pattern: /use (\d+) MiB R2 multipart parts/u,
-    expected: [MAX_MULTIPART_PART_BYTES / (1024 * 1024)],
-  },
-  {
     file: "docs/mcp.md",
     claim: "64 KiB serialized tool output guard",
     pattern: /caps serialized tool output at ([\d,]+) KiB/u,
@@ -159,6 +129,23 @@ const claims: Claim[] = [
   },
 ];
 
+// The README quotes these ceilings in its Limits table. Table wording is editorial, so match the
+// formatted value inside a table cell instead of a sentence: rewriting prose cannot break this
+// check, while changing a constant in src/limits.ts still does.
+const readmeCeilings: Array<{ claim: string; value: number }> = [
+  { claim: "64 KiB MCP tool output guard", value: MAX_TOOL_OUTPUT_BYTES },
+  { claim: "48 KiB mutation receipt maximum", value: MUTATION_RECEIPT_MAX_SERIALIZED_BYTES },
+  { claim: "1 MiB inline write ceiling", value: MAX_INLINE_JSON_WRITE_BYTES },
+  { claim: "16 MiB direct import ceiling", value: MAX_DIRECT_IMPORT_BYTES },
+  { claim: "16 MiB multipart part ceiling", value: MAX_MULTIPART_PART_BYTES },
+];
+
+function sizeLabel(bytes: number): string {
+  if (bytes % (1024 * 1024) === 0) return `${bytes / (1024 * 1024)} MiB`;
+  if (bytes % 1024 === 0) return `${bytes / 1024} KiB`;
+  return `${bytes.toLocaleString("en-US")} bytes`;
+}
+
 // A capture may hold a numeric expression such as `16 * 1024 * 1024`, not just a literal.
 function numericValue(raw: string): number {
   return raw
@@ -173,6 +160,13 @@ function documentedNumbers(file: DocumentName, claim: string, pattern: RegExp): 
     throw new Error(`${file} no longer quotes the ${claim} value (${String(pattern)})`);
   }
   return match.slice(1).map(numericValue);
+}
+
+function readmeTableCells(): string[] {
+  return documents["README.md"]
+    .split("\n")
+    .filter((line) => line.startsWith("|"))
+    .flatMap((line) => line.split("|").map((cell) => cell.trim()));
 }
 
 describe("Capability documentation drift", () => {
@@ -192,5 +186,13 @@ describe("Capability documentation drift", () => {
         `src/limits.ts exports ${String(value)}`;
       expect(actual[index], message).toBe(value);
     });
+  });
+
+  it.each(readmeCeilings)("README.md quotes the $claim value", ({ claim, value }) => {
+    const quoted = `${value.toLocaleString("en-US")} bytes (${sizeLabel(value)})`;
+    expect(
+      readmeTableCells().some((cell) => cell.includes(quoted)),
+      `README.md documents no table value for ${claim}; src/limits.ts exports ${String(value)}`,
+    ).toBe(true);
   });
 });
