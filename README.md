@@ -28,8 +28,9 @@ message quota — Cloudflare limits and billing still apply.
 
 ```mermaid
 flowchart TD
-  IN["ChatGPT conversations.json or MCP writes"] --> V["Validation and stable IDs"]
-  V --> R2[("R2 canonical archive<br/>raw import + immutable revisions")]
+  IMP["ChatGPT data export (conversations.json)"] --> V
+  WRITE["MCP writes from any client"] --> V
+  V["Validation and stable IDs"] --> R2[("R2 canonical archive<br/>raw import + immutable revisions")]
   R2 --> D1[("D1 catalog<br/>imports, revisions, graph, R2 pointers")]
   D1 --> Q["Cloudflare Queues<br/>import and index jobs"]
   Q --> FTS[("D1 FTS5<br/>lexical chunks")]
@@ -39,6 +40,11 @@ flowchart TD
   SEARCH --> OUT["HTTP API and OAuth-protected MCP"]
   R2 --> EXPORT["Lossless export and recovery"]
 ```
+
+Two ingestion paths, and they stay independent: the ChatGPT data export parser accepts the native
+`conversations.json` format only, while writes arrive through MCP from whichever client the caller
+uses. Both converge on the same canonical revision model, so a memory created by a tool call and
+one imported from an export are read, pinned, and restored identically.
 
 R2 is the source of truth. A canonical write completes before its index job is queued, and an
 indexing failure never reports that durable memory was lost. Rebuilds read R2, so an export
