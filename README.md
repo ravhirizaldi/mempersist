@@ -253,7 +253,8 @@ applied. Architecture changes require an ADR in [docs/adr/](docs/adr/). See
 | Document                                                           | Contents                                                          |
 | ------------------------------------------------------------------ | ----------------------------------------------------------------- |
 | [ARCHITECTURE.md](ARCHITECTURE.md)                                 | System shape, canonical versus derived, write order, retrieval    |
-| [SECURITY.md](SECURITY.md)                                         | Threat model, trust boundaries, secret handling                   |
+| [CONTRIBUTING.md](CONTRIBUTING.md)                                 | Setup, per-change requirements, tests, authorization gates        |
+| [SECURITY.md](SECURITY.md)                                         | Threat model, trust boundaries, limits, rotation, reporting       |
 | [docs/mcp.md](docs/mcp.md)                                         | Tool contracts, receipts, batches, capabilities, rejection shapes |
 | [docs/development.md](docs/development.md)                         | Local loop, local MCP clients, browser pages, memory map client   |
 | [docs/deployment.md](docs/deployment.md)                           | Provisioning, migration, deploy, post-deploy checks               |
