@@ -1,4 +1,4 @@
-import type { AppEnv } from "./domain";
+import type { AppEnv, CanonicalNode, MessageEditOperation } from "./domain";
 import { enqueueIndex } from "./jobs";
 import { COMPACT_RESPONSE_BYTES, MUTATION_RECEIPT_MAX_SERIALIZED_BYTES } from "./limits";
 import {
@@ -11,6 +11,7 @@ import {
 import {
   loadCanonicalRevision,
   loadConversationTags,
+  type ConversationMessageEditResult,
   type RestoredRevision,
   type StoredRevision,
 } from "./storage";
@@ -568,4 +569,221 @@ export async function completeMemoryCopy(env: AppEnv, stored: StoredRevision, ve
     indexing,
     ...(verify ? { verification: await verifyCopiedRevision(env, stored) } : {}),
   };
+}
+
+// memory_edit_messages receipts: one core item carries indexing/verification so
+// the shared shed ladder can drop their heavier fields, and one item per target
+// keeps request_index/source_node_id/operation/status under the 100-edit envelope.
+export interface MemoryEditReceiptEdit {
+  request_index: number;
+  source_node_id: string;
+  operation: MessageEditOperation;
+  status: "edited" | "unchanged";
+}
+
+export interface MemoryEditReceiptDraft {
+  conversation_id: string;
+  previous_revision_id: string;
+  revision_id: string;
+  status: "edited" | "no_change";
+  durable: true;
+  edits: MemoryEditReceiptEdit[];
+  indexing?: MutationReceiptIndexing;
+  verification?: MutationReceiptVerification;
+  readback_requests?: MutationReceiptReadbackSelector[];
+  omitted?: string[];
+}
+
+export type MemoryEditReceipt = MemoryEditReceiptDraft & MutationReceiptBudget;
+
+interface EditReceiptItem extends MutationReceiptItem {
+  status?: "edited" | "unchanged";
+  source_node_id?: string;
+  operation?: MessageEditOperation;
+}
+
+function targetedReadbackPage(
+  meta: {
+    conversationId: string;
+    revisionId: string;
+    title: string;
+    namespace: string;
+    tags: string[];
+  },
+  nodes: CanonicalNode[],
+): CompactPage {
+  return {
+    conversation: {
+      id: meta.conversationId,
+      revisionId: meta.revisionId,
+      title: meta.title,
+      namespace: meta.namespace,
+      tags: meta.tags,
+    },
+    messages: nodes.map((node) => ({
+      sourceNodeId: node.sourceNodeId,
+      role: node.role,
+      createdAt: node.createdAt,
+      updatedAt: node.updatedAt,
+      text: node.text,
+    })),
+    offset: 0,
+    nextOffset: null,
+    total: nodes.length,
+    oversizedMessage: null,
+  };
+}
+
+// Reloads the committed revision from R2, validates its canonical integrity, and
+// checks every requested target's final text plus its preserved role/createdAt
+// against the base revision. Readback is limited to the requested targets.
+export async function verifyEditedRevision(
+  env: AppEnv,
+  result: ConversationMessageEditResult,
+): Promise<MutationReceiptVerification> {
+  try {
+    const committed = await loadCanonicalRevision(
+      env,
+      result.revisionId,
+      result.revision ?? undefined,
+    );
+    const targetsById = new Map(
+      committed.conversation.nodes.map((node) => [node.sourceNodeId, node]),
+    );
+    const originals = result.allUnchanged
+      ? committed.conversation.nodes
+      : (await loadCanonicalRevision(env, result.previousRevisionId)).conversation.nodes;
+    const originalsById = new Map(originals.map((node) => [node.sourceNodeId, node]));
+    const targets = result.edits.map((edit) => targetsById.get(edit.sourceNodeId));
+    const matches = result.edits.every((edit, index) => {
+      const node = targets[index];
+      const original = originalsById.get(edit.sourceNodeId);
+      return (
+        node !== undefined &&
+        original !== undefined &&
+        node.text === edit.text &&
+        node.role === original.role &&
+        node.createdAt === original.createdAt
+      );
+    });
+    const readback = targetedReadbackPage(
+      {
+        conversationId: result.conversationId,
+        revisionId: result.revisionId,
+        title: committed.manifest.title,
+        namespace: committed.manifest.namespace,
+        tags: committed.manifest.tags ?? [],
+      },
+      targets.filter((node): node is CanonicalNode => node !== undefined),
+    );
+    return {
+      status: matches ? ("passed" as const) : ("failed" as const),
+      revision_id: result.revisionId,
+      checked_messages: result.edits.length,
+      readback_available: true,
+      ...(matches
+        ? {}
+        : {
+            error: {
+              code: "CANONICAL_STORAGE",
+              message: "Persisted message edits differ from the intended write",
+            },
+          }),
+      ...(jsonBytes(readback) <= COMPACT_RESPONSE_BYTES
+        ? { readback }
+        : {
+            readback_error: {
+              code: "RESPONSE_TOO_LARGE",
+              message: "Targeted edit readback exceeds the readback budget",
+              offset: 0,
+            },
+          }),
+    };
+  } catch {
+    return {
+      status: "failed" as const,
+      revision_id: result.revisionId,
+      readback_available: false,
+      error: {
+        code: "CANONICAL_STORAGE",
+        message: "Edited revision could not be read and verified",
+      },
+    };
+  }
+}
+
+// Indexing is queued only for a changed result (already committed and head-CASed
+// by storage); a no_change result never enqueues and never reports indexing.
+export async function completeMemoryEdit(
+  env: AppEnv,
+  result: ConversationMessageEditResult,
+  verify: boolean,
+): Promise<MemoryEditReceipt> {
+  let indexing: MutationReceiptIndexing | undefined;
+  if (!result.allUnchanged && result.revision) {
+    try {
+      const jobId = await enqueueIndex(env, result.revision.revisionId);
+      indexing = { status: "queued", job_id: jobId };
+    } catch {
+      indexing = {
+        status: "failed",
+        error: {
+          code: "DERIVED_INDEXING",
+          message: boundedErrorMessage("Canonical revision edited; indexing could not be queued"),
+          retryable: true,
+        },
+      };
+    }
+  }
+  const verification = verify ? await verifyEditedRevision(env, result) : undefined;
+  const readbackRequests: MutationReceiptReadbackSelector[] =
+    verify && verification?.readback_available
+      ? [
+          {
+            conversation_id: result.conversationId,
+            revision_id: result.revisionId,
+            offset: 0,
+            limit: 20,
+            // Edit selectors carry no per-source-node filter, and the inline
+            // readback is already targeted at the edited nodes. Edits can
+            // target inactive graph nodes, so "all" keeps every shed target
+            // recoverable through memory_get_conversations.
+            branch: "all",
+          },
+        ]
+      : [];
+  const core: EditReceiptItem = {
+    ...(indexing ? { indexing } : {}),
+    ...(verification ? { verification } : {}),
+  };
+  const editItems: EditReceiptItem[] = result.edits.map((edit) => ({
+    request_index: edit.requestIndex,
+    source_node_id: edit.sourceNodeId,
+    operation: edit.operation,
+    status: edit.status,
+  }));
+  return fitMutationReceipt({
+    items: [core, ...editItems],
+    ...(readbackRequests.length ? { readbackRequests } : {}),
+    wrap: ({ items: merged, readback_requests, omitted }): MemoryEditReceiptDraft => {
+      const [coreItem, ...edits] = merged;
+      return {
+        conversation_id: result.conversationId,
+        previous_revision_id: result.previousRevisionId,
+        revision_id: result.revisionId,
+        status: result.status,
+        durable: true,
+        edits: edits.map((item) => ({
+          request_index: item.request_index!,
+          source_node_id: item.source_node_id!,
+          operation: item.operation!,
+          status: item.status!,
+        })),
+        ...(coreItem?.indexing ? { indexing: coreItem.indexing } : {}),
+        ...(coreItem?.verification ? { verification: coreItem.verification } : {}),
+        ...(readback_requests.length ? { readback_requests } : {}),
+        ...(omitted.length ? { omitted } : {}),
+      };
+    },
+  }).value;
 }

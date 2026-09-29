@@ -137,6 +137,7 @@ Available tools:
 - `memory_store`
 - `memory_append`
 - `memory_replace`
+- `memory_edit_messages`
 - `memory_restore_revision`
 - `memory_copy_conversations`
 - `memory_get_capabilities`
@@ -195,11 +196,16 @@ revision with `base_revision_id` optimistic concurrency, recording an immutable 
 without creating redundant canonical revisions. `memory_copy_conversations` performs a lossless
 canonical R2 copy of 1–20 owned conversations into another owned namespace using a required
 `idempotency_key` and attaching first-class `derivedFrom` provenance, rather than a compact-message
-restorable via `memory_store`. Store/append/replace/restore/copy accept `verify: true` to reload the
+restorable via `memory_store`. `memory_edit_messages` edits the exact text of 1–100 unique source
+nodes in one conversation server-side — `replace`, `append`, or `prepend` — with a required
+`base_revision_id`, atomically and without resubmitting the transcript; unsupported structured or
+multimodal content is rejected rather than coerced. A stale `base_revision_id` conflicts instead of
+overwriting concurrent work, so reread the current revision and recompute the edit before retrying.
+Store/append/replace/edit/restore/copy accept `verify: true` to reload the
 committed R2 revision and return compact readback with separate indexing/verification status.
 
-Store, append, replace, and restore return a bounded durable receipt: a committed revision reports
-`durable: true` with separate indexing and verification status, and the whole receipt is fitted to a
+Store, append, replace, edit, and restore return a bounded durable receipt: a committed revision
+reports `durable: true` with separate indexing and verification status, and the whole receipt is fitted to a
 documented safe maximum of 49,152 bytes (48 KiB) below the 64 KiB MCP tool guard — the deployed
 `max_receipt_bytes` and `max_tool_output_bytes` values from `memory_get_capabilities`. Inline readback is
 returned only when it fits; otherwise the receipt carries `readback_requests` — selectors that are

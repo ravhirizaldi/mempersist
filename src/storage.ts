@@ -5,8 +5,10 @@ import {
   type CanonicalConversation,
   type CanonicalNode,
   type CanonicalRevisionManifest,
+  type MessageEditOperation,
 } from "./domain";
 import { AppError, errorDetails } from "./errors";
+import { MAX_EDIT_MESSAGES, MAX_EDIT_SEPARATOR_CHARS, MAX_MESSAGE_CONTENT_CHARS } from "./limits";
 import { assertAccountWritable, OWNER_DB_USER_ID } from "./tenant";
 
 const encoder = new TextEncoder();
@@ -65,6 +67,16 @@ function chunked<T>(values: T[], size: number): T[][] {
   for (let index = 0; index < values.length; index += size)
     groups.push(values.slice(index, index + size));
   return groups;
+}
+
+// Mutation provenance describes the single operation that authored a revision, so it
+// must not leak into a revision produced by a different operation. The key is dropped
+// (never re-written as null) so unaffected revisions keep byte-identical segments.
+function clearMutation(conversation: CanonicalConversation): CanonicalConversation {
+  if (conversation.mutation === undefined || conversation.mutation === null) return conversation;
+  const copy: CanonicalConversation = { ...conversation };
+  delete copy.mutation;
+  return copy;
 }
 
 async function putImmutable(
@@ -296,6 +308,9 @@ function parseSegment(text: string): CanonicalConversation {
     ...(headerConversation as Omit<CanonicalConversation, "nodes">),
     tags: normalizeTags(headerConversation.tags ?? []),
     nodes,
+    // Only materialize provenance when the header carries it: an absent field must not
+    // be re-serialized as null, or unrelated revisions would change revision IDs.
+    ...(headerConversation.mutation ? { mutation: headerConversation.mutation } : {}),
     derivedFrom: headerConversation.derivedFrom ?? null,
   };
 }
@@ -876,7 +891,7 @@ export async function appendConversation(
     parent = sourceNodeId;
   }
   const updated: CanonicalConversation = {
-    ...loaded.conversation,
+    ...clearMutation(loaded.conversation),
     nodes,
     tags: normalizeTags([...(loaded.conversation.tags ?? []), ...(tags ?? [])]),
     updatedAt: new Date().toISOString(),
@@ -937,7 +952,7 @@ export async function replaceConversation(
     parent = sourceNodeId;
   }
   const updated: CanonicalConversation = {
-    ...loaded.conversation,
+    ...clearMutation(loaded.conversation),
     tags: loaded.row.tags,
     nodes,
     updatedAt: now,
@@ -945,6 +960,248 @@ export async function replaceConversation(
     activeSourceNodeIds: nodes.map((node) => node.sourceNodeId),
   };
   return writeCanonicalConversation(env, updated, null, baseRevisionId, loaded.row.user_id);
+}
+
+export interface MessageEdit {
+  sourceNodeId: string;
+  operation: MessageEditOperation;
+  text: string;
+  separator?: string | undefined;
+}
+
+export interface MessageEditOutcome {
+  requestIndex: number;
+  sourceNodeId: string;
+  operation: MessageEditOperation;
+  status: "edited" | "unchanged";
+  // Final exact text of the target. Server-side only: callers use it to verify the
+  // committed revision and to build bounded readback, never to widen the receipt.
+  text: string;
+}
+
+export interface ConversationMessageEditResult {
+  conversationId: string;
+  previousRevisionId: string;
+  revisionId: string;
+  status: "edited" | "no_change";
+  allUnchanged: boolean;
+  edits: MessageEditOutcome[];
+  // Null for a no-change batch: nothing was written, so nothing may be queued.
+  revision: StoredRevision | null;
+}
+
+interface PinnedRevisionRow {
+  manifest_object_key: string;
+  content_hash: string;
+  object_key: string;
+  sha256: string;
+}
+
+// The pinned base revision is re-read from R2 and checked against the D1 catalog, so a
+// head pointing at damaged or substituted canonical bytes can never be edited.
+async function loadPinnedRevision(
+  env: AppEnv,
+  conversationId: string,
+  revisionId: string,
+): Promise<CanonicalConversation> {
+  const pinned = await env.MEMORY_DB.prepare(
+    `SELECT r.manifest_object_key, r.content_hash, s.object_key, s.sha256
+     FROM conversation_revisions r
+     JOIN revision_segments rs ON rs.revision_id = r.id
+     JOIN canonical_segments s ON s.id = rs.segment_id
+     WHERE r.id = ? AND r.conversation_id = ?
+     ORDER BY rs.ordinal LIMIT 1`,
+  )
+    .bind(revisionId, conversationId)
+    .first<PinnedRevisionRow>();
+  if (!pinned) throw new AppError("NOT_FOUND", "Revision not found", 404);
+  const loaded = await loadCanonicalRevision(env, revisionId, {
+    conversationId,
+    revisionId,
+    manifestKey: pinned.manifest_object_key,
+    segmentKey: pinned.object_key,
+    contentHash: pinned.content_hash,
+    created: false,
+  });
+  return loaded.conversation;
+}
+
+// Every canonical writer emits `{ content_type: "text", parts: [text] }`. Anything else
+// may carry tool calls, attachments or multimodal parts, and rewriting it would be
+// lossy, so it is rejected instead of coerced.
+function isEditableText(node: CanonicalNode): boolean {
+  const content = node.content;
+  if (!content || typeof content !== "object" || Array.isArray(content)) return false;
+  const contentType = content["content_type"];
+  const parts = content["parts"];
+  return (
+    contentType === "text" &&
+    Array.isArray(parts) &&
+    parts.length === 1 &&
+    typeof parts[0] === "string" &&
+    parts[0] === node.text
+  );
+}
+
+// Exact text semantics: the separator is inserted only when both adjacent texts are
+// non-empty, and only append/prepend accept one. No trimming or Unicode rewriting.
+function applyMessageEdit(existing: string, edit: MessageEdit): string {
+  if (edit.operation === "replace") return edit.text;
+  const separator = existing.length > 0 && edit.text.length > 0 ? (edit.separator ?? "\n\n") : "";
+  return edit.operation === "append"
+    ? `${existing}${separator}${edit.text}`
+    : `${edit.text}${separator}${existing}`;
+}
+
+// Atomic, revision-pinned in-place text edit of 1..MAX_EDIT_MESSAGES nodes of one owned
+// conversation. All edits are validated and computed before anything is written, one
+// new canonical revision is persisted (immutably) and only then is the D1 head advanced
+// with the same compare-and-swap as append/replace/restore. Historical revisions and
+// every non-targeted node field stay untouched.
+export async function editConversationMessages(
+  env: AppEnv,
+  conversationId: string,
+  baseRevisionId: string,
+  edits: MessageEdit[],
+  expectedNamespaces?: string[],
+  expectedUserId?: string,
+): Promise<ConversationMessageEditResult> {
+  if (edits.length < 1 || edits.length > MAX_EDIT_MESSAGES) {
+    throw new AppError(
+      "VALIDATION",
+      `edits must contain between 1 and ${MAX_EDIT_MESSAGES} targets`,
+      400,
+    );
+  }
+  const loaded = await loadCurrentConversation(
+    env,
+    conversationId,
+    expectedNamespaces,
+    expectedUserId,
+  );
+  if (loaded.row.current_revision_id !== baseRevisionId) {
+    throw new AppError("IMPORT_CONFLICT", "base_revision_id is stale", 409);
+  }
+  await assertAccountWritable(env, loaded.row.user_id, loaded.row.namespace);
+  const base: CanonicalConversation = {
+    ...(await loadPinnedRevision(env, conversationId, baseRevisionId)),
+    tags: loaded.row.tags,
+  };
+
+  const bySourceNodeId = new Map(base.nodes.map((node) => [node.sourceNodeId, node]));
+  const now = new Date().toISOString();
+  const seen = new Set<string>();
+  const outcomes: MessageEditOutcome[] = [];
+  const replacements = new Map<string, string>();
+
+  for (const [requestIndex, edit] of edits.entries()) {
+    const sourceNodeId = edit.sourceNodeId;
+    if (typeof sourceNodeId !== "string" || sourceNodeId.length === 0) {
+      throw new AppError("VALIDATION", "source_node_id must be a non-empty string", 400);
+    }
+    if (seen.has(sourceNodeId)) {
+      throw new AppError(
+        "VALIDATION",
+        `source_node_id ${sourceNodeId} is targeted more than once`,
+        400,
+      );
+    }
+    seen.add(sourceNodeId);
+    if (
+      edit.operation !== "replace" &&
+      edit.operation !== "append" &&
+      edit.operation !== "prepend"
+    ) {
+      throw new AppError("VALIDATION", "operation must be replace, append, or prepend", 400);
+    }
+    if (typeof edit.text !== "string") {
+      throw new AppError("VALIDATION", "text must be a string", 400);
+    }
+    if (edit.operation === "replace") {
+      if (edit.separator !== undefined) {
+        throw new AppError("VALIDATION", "separator is not supported for replace", 400);
+      }
+    } else if (
+      edit.separator !== undefined &&
+      (typeof edit.separator !== "string" || edit.separator.length > MAX_EDIT_SEPARATOR_CHARS)
+    ) {
+      throw new AppError(
+        "VALIDATION",
+        `separator must be a string of at most ${MAX_EDIT_SEPARATOR_CHARS} characters`,
+        400,
+      );
+    }
+    const node = bySourceNodeId.get(sourceNodeId);
+    if (!node) throw new AppError("NOT_FOUND", "Target message not found", 404);
+    if (!isEditableText(node)) {
+      throw new AppError(
+        "UNSUPPORTED_MESSAGE_CONTENT",
+        `Message ${sourceNodeId} has structured content that cannot be edited as text`,
+        400,
+      );
+    }
+    const text = applyMessageEdit(node.text, edit);
+    if (text.length > MAX_MESSAGE_CONTENT_CHARS) {
+      throw new AppError(
+        "VALIDATION",
+        `Edited message exceeds ${MAX_MESSAGE_CONTENT_CHARS} characters`,
+        400,
+      );
+    }
+    const status = text === node.text ? "unchanged" : "edited";
+    outcomes.push({ requestIndex, sourceNodeId, operation: edit.operation, status, text });
+    if (status === "edited") replacements.set(sourceNodeId, text);
+  }
+
+  if (replacements.size === 0) {
+    return {
+      conversationId,
+      previousRevisionId: baseRevisionId,
+      revisionId: baseRevisionId,
+      status: "no_change",
+      allUnchanged: true,
+      edits: outcomes,
+      revision: null,
+    };
+  }
+
+  const updated: CanonicalConversation = {
+    ...base,
+    nodes: base.nodes.map((node) => {
+      const text = replacements.get(node.sourceNodeId);
+      if (text === undefined) return node;
+      return {
+        ...node,
+        text,
+        content: { content_type: "text", parts: [text] },
+        updatedAt: now,
+      };
+    }),
+    updatedAt: now,
+    mutation: {
+      operation: "edit_messages",
+      previousRevisionId: baseRevisionId,
+      edits: edits.map((edit) => ({ sourceNodeId: edit.sourceNodeId, operation: edit.operation })),
+      editedAt: now,
+    },
+  };
+
+  const stored = await writeCanonicalConversation(
+    env,
+    updated,
+    null,
+    baseRevisionId,
+    loaded.row.user_id,
+  );
+  return {
+    conversationId,
+    previousRevisionId: baseRevisionId,
+    revisionId: stored.revisionId,
+    status: "edited",
+    allUnchanged: false,
+    edits: outcomes,
+    revision: stored,
+  };
 }
 
 export async function restoreConversationRevision(

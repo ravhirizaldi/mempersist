@@ -19,6 +19,9 @@ import {
   MAX_CONTEXT_TAIL_MESSAGES,
   MAX_COPY_ITEMS,
   MAX_DELETE_ITEMS,
+  MAX_EDIT_MESSAGES,
+  MAX_EDIT_SEPARATOR_CHARS,
+  MAX_EDIT_SOURCE_NODE_ID_CHARS,
   MAX_IDEMPOTENCY_KEY_CHARS,
   MAX_MESSAGE_CONTENT_CHARS,
   MAX_MESSAGE_ROLE_CHARS,
@@ -40,6 +43,7 @@ import {
 } from "./limits";
 import {
   completeMemoryCopy,
+  completeMemoryEdit,
   completeMemoryRestore,
   completeMemoryWrite,
   fitMutationReceipt,
@@ -58,6 +62,7 @@ import { assertAccountWritable, grantNamespace, scopeNamespaces, type Tenant } f
 import {
   appendConversation,
   copyConversations,
+  editConversationMessages,
   listConversationRevisions,
   listConversations,
   replaceConversation,
@@ -561,6 +566,67 @@ const memoryRestoreOutputSchema = z.object({
       error: z.object({ code: z.string(), message: z.string(), retryable: z.boolean() }),
     }),
   ]),
+  verification: verificationOutputSchema.optional(),
+  ...receiptBudgetFields,
+});
+const messageEditOperationSchema = z.enum(["replace", "append", "prepend"]);
+const messageEditInputSchema = z.object({
+  conversation_id: conversationIdSchema,
+  base_revision_id: revisionIdSchema,
+  edits: z
+    .array(
+      z
+        .object({
+          source_node_id: z
+            .string()
+            .min(1)
+            .max(MAX_EDIT_SOURCE_NODE_ID_CHARS)
+            .refine((value) => value.trim().length > 0, "source_node_id must not be blank"),
+          operation: messageEditOperationSchema,
+          text: z.string().max(MAX_MESSAGE_CONTENT_CHARS),
+          separator: z.string().max(MAX_EDIT_SEPARATOR_CHARS).optional(),
+        })
+        .superRefine((edit, context) => {
+          if (edit.operation === "replace" && edit.separator !== undefined) {
+            context.addIssue({
+              code: "custom",
+              message: "separator is only valid for append or prepend",
+              path: ["separator"],
+            });
+          }
+        }),
+    )
+    .min(1)
+    .max(MAX_EDIT_MESSAGES)
+    .refine(
+      (edits) => new Set(edits.map((edit) => edit.source_node_id)).size === edits.length,
+      "source_node_id must be unique within one request",
+    ),
+  verify: z.boolean().default(false),
+});
+const memoryEditOutputSchema = z.object({
+  conversation_id: z.string(),
+  previous_revision_id: z.string(),
+  revision_id: z.string(),
+  status: z.enum(["edited", "no_change"]),
+  durable: z.literal(true),
+  edits: z.array(
+    z.object({
+      request_index: z.number().int().min(0),
+      source_node_id: z.string(),
+      operation: messageEditOperationSchema,
+      status: z.enum(["edited", "unchanged"]),
+    }),
+  ),
+  indexing: z
+    .union([
+      z.object({ status: z.literal("queued"), job_id: z.string() }),
+      z.object({
+        status: z.literal("failed"),
+        error: z.object({ code: z.string(), message: z.string(), retryable: z.boolean() }),
+      }),
+    ])
+    .optional(),
   verification: verificationOutputSchema.optional(),
   ...receiptBudgetFields,
 });
@@ -1076,6 +1142,49 @@ export function createMemoryMcpServer(env: AppEnv, tenant: Tenant): McpServer {
         tenant.userId,
       );
       return toolResult(await completeMemoryWrite(env, stored, messages, verify));
+    },
+  );
+
+  server.registerTool(
+    "memory_edit_messages",
+    {
+      description:
+        'Atomically edit the exact text of 1–100 existing messages in one conversation with optimistic revision checking. operation replace sets the text, append/prepend add it around the existing text with an optional separator (default "\\n\\n", omitted at an empty boundary). Node identity, role, creation time, graph structure, inactive branches, and unrelated fields are preserved; a new immutable revision is written before the head advances. All-unchanged requests return status no_change with no new revision or indexing. Optional verify reloads the committed revision and returns targeted readback.',
+      annotations: {
+        readOnlyHint: false,
+        destructiveHint: true,
+        openWorldHint: false,
+        idempotentHint: false,
+      },
+      outputSchema: memoryEditOutputSchema,
+      inputSchema: messageEditInputSchema,
+    },
+    async (input) => {
+      const { conversation_id, base_revision_id, edits, verify } = input;
+      const serialized = JSON.stringify(input);
+      try {
+        assertInlineWriteBudget(serialized, edits.length);
+      } catch (error) {
+        if (error instanceof AppError && error.code === "REQUEST_TOO_LARGE") {
+          return requestTooLargeResult(error);
+        }
+        throw error;
+      }
+
+      const result = await editConversationMessages(
+        env,
+        conversation_id,
+        base_revision_id,
+        edits.map((edit) => ({
+          sourceNodeId: edit.source_node_id,
+          operation: edit.operation,
+          text: edit.text,
+          ...(edit.separator !== undefined ? { separator: edit.separator } : {}),
+        })),
+        tenant.namespaces,
+        tenant.userId,
+      );
+      return toolResult(await completeMemoryEdit(env, result, verify));
     },
   );
 

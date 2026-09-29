@@ -8,7 +8,7 @@ import { AppError } from "./errors";
  */
 
 export const CAPABILITIES_PROTOCOL_VERSION = "1";
-export const CAPABILITIES_VERSION = "2026-09-28";
+export const CAPABILITIES_VERSION = "2026-09-29";
 
 // Transport budgets.
 export const MAX_TOOL_OUTPUT_BYTES = 64 * 1024;
@@ -39,6 +39,9 @@ export const MAX_TAG_CHARS = 64;
 export const MAX_STORE_MESSAGES = 1000;
 export const MAX_REPLACE_MESSAGES = 1000;
 export const MAX_APPEND_MESSAGES = 100;
+export const MAX_EDIT_MESSAGES = 100;
+export const MAX_EDIT_SEPARATOR_CHARS = 64;
+export const MAX_EDIT_SOURCE_NODE_ID_CHARS = 200;
 
 // Read and paging limits.
 export const MAX_PAGE_ITEMS = 100;
@@ -224,6 +227,11 @@ export function memoryCapabilities(): MemoryCapabilities {
       },
       memory_replace: {
         max_items: MAX_REPLACE_MESSAGES,
+        max_request_bytes: MAX_INLINE_JSON_WRITE_BYTES,
+        supports_verify: true,
+      },
+      memory_edit_messages: {
+        max_items: MAX_EDIT_MESSAGES,
         max_request_bytes: MAX_INLINE_JSON_WRITE_BYTES,
         supports_verify: true,
       },

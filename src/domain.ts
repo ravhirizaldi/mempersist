@@ -40,6 +40,18 @@ export interface CanonicalNode {
   raw: JsonValue;
 }
 
+export type MessageEditOperation = "replace" | "append" | "prepend";
+
+// Durable provenance for a revision produced by an in-place text edit. It rides the
+// existing v1 segment header, so it is covered by the segment hash and revision ID.
+// It carries only client-visible source node IDs and operations: never R2 keys.
+export interface MessageEditProvenance {
+  operation: "edit_messages";
+  previousRevisionId: string;
+  edits: Array<{ sourceNodeId: string; operation: MessageEditOperation }>;
+  editedAt: string;
+}
+
 export interface CopyProvenance {
   operation: "copy";
   conversationId: string;
@@ -63,6 +75,9 @@ export interface CanonicalConversation {
   metadata: JsonValue;
   anomalies: string[];
   derivedFrom: CopyProvenance | null;
+  // Present only on revisions produced by an in-place message edit; absent on every
+  // other revision so legacy segment bytes and revision IDs stay byte-identical.
+  mutation?: MessageEditProvenance | null;
 }
 
 export interface CanonicalRevisionManifest {
