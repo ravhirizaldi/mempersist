@@ -1,5 +1,5 @@
 {
-  "$schema": "https://static.modelcontextprotocol.org/schemas/2025-12-11/server.schema.json",
+  "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
   "name": "io.github.ravhirizaldi/mempersist",
   "title": "MemPersist",
   "description": "Durable, revision-pinned memory storage and retrieval for AI conversations.",
@@ -7,7 +7,8 @@
     "url": "https://github.com/ravhirizaldi/mempersist",
     "source": "github"
   },
-  "version": "1.0.0",
+  "version": "1.0.1",
+  "websiteUrl": "https://mempersist.codifiedtech.id",
   "remotes": [
     {
       "type": "streamable-http",

@@ -24,6 +24,27 @@ Preview the OAuth consent page without a registered client at
 `http://localhost:8787/authorize?client_id=DEVMODE` (GET only; submitting the form is not
 part of the preview).
 
+## Local MCP clients
+
+MCP audiences are deployment configuration, so a client pointed at
+`https://127.0.0.1:8787/mcp` normally fails the audience check and follows discovery to
+production. Override the origin for a local session:
+
+```bash
+yarn dev --local --port 8787 --local-protocol https \
+  --var MCP_ORIGIN_OVERRIDE:https://127.0.0.1:8787
+```
+
+Protected-resource metadata, consent, and token audiences then all use
+`https://127.0.0.1:8787`, so both the developer bearer token in `.dev.vars` and the full
+OAuth flow work against the local server. The override must be HTTPS — the OAuth provider
+rejects any other authorization-server scheme — and it is unset in `wrangler.jsonc`, so
+production metadata and audiences are unchanged.
+
+Local `send_email` writes each message to `.wrangler/tmp/email/<id>/email-text/` and
+`email-html/`; read the magic link from there instead of a mail client. Wrangler serves a
+self-signed certificate, so local clients must skip TLS verification.
+
 ## Browser pages
 
 Public pages (`/`, `/whitepaper`, `/architecture`, `/security`, `/adrs`, `/about`)

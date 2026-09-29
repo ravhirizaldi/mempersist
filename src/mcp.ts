@@ -750,11 +750,24 @@ function requestTooLargeResult(error: AppError) {
 }
 
 export function createMemoryMcpServer(env: AppEnv, tenant: Tenant): McpServer {
-  const server = new McpServer({ name: "Ravhi Rizaldi", version: "0.1.0" });
+  const server = new McpServer(
+    {
+      name: "mempersist",
+      version: "1.0.1",
+      title: "MemPersist",
+      description: "Durable, revision-pinned memory storage and retrieval for AI conversations.",
+      websiteUrl: "https://mempersist.codifiedtech.id",
+    },
+    {
+      instructions:
+        "MemPersist stores and retrieves durable AI conversation memory for the authenticated user. For exploration, use memory_search followed by memory_get_context or memory_get_conversation. For complex context assembly, use memory_build_context directly. Use memory_store only for intentional durable saves; use memory_append for genuine continuation, memory_replace to supersede a complete transcript, and memory_edit_messages for targeted edits. Never assume memories belong to another account or namespace. Search before creating duplicate memories. Writes are persistent and may require user confirmation.",
+    },
+  );
 
   server.registerTool(
     "memory_search",
     {
+      title: "Search memories",
       description:
         "Search durable conversation memory and return compact references. Scoped to your namespaces only; the same namespace name in another account is separate and invisible. Tags filter to conversations matching the given tags (tag_mode all = every tag, any = at least one).",
       annotations: readOnlyAnnotations,
@@ -784,6 +797,7 @@ export function createMemoryMcpServer(env: AppEnv, tenant: Tenant): McpServer {
   server.registerTool(
     "memory_get_context",
     {
+      title: "Get memory context",
       description: "Retrieve original messages around one search result chunk.",
       annotations: readOnlyAnnotations,
       outputSchema: contextOutputSchema,
@@ -811,6 +825,7 @@ export function createMemoryMcpServer(env: AppEnv, tenant: Tenant): McpServer {
   server.registerTool(
     "memory_get_conversation",
     {
+      title: "Get conversation",
       description: "Page through an active timeline or every preserved graph node.",
       annotations: readOnlyAnnotations,
       outputSchema: conversationPageOutputSchema,
@@ -840,6 +855,7 @@ export function createMemoryMcpServer(env: AppEnv, tenant: Tenant): McpServer {
   server.registerTool(
     "memory_get_conversations",
     {
+      title: "Get conversations",
       description:
         "Read up to 20 owned memories with deterministic revision-pinned round-robin pagination. First calls accept requests and optional max_serialized_bytes (default 32 KiB, minimum 4 KiB, maximum 48 KiB); continuation calls accept one opaque cursor. Whole compact messages are admitted without truncation, and completed/remaining counts plus nextCursor make follow-up reads explicit. An oversizedMessage includes bounded IDs, offset, and bytes; use the authorized canonical HTTP/export read to recover its text.",
       annotations: readOnlyAnnotations,
@@ -864,6 +880,7 @@ export function createMemoryMcpServer(env: AppEnv, tenant: Tenant): McpServer {
   server.registerTool(
     "memory_list_conversations",
     {
+      title: "List conversations",
       description:
         "List conversation metadata without transcript bodies. Scoped to your namespaces only. Tags filter to conversations matching the given tags (tag_mode all = every tag, any = at least one).",
       annotations: readOnlyAnnotations,
@@ -893,6 +910,7 @@ export function createMemoryMcpServer(env: AppEnv, tenant: Tenant): McpServer {
   server.registerTool(
     "memory_list_revisions",
     {
+      title: "List revisions",
       description:
         "List the immutable revision history of one owned conversation, newest first, as metadata only. Missing, deleted, and foreign conversations are reported as not found. Pass a returned revision_id to memory_get_conversation to read that revision, and follow next_cursor for older pages.",
       annotations: readOnlyAnnotations,
@@ -928,6 +946,7 @@ export function createMemoryMcpServer(env: AppEnv, tenant: Tenant): McpServer {
   server.registerTool(
     "memory_resolve_conversations",
     {
+      title: "Resolve conversations",
       description:
         "Resolve known conversation owners by exact title without semantic search, returning conversation IDs, current revision IDs, and live tags. Exact match is case-sensitive and scoped to owned namespaces.",
       annotations: readOnlyAnnotations,
@@ -965,6 +984,7 @@ export function createMemoryMcpServer(env: AppEnv, tenant: Tenant): McpServer {
   server.registerTool(
     "memory_build_context",
     {
+      title: "Build memory context",
       description:
         "Compile a deterministic, revision-pinned context pack from required canonical conversations (with optional pointer follow expansion) and optional hybrid-search evidence within explicit token and serialized-byte budgets.",
       annotations: readOnlyAnnotations,
@@ -1015,6 +1035,7 @@ export function createMemoryMcpServer(env: AppEnv, tenant: Tenant): McpServer {
   server.registerTool(
     "memory_store",
     {
+      title: "Store memory",
       description:
         "Durably store a new intentional memory before asynchronous indexing. The first write to a new namespace name claims it for your account. Optional verify reloads the committed R2 revision and returns checked compact readback.",
       annotations: {
@@ -1060,6 +1081,7 @@ export function createMemoryMcpServer(env: AppEnv, tenant: Tenant): McpServer {
   server.registerTool(
     "memory_append",
     {
+      title: "Append memory",
       description:
         "Append messages with optimistic revision checking; canonical success precedes indexing. Ownership-checked to your namespaces. Tags add to the conversation's existing tag set. Optional verify returns persisted appended messages and offsets.",
       annotations: {
@@ -1105,6 +1127,7 @@ export function createMemoryMcpServer(env: AppEnv, tenant: Tenant): McpServer {
   server.registerTool(
     "memory_replace",
     {
+      title: "Replace memory",
       description:
         "Replace a conversation with the complete message list using optimistic revision checking; identity, namespace, title, and tags are preserved. Canonical success precedes indexing. Optional verify checks the committed R2 revision and returns paginated compact readback.",
       annotations: {
@@ -1148,6 +1171,7 @@ export function createMemoryMcpServer(env: AppEnv, tenant: Tenant): McpServer {
   server.registerTool(
     "memory_edit_messages",
     {
+      title: "Edit memory messages",
       description:
         'Atomically edit the exact text of 1–100 existing messages in one conversation with optimistic revision checking. operation replace sets the text, append/prepend add it around the existing text with an optional separator (default "\\n\\n", omitted at an empty boundary). Node identity, role, creation time, graph structure, inactive branches, and unrelated fields are preserved; a new immutable revision is written before the head advances. All-unchanged requests return status no_change with no new revision or indexing. Optional verify reloads the committed revision and returns targeted readback.',
       annotations: {
@@ -1191,6 +1215,7 @@ export function createMemoryMcpServer(env: AppEnv, tenant: Tenant): McpServer {
   server.registerTool(
     "memory_restore_revision",
     {
+      title: "Restore memory revision",
       description:
         "Restore a conversation's active timeline to an existing canonical revision using optimistic concurrency; canonical revision objects are reused immutably and durable transition history is recorded. Live title, namespace, identity, and tags are preserved. Optional verify checks the committed head revision and returns paginated compact readback.",
       annotations: {
@@ -1223,6 +1248,7 @@ export function createMemoryMcpServer(env: AppEnv, tenant: Tenant): McpServer {
   server.registerTool(
     "memory_copy_conversations",
     {
+      title: "Copy conversations",
       description:
         "Copy 1–20 owned conversations by canonical R2 revision into another namespace you own; optional create_target_namespace; required idempotency_key; optional verify. The receipt is bounded to fit the response budget and lists any fields omitted from it; readback_requests are directly usable as memory_get_conversations requests.",
       annotations: {
@@ -1346,6 +1372,7 @@ export function createMemoryMcpServer(env: AppEnv, tenant: Tenant): McpServer {
   server.registerTool(
     "memory_update_tags",
     {
+      title: "Update memory tags",
       description:
         "Add or remove conversation tags with optimistic revision checking; base_revision_id must be the current revision. Ownership-checked to your namespaces. Removals apply before additions.",
       annotations: {
@@ -1384,6 +1411,7 @@ export function createMemoryMcpServer(env: AppEnv, tenant: Tenant): McpServer {
   server.registerTool(
     "memory_delete_conversations",
     {
+      title: "Delete conversations",
       description:
         "Delete up to 100 conversations and their canonical and derived data. Only conversations in your namespaces can be deleted; others are reported as missing.",
       annotations: {
@@ -1407,6 +1435,7 @@ export function createMemoryMcpServer(env: AppEnv, tenant: Tenant): McpServer {
   server.registerTool(
     "memory_empty_namespace",
     {
+      title: "Empty namespace",
       description:
         "Delete every conversation in one of your namespaces in bounded batches after an exact namespace confirmation. Ownership of the namespace is kept. Raw imports are retained.",
       annotations: {
@@ -1437,6 +1466,7 @@ export function createMemoryMcpServer(env: AppEnv, tenant: Tenant): McpServer {
   server.registerTool(
     "memory_list_namespaces",
     {
+      title: "List namespaces",
       description: "List the namespaces your account owns with conversation counts.",
       annotations: readOnlyAnnotations,
       outputSchema: z.object({
@@ -1470,6 +1500,7 @@ export function createMemoryMcpServer(env: AppEnv, tenant: Tenant): McpServer {
   server.registerTool(
     "memory_stats",
     {
+      title: "Get memory statistics",
       description:
         "Return conversation and message counts per namespace plus indexing health for your account.",
       annotations: readOnlyAnnotations,
@@ -1540,6 +1571,7 @@ export function createMemoryMcpServer(env: AppEnv, tenant: Tenant): McpServer {
   server.registerTool(
     "memory_import_status",
     {
+      title: "Get import status",
       description: "Read progress and failures for a ChatGPT import.",
       annotations: readOnlyAnnotations,
       outputSchema: z.object({
@@ -1576,6 +1608,7 @@ export function createMemoryMcpServer(env: AppEnv, tenant: Tenant): McpServer {
   server.registerTool(
     "memory_get_capabilities",
     {
+      title: "Get capabilities",
       description:
         "Returns the deployed runtime capability contract with negotiated limits, per-tool budgets, and feature flags.",
       annotations: readOnlyAnnotations,

@@ -39,8 +39,38 @@ const SECURITY_HEADERS = {
   "X-Frame-Options": "DENY",
 } as const;
 
-export function mcpOriginForRequest(request: Request): string {
-  return new URL(request.url).origin === LEGACY_MCP_ORIGIN ? LEGACY_MCP_ORIGIN : MCP_ORIGIN;
+/**
+ * Development-only audience override. Returns a normalized HTTPS origin, or
+ * null when unset or unusable so callers keep the deployed origin. The OAuth
+ * provider rejects a non-HTTPS authorization server, so an HTTP override would
+ * fail every request; it falls back here instead.
+ */
+export function overrideOrigin(env?: Pick<AppEnv, "MCP_ORIGIN_OVERRIDE">): string | null {
+  const override = env?.MCP_ORIGIN_OVERRIDE?.trim();
+  if (!override) return null;
+  try {
+    const url = new URL(override);
+    if (url.protocol === "https:") return url.origin;
+  } catch {
+    // An unusable override falls back to the deployed origin.
+  }
+  return null;
+}
+
+/**
+ * Resolves the MCP audience origin. Production behavior is unchanged: the
+ * legacy hostname keeps its origin, everything else uses MCP_ORIGIN. A local
+ * `MCP_ORIGIN_OVERRIDE` points a development server at itself so OAuth
+ * audiences match the request origin.
+ */
+export function mcpOriginForRequest(
+  request: Request,
+  env?: Pick<AppEnv, "MCP_ORIGIN_OVERRIDE">,
+): string {
+  return (
+    overrideOrigin(env) ??
+    (new URL(request.url).origin === LEGACY_MCP_ORIGIN ? LEGACY_MCP_ORIGIN : MCP_ORIGIN)
+  );
 }
 
 function escapeHtml(value: string): string {
@@ -263,7 +293,7 @@ export async function handleAuthorization(request: Request, env: OAuthEnv): Prom
     return statusPage(t.checkEmailTitle, t.checkEmailGeneric, 200, locale);
   }
 
-  const origin = mcpOriginForRequest(request);
+  const origin = mcpOriginForRequest(request, env);
   const magicUrl = `${origin}/auth/magic-link?token=${encodeURIComponent(issue.token)}&lang=${locale}`;
   const action = issue.mode === "register" ? t.emailActionRegister : t.emailActionLogin;
   try {
