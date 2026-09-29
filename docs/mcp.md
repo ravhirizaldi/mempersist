@@ -10,7 +10,8 @@ for that client.
 
 ## Authentication
 
-- ChatGPT and other interactive MCP clients use OAuth 2.1 authorization code with PKCE S256.
+- Interactive MCP clients use OAuth 2.1 authorization code with PKCE S256. The flow is
+  client-neutral: any client that speaks remote MCP and follows the `401` challenge works.
 - OAuth discovery, token exchange, refresh, revocation, Client ID Metadata Documents, and dynamic client registration are provided by Cloudflare's official Workers OAuth package.
 - The consent page asks for an email and offers one `Continue with email` action.
   MemPersist sends a single-use, 15-minute magic link through Cloudflare Email Service. An
@@ -27,26 +28,35 @@ for that client.
   it scopes to every namespace the account owns. `memory_store` claims a new namespace for
   the caller on first write.
 
-To connect ChatGPT:
+To connect a client:
 
-1. Enable Developer mode in ChatGPT settings.
-2. Add a custom MCP app/plugin with endpoint `https://mempersist.codifiedtech.id/mcp`.
+1. Add `https://mempersist.codifiedtech.id/mcp` as a remote (HTTP) MCP server in the client.
+   Codex uses `~/.codex/config.toml`; Claude Code uses
+   `claude mcp add --transport http mempersist https://mempersist.codifiedtech.id/mcp`; other
+   clients expose an equivalent remote-server setting.
+2. Start the connection. The client reads the `401` challenge, discovers OAuth, and opens the
+   consent page.
 3. Enter the email tied to your MemPersist archive and click `Continue with email`.
-4. Open the magic link sent to that email. ChatGPT will finish the OAuth connection.
-5. Review the discovered tools, then enable the app for a conversation.
+4. Open the magic link sent to that email. The client finishes the OAuth connection.
+5. Review the discovered tools, then enable the server for a conversation.
 
-Already-connected ChatGPT clients using the legacy endpoint keep working after deployment.
+ChatGPT specifically: enable Developer mode in ChatGPT settings, add the same URL as a custom MCP
+app, and complete the same consent flow.
+
+Already-connected clients using the legacy endpoint keep working after deployment.
 If you change that endpoint to the primary hostname, re-authorize that client once. Pre-existing
 grants continue mapping to the owner archive.
 
-Do not paste `MEMORY_API_TOKEN` into ChatGPT's app configuration; it is for developer API and
-CLI use only. OAuth discovery is exposed at `/.well-known/oauth-protected-resource/mcp` and
+Do not paste `MEMORY_API_TOKEN` into a client's connector or app configuration; it is for
+developer API and CLI use only. OAuth discovery is exposed at `/.well-known/oauth-protected-resource/mcp` and
 `/.well-known/oauth-authorization-server`.
 
-## Coding agents (Codex, Claude Code, Cursor, IDE extensions)
+## Remote MCP clients (Codex, Claude Code, Cursor, IDE extensions, and any other)
 
 MemPersist is a remote Streamable HTTP MCP server, so no `npx` bridge is needed — point the
-client at the endpoint URL and authorize with the email tied to your archive.
+client at the endpoint URL and authorize with the email tied to your archive. The same URL works
+for every remote-capable client, including ChatGPT (Developer mode custom MCP app) and Claude
+Desktop; the steps below are only examples of client-side configuration.
 
 Codex (add to `~/.codex/config.toml`, or a project-scoped `.codex/config.toml`):
 
