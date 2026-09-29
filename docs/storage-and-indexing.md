@@ -123,6 +123,34 @@ the revision primary-key index. The page query uses `revisions_conversation_idx`
 only for the final `id DESC` tie-break. No additional index is required, so no migration was added
 for this tool.
 
+## Canonical message editing
+
+`memory_edit_messages` edits the text of known messages server-side instead of resubmitting a
+transcript. It loads and integrity-checks the pinned `base_revision_id` from R2, locates each target
+by the exact `source_node_id` exposed by compact/canonical reads, computes every `replace`, `append`,
+or `prepend` result before writing anything, and rebuilds a complete new revision from the base
+graph. Only the supported text representation of targeted nodes changes: source-node identity, role,
+`createdAt`, parents and children, branch membership, active-path position, model/source metadata,
+and unrelated raw fields are copied through, including inactive branches. `updatedAt` moves to the
+server edit time only when final text changed. An older revision and its segments stay immutable and
+revision-pinned-readable; no manifest or segment is edited or deleted.
+
+Ordering matches every other canonical write: the new revision object is persisted to R2 first, then
+the D1 head advances with a compare-and-swap from `base_revision_id`. A stale base aborts with the
+existing conflict error, and the prepared revision is neither made current nor enqueued. An indexing
+job is queued only after the head transition, so derived FTS and Vectorize state converge on the new
+current revision and never promote text from a superseded one. Canonical durability and the head
+transition stay authoritative when queueing, indexing, or optional verification fails afterwards.
+
+An all-unchanged request short-circuits to `status: "no_change"` against the current revision with no
+new revision and no indexing job. A mixed request commits one revision and reports `edited` versus
+`unchanged` per target. Any missing, duplicated, foreign, oversized, or unsupported target — for
+example a tool call, attachment, or multimodal part that cannot be represented as text — fails the
+whole request with `UNSUPPORTED_MESSAGE_CONTENT` or the corresponding categorized error before any
+write, so canonical storage never gains a partial edit. Separator semantics are explicit: `replace`
+rejects `separator`, while `append`/`prepend` default to a blank line and omit it when either side is
+empty. Text is never trimmed, normalized, or re-parsed.
+
 ## Exact-title conversation resolution
 
 `memory_resolve_conversations` executes deterministic catalog-only lookups against `conversations`
@@ -141,7 +169,10 @@ Post-commit receipt serialization is a response contract only (ADR 0036). The sh
 builder in `src/writes.ts` sizes a receipt to at most 49,152 serialized UTF-8 bytes and may shed
 optional readback or error detail into `omitted` and `readback_requests`; it does not rewrite
 canonical R2 objects, reduce verification depth, change revision identity, or alter index
-generation state. Everything below is unchanged by receipt size.
+generation state. `memory_edit_messages` routes its per-target results, verification readback, and
+revision-pinned `readback_requests` selectors through the same builder, so a durable edit always
+returns a bounded receipt even when indexing or verification fails after commit. Everything below is
+unchanged by receipt size.
 
 ## Deletion consistency
 

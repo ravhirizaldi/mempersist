@@ -70,6 +70,7 @@ describe("MCP server", () => {
       "memory_build_context",
       "memory_copy_conversations",
       "memory_delete_conversations",
+      "memory_edit_messages",
       "memory_empty_namespace",
       "memory_get_capabilities",
       "memory_get_context",
@@ -162,6 +163,12 @@ describe("MCP server", () => {
     expect(
       result.tools.find((tool) => tool.name === "memory_empty_namespace")?.annotations,
     ).toEqual({
+      readOnlyHint: false,
+      destructiveHint: true,
+      openWorldHint: false,
+      idempotentHint: false,
+    });
+    expect(result.tools.find((tool) => tool.name === "memory_edit_messages")?.annotations).toEqual({
       readOnlyHint: false,
       destructiveHint: true,
       openWorldHint: false,
@@ -298,6 +305,7 @@ describe("MCP server", () => {
       "memory_store",
       "memory_append",
       "memory_replace",
+      "memory_edit_messages",
       "memory_restore_revision",
     ]) {
       const schema = schemaFor(name);
@@ -589,6 +597,74 @@ describe("MCP server", () => {
       const result = await client.callTool({ name: "memory_restore_revision", arguments: args });
       expect(result.isError, JSON.stringify(args)).toBe(true);
     }
+  });
+
+  it("validates message edit request inputs", async () => {
+    const client = await connectedClient();
+    const edit = { source_node_id: "node-1", operation: "replace", text: "revised" };
+    const validBase = {
+      conversation_id: crypto.randomUUID(),
+      base_revision_id: "a".repeat(64),
+      edits: [edit],
+    };
+    const cases: Array<Record<string, unknown>> = [
+      { conversation_id: validBase.conversation_id, edits: [edit] },
+      { ...validBase, base_revision_id: "" },
+      { ...validBase, base_revision_id: "invalid" },
+      { ...validBase, conversation_id: "not-a-memory-id" },
+      { ...validBase, edits: [] },
+      {
+        ...validBase,
+        edits: Array.from({ length: 101 }, (_, index) => ({
+          source_node_id: `node-${index}`,
+          operation: "replace",
+          text: "revised",
+        })),
+      },
+      { ...validBase, edits: [edit, edit] },
+      { ...validBase, edits: [{ source_node_id: "node-1", operation: "delete", text: "x" }] },
+      {
+        ...validBase,
+        edits: [{ source_node_id: "node-1", operation: "replace", text: "x", separator: "\n\n" }],
+      },
+      {
+        ...validBase,
+        edits: [
+          { source_node_id: "node-1", operation: "append", text: "x", separator: "s".repeat(65) },
+        ],
+      },
+      { ...validBase, edits: [{ source_node_id: "   ", operation: "replace", text: "x" }] },
+      {
+        ...validBase,
+        edits: [{ source_node_id: "n".repeat(201), operation: "replace", text: "x" }],
+      },
+      { ...validBase, edits: [{ source_node_id: "node-1", operation: "replace", text: 42 }] },
+    ];
+    for (const args of cases) {
+      const result = await client.callTool({ name: "memory_edit_messages", arguments: args });
+      expect(result.isError, JSON.stringify(args).slice(0, 160)).toBe(true);
+    }
+  });
+
+  it("rejects message edits over the inline JSON write budget before touching storage", async () => {
+    const accesses: string[] = [];
+    const client = await connectedClient(recordingEnv(accesses));
+    const rejected = await client.callTool({
+      name: "memory_edit_messages",
+      arguments: {
+        conversation_id: crypto.randomUUID(),
+        base_revision_id: "a".repeat(64),
+        edits: [
+          { source_node_id: "node-1", operation: "replace", text: "a".repeat(600_000) },
+          { source_node_id: "node-2", operation: "replace", text: "a".repeat(600_000) },
+        ],
+      },
+    });
+
+    expect(rejected.isError).toBe(true);
+    expect(rejected.structuredContent).toBeUndefined();
+    expect(rejectionDetails(rejected).code).toBe("REQUEST_TOO_LARGE");
+    expect(accesses).toEqual([]);
   });
 
   it("validates conversation copy request inputs", async () => {
@@ -1094,10 +1170,16 @@ describe("MCP server", () => {
     expect(result.isError).toBeFalsy();
     const capabilities = capabilitiesOutputSchema.parse(result.structuredContent);
     expect(capabilities.protocol_version).toBe("1");
+    expect(capabilities.capabilities_version).toBe("2026-09-29");
     expect(capabilities.limits.max_tool_output_bytes).toBe(65536);
     expect(capabilities.limits.max_inline_json_write_bytes).toBe(1048576);
     expect(capabilities.tools.memory_store).toEqual({
       max_items: 1000,
+      max_request_bytes: 1048576,
+      supports_verify: true,
+    });
+    expect(capabilities.tools.memory_edit_messages).toEqual({
+      max_items: 100,
       max_request_bytes: 1048576,
       supports_verify: true,
     });
@@ -1118,6 +1200,7 @@ describe("MCP server", () => {
       "memory_build_context",
       "memory_copy_conversations",
       "memory_delete_conversations",
+      "memory_edit_messages",
       "memory_empty_namespace",
       "memory_get_capabilities",
       "memory_get_context",
@@ -1143,6 +1226,7 @@ describe("MCP server", () => {
       "memory_build_context",
       "memory_copy_conversations",
       "memory_delete_conversations",
+      "memory_edit_messages",
       "memory_get_context",
       "memory_get_conversation",
       "memory_get_conversations",

@@ -125,6 +125,9 @@ describe("Minimalist public pages", () => {
       const landing = await landingRoutes["/"]!(locale).text();
       expect(landing, locale).toContain("<code>memory_get_capabilities</code>");
       expect(landing, locale).toContain(
+        "<tr><td><code>memory_edit_messages</code></td><td>edit known message text (replace/append/prepend), revision-pinned and atomic</td></tr>",
+      );
+      expect(landing, locale).toContain(
         locale === "en"
           ? "returns the runtime limits contract"
           : "mengembalikan kontrak batas runtime",

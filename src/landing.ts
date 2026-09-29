@@ -290,6 +290,7 @@ export function landingPage(locale: Locale = "en"): Response {
         <tr><td><code>memory_store</code></td><td>durable new memory</td></tr>
         <tr><td><code>memory_append</code></td><td>extend a conversation, optimistic revision check</td></tr>
         <tr><td><code>memory_replace</code></td><td>replace its transcript, optimistic revision check</td></tr>
+        <tr><td><code>memory_edit_messages</code></td><td>edit known message text (replace/append/prepend), revision-pinned and atomic</td></tr>
         <tr><td><code>memory_restore_revision</code></td><td>restore historical revision, optimistic revision check</td></tr>
         <tr><td><code>memory_copy_conversations</code></td><td>lossless copy into another owned namespace</td></tr>
         <tr><td><code>memory_update_tags</code></td><td>change tags</td></tr>
@@ -710,6 +711,7 @@ function adrsPage(locale: Locale = "en"): Response {
     ["0035", "Cursor-driven batch conversation pagination"],
     ["0036", "Bounded mutation receipts"],
     ["0037", "Runtime capabilities and aggregate byte budgets"],
+    ["0038", "Message-edit provenance"],
   ];
   const rows = adrs
     .map(

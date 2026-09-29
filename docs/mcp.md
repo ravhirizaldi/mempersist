@@ -83,6 +83,7 @@ See [SKILLS.md](../SKILLS.md) for the memory conventions coding agents should fo
 | `memory_store`                 | title, tags, 1–1000 messages                                                      | bounded durable receipt plus queued index job                             |
 | `memory_append`                | conversation ID, base revision, tags, messages                                    | bounded optimistic durable receipt plus queued index job                  |
 | `memory_replace`               | conversation ID, base revision, messages                                          | bounded replacement receipt plus queued index job                         |
+| `memory_edit_messages`         | conversation ID, base revision, 1–100 unique source nodes, edits, verify          | per-target results; bounded durable receipt and index job                 |
 | `memory_update_tags`           | conversation ID, base revision, add/remove                                        | live tag list after revision-safe mutation                                |
 | `memory_restore_revision`      | conversation ID, revision ID, base revision, verify                               | restores head to historic revision; bounded durable receipt and index job |
 | `memory_copy_conversations`    | target_namespace, create_target_namespace, idempotency_key, 1–20 requests, verify | ordered per-item bounded durable receipts                                 |
@@ -102,7 +103,8 @@ committed.
 
 The intended client pattern is search → select → get context. Use `memory_append` for genuine
 continuation, `memory_replace` with the complete desired transcript when correcting or superseding a
-memory, `memory_restore_revision` to revert to an earlier known good revision without synthesizing
+memory, `memory_edit_messages` to revise the exact text of known messages in place when the complete
+transcript is not in context, `memory_restore_revision` to revert to an earlier known good revision without synthesizing
 duplicate transcripts, and `memory_copy_conversations` for lossless copying into another owned namespace.
 Administrative retry/reindex/integrity operations remain HTTP/CLI only so
 ordinary LLM tool calls cannot trigger expensive maintenance accidentally.
@@ -122,7 +124,7 @@ Output:
 ```json
 {
   "protocol_version": "1",
-  "capabilities_version": "2026-09-28",
+  "capabilities_version": "2026-09-29",
   "limits": {
     "max_tool_output_bytes": 65536,
     "recommended_tool_output_bytes": 49152,
@@ -140,6 +142,11 @@ Output:
       "supports_cursor": true
     },
     "memory_append": {
+      "max_items": 100,
+      "max_request_bytes": 1048576,
+      "supports_verify": true
+    },
+    "memory_edit_messages": {
       "max_items": 100,
       "max_request_bytes": 1048576,
       "supports_verify": true
@@ -167,7 +174,7 @@ never describe the caller's data volume, account, or Cloudflare billing plan.
 - `protocol_version` (`1`) identifies the shape of this document and of the rejection object
   described below. It changes only when a field is removed, renamed, or changes meaning: an additive
   optional field keeps the current value, a breaking shape change increments it.
-- `capabilities_version` (`2026-09-28`) identifies the set of enforced limits. It changes when any
+- `capabilities_version` (`2026-09-29`) identifies the set of enforced limits. It changes when any
   reported value or feature flag changes, including a change made in another module. Any change to a
   value reported by `memory_get_capabilities` updates `capabilities_version` in the same change, plus
   the documentation that quotes the value.
@@ -462,6 +469,215 @@ canonical objects directly.
      `durable: true` with `indexing.status: "failed"` or `verification.status: "failed"`. The restore itself
      is committed and durable. See [recovery](operations-and-recovery.md).
 
+## Message editing
+
+`memory_edit_messages` edits the text of 1–100 existing messages inside one owned conversation
+without resubmitting the complete transcript. It loads and integrity-checks the exact
+`base_revision_id` from canonical R2 storage, validates every edit against the complete canonical
+graph, persists a new immutable revision, and only then advances the D1 head with the same
+optimistic compare-and-swap used by `memory_append`, `memory_replace`, and
+`memory_restore_revision`. Every non-targeted node, inactive branch, graph relationship, raw field,
+and anomaly is preserved; the previous revision and its original text remain immutable and readable
+through revision-pinned reads. The new revision durably records edit provenance (`edit_messages`,
+its base revision, the targeted source nodes and operations, and the edit timestamp) inside the
+hash-covered canonical segment; it is absent on every non-edit revision and exposes no internal
+storage keys through MCP.
+
+Use it for a typo fix, a factual correction, a prepended notice, or appended content on a message
+whose `source_node_id` is already known. Use `memory_append` for new message nodes and
+`memory_replace` only when the complete desired transcript is in hand.
+
+### Annotations
+
+- `readOnlyHint`: `false`
+- `destructiveHint`: `true` (supersedes current message text; the prior revision stays readable)
+- `openWorldHint`: `false`
+- `idempotentHint`: `false` (a successful request advances the head, so replaying the same
+  `base_revision_id` conflicts)
+
+### Inputs
+
+```json
+{
+  "conversation_id": "<conversation ID>",
+  "base_revision_id": "<expected current revision ID>",
+  "edits": [
+    {
+      "source_node_id": "<source node ID>",
+      "operation": "replace",
+      "text": "Complete replacement text"
+    },
+    {
+      "source_node_id": "<another source node ID>",
+      "operation": "append",
+      "text": "Additional content",
+      "separator": "\n\n"
+    }
+  ],
+  "verify": true
+}
+```
+
+- `conversation_id`: memory UUID or 64-character hexadecimal conversation ID.
+- `base_revision_id`: required 64-character hexadecimal revision ID the caller expects to be current.
+- `edits`: 1–100 edits for one conversation. Every `source_node_id` must be unique within the
+  request; two edits to the same node are rejected as an input validation error.
+  `source_node_id` is the exact canonical node ID exposed by compact and canonical reads.
+- `operation`: exactly `replace`, `append`, or `prepend`.
+- `text`: exact input, never a regex, diff, or fuzzy patch; at most `max_message_content_chars`
+  (1,000,000) characters.
+- `separator`: accepted only for `append` and `prepend`; defaults to `"\n\n"` and is limited to 64
+  characters. `replace` with a `separator` is rejected as an input validation error.
+- `verify`: optional boolean (default `false`), consistent with the other verified writes.
+
+Only message text is editable. Node identities (`source_node_id`), roles, and each node's
+`createdAt` are preserved, as are graph structure, parent/child relationships, branch membership,
+active-path position, titles, tags, namespaces, ownership, and metadata; none of these are accepted
+as input. Server-managed timestamps advance on change: every changed target's node `updatedAt` and
+the conversation `updatedAt` are set to the edit time, while unchanged targets keep their existing
+`updatedAt`. A `no_change` request commits nothing and leaves all timestamps untouched. User IDs,
+namespace-owner IDs, R2 keys, manifest or segment keys, and internal node IDs are never accepted.
+
+### Deterministic text semantics
+
+For existing text `E`, supplied text `T`, and effective separator `S`:
+
+- `replace`: result is `T`.
+- `append`: result is `E + S + T`.
+- `prepend`: result is `T + S + E`.
+
+If either adjacent value is empty, `S` is omitted at that boundary: appending to an empty message
+yields `T`, prepending to an empty message yields `T`, and for `append`/`prepend` an empty `T`
+leaves `E` unchanged. The server never trims, normalizes whitespace, parses Markdown, infers
+headings, or reinterprets Unicode; only the existing canonical message validation and size limits
+apply. Empty final text is valid when it passes that validation.
+
+### Output
+
+```json
+{
+  "conversation_id": "<conversation ID>",
+  "previous_revision_id": "<base revision ID>",
+  "revision_id": "<new revision ID>",
+  "status": "edited",
+  "edits": [
+    {
+      "request_index": 0,
+      "source_node_id": "<source node ID>",
+      "operation": "replace",
+      "status": "edited"
+    },
+    {
+      "request_index": 1,
+      "source_node_id": "<another source node ID>",
+      "operation": "append",
+      "status": "unchanged"
+    }
+  ],
+  "durable": true,
+  "indexing": {
+    "status": "queued",
+    "job_id": "<job ID>"
+  },
+  "verification": {
+    "status": "passed",
+    "revision_id": "<new revision ID>",
+    "checked_messages": 2,
+    "readback_available": true,
+    "readback": {
+      "conversation": {
+        "id": "<conversation ID>",
+        "revisionId": "<new revision ID>",
+        "title": "Synthetic state",
+        "namespace": "personal",
+        "tags": []
+      },
+      "messages": [
+        {
+          "sourceNodeId": "<source node ID>",
+          "role": "assistant",
+          "text": "Final exact message text",
+          "createdAt": "2026-09-11T00:00:00.000Z",
+          "updatedAt": "2026-09-29T00:00:00.000Z"
+        }
+      ],
+      "offset": 0,
+      "nextOffset": null,
+      "total": 2,
+      "oversizedMessage": null
+    }
+  },
+  "used_serialized_bytes": 2048,
+  "max_serialized_bytes": 49152
+}
+```
+
+`status` is `edited` when at least one target changed and `no_change` when none did. Every requested
+target appears in `edits`, in the same order as the request, with `request_index` (its zero-based
+position in the submitted `edits` array), `source_node_id`, `operation`, and its own `status` of
+`edited` or `unchanged`. `indexing` is present only when a new revision was committed, so a
+`no_change` receipt omits it. Readback contains only the targeted messages, not the full
+conversation. `verification.checked_messages` counts the targets the server compared, and
+`verification.readback_available` is present whenever verification ran; when the targeted page
+exceeds the readback budget, verification still passes and returns `verification.readback_error`
+instead of an inline page.
+
+### Atomicity and no-op behavior
+
+- The request is atomic for the conversation. If any target is missing, duplicated, foreign,
+  malformed, oversized, or unsupported, no revision is created and no head changes.
+- If every computed final text exactly equals its current text, the receipt has
+  `status: "no_change"` with `revision_id` equal to the current revision, every edit is
+  `unchanged`, and no indexing job is queued.
+- If only some edits are unchanged, the changed edits are applied in one new revision and the
+  unchanged targets are reported explicitly.
+- The tool performs no substring matching, offsets, regular expressions, diffs, or semantic
+  similarity, and never inserts, deletes, moves, or reorders message nodes.
+
+### Unsupported content
+
+V1 edits messages whose canonical content is safely representable as text. If an edit would discard
+or ambiguously rewrite tool calls, attachments, multimodal parts, or other unsupported structured
+content, the whole request fails with `UNSUPPORTED_MESSAGE_CONTENT` and nothing is written. The
+server never coerces unsupported content silently.
+
+### Concurrency, tenancy, and retry
+
+1. **Optimistic concurrency**: the head update executes a D1 compare-and-swap matching
+   `conversations.current_revision_id = base_revision_id`, and the base is re-validated at the head
+   transition rather than only when the R2 revision loads. A stale `base_revision_id` fails with
+   `IMPORT_CONFLICT` (HTTP 409) and cannot overwrite concurrent work; the prepared revision is never
+   reachable as current and is never enqueued for indexing.
+2. **Retry guidance**: after a conflict, read the current revision (`memory_get_conversation` or
+   `memory_list_revisions`), review the target nodes and their current text again, recompute the
+   intended edits, and submit a new request with the new `base_revision_id`. Never blindly replay the
+   same edit against a different head.
+3. **Tenancy and ownership**: the conversation is scoped to the authenticated user and an owned
+   namespace, and account/namespace writability is enforced before any canonical work begins. Missing,
+   deleted, foreign, and unowned conversations return the same `NOT_FOUND` error, so a foreign
+   `base_revision_id` or `source_node_id` reveals nothing about whether it exists. Errors never include
+   previous message text.
+
+### Durability, indexing, and verification
+
+- The new revision is persisted to R2 before the D1 head advances, and the normal indexing job is
+  queued only after the head transition succeeds. Derived FTS and Vectorize results resolve to the new
+  current revision, so text from an older revision is not returned as current memory.
+- Canonical durability is authoritative even when queueing fails: a committed edit returns
+  `durable: true` with `indexing.status: "failed"` and `indexing.error.code: "DERIVED_INDEXING"`, and
+  remains recoverable through normal retry or reindex operations. A queued status only acknowledges
+  scheduling.
+- `verify: true` reloads the committed revision from R2, validates canonical integrity, and compares
+  the final text of every requested target, including targets whose inline readback was omitted.
+- The receipt is the shared bounded mutation receipt produced by the same builder as the other write
+  tools: maximum 49,152 bytes (48 KiB), identity/durable/status fields never shed, and verbose data
+  shed in the documented ladder order with shed paths listed in `omitted`. Inline readback is greedy
+  and targeted; when it does not fit, the receipt carries revision-pinned `readback_requests`
+  selectors that are directly usable as `memory_get_conversations` first-call `requests` (loop
+  `nextCursor` until `null`). Edit selectors pin `branch: "all"`, so a target on an inactive branch
+  remains reachable; oversized readback therefore never becomes a post-commit tool error.
+  See [Verified writes](#verified-writes) and ADR 0036.
+
 ## Conversation copy
 
 `memory_copy_conversations` performs a lossless canonical copy of 1–20 owned conversations into
@@ -605,7 +821,10 @@ full contract. In brief:
   `verification.readback_available: true`: `conversation_id`, `revision_id`, `offset` (0 for copies),
   `limit` 20, and `branch: "active"`. These objects are exactly a valid first-call `requests` payload
   for `memory_get_conversations`; passing them back returns the pinned canonical pages, and looping its
-  `nextCursor` until `null` completes the readback. It is absent when no item qualifies.
+  `nextCursor` until `null` completes the readback. It is absent when no item qualifies. (Copy,
+  store, append, replace, and restore selectors pin `branch: "active"`; `memory_edit_messages`
+  selectors instead pin `branch: "all"` so inactive-branch targets stay reachable — see
+  [Verified writes](#verified-writes).)
 - `omitted` lists the field paths shed to fit the budget; it is absent when nothing was shed.
 - `used_serialized_bytes` and `max_serialized_bytes` report the exact serialized size of this receipt and
   the budget it was fitted against.
@@ -1025,7 +1244,8 @@ single context pack.
 
 ## Verified writes
 
-`memory_store`, `memory_append`, `memory_replace`, and `memory_restore_revision` accept
+`memory_store`, `memory_append`, `memory_replace`, `memory_edit_messages`, and
+`memory_restore_revision` accept
 `verify: true` (default false). Every write, verified or not, returns a **bounded mutation
 receipt**: the durable outcome of the mutation plus its post-commit indexing and verification
 state. The response keeps `conversation_id`, `previous_revision_id`, `revision_id`, `durable`,
@@ -1075,9 +1295,12 @@ and `indexing`, and adds a verification block when requested:
 
 This is a shape illustration; real `messages` contain persisted compact messages that fit
 the page. Verification reloads the **specific committed revision from R2**, checks its
-content integrity, and compares all intended messages, roles, and supplied timestamps.
+content integrity, and compares all intended messages, roles, and supplied timestamps
+(`memory_edit_messages` supplies none, so it instead re-checks each target's preserved role and
+`createdAt`).
 Append readback includes only newly appended messages, with their original active offsets.
-Store/replace starts at zero. Readback contains at most 100 messages and 48 KiB, with explicit
+Store/replace starts at zero. Message editing returns only the targeted messages, in compact form.
+Readback contains at most 100 messages and 48 KiB, with explicit
 pagination; verification itself checks all intended messages. Readback tags are the saved
 revision snapshot. `verification.readback_available` is always present when verification ran:
 `false` means no inline readback was produced, and `verification.readback_error`
@@ -1091,8 +1314,8 @@ complete. The server cannot detect facts the AI omitted from its own request.
 
 Every write tool emits the same bounded receipt, including each per-item receipt of
 `memory_copy_conversations`. The envelope is flat for singles
-(`memory_store`/`memory_append`/`memory_replace`/`memory_restore_revision`) and `results`-wrapped
-for the bulk copy; both add `readback_requests` and `omitted` only when they are non-empty, plus
+(`memory_store`/`memory_append`/`memory_replace`/`memory_edit_messages`/`memory_restore_revision`) and
+`results`-wrapped for the bulk copy; both add `readback_requests` and `omitted` only when they are non-empty, plus
 `used_serialized_bytes` and `max_serialized_bytes` always.
 
 The budget is a documented safe maximum of **49,152 bytes (48 KiB)**, below the 64 KiB MCP
@@ -1115,9 +1338,12 @@ These fields are never shed: `request_index`, `status`, `conversation_id`,
 `previous_revision_id`, `revision_id`, `durable`, `indexing.status`, `verification.status`,
 `verification.revision_id`, `verification.readback_available`, and `error.code`. `readback_requests`
 entries are exactly a valid first-call `requests` payload for `memory_get_conversations`
-(`conversation_id`, `revision_id`, `offset`, `limit` 20, `branch: "active"`); `offset` is the
-verification page offset (0 for copies). Passing them back and
-looping `nextCursor` until `null` completes readback that was shed from the receipt.
+(`conversation_id`, `revision_id`, `offset`, `limit` 20, and `branch`); `offset` is the
+verification page offset (0 for copies). `branch` is `"active"` for `memory_store`, `memory_append`,
+`memory_replace`, `memory_restore_revision`, and each `memory_copy_conversations` item, but `"all"`
+for `memory_edit_messages`, whose targets may sit on an inactive branch that an active-branch page
+would omit. Passing these selectors back and looping `nextCursor` until `null` completes readback
+that was shed from the receipt.
 
 Because the envelope is measured and shed before serialization, this holds even when verbose data
 does not fit. A durable committed mutation never becomes a generic response-size error; the 64 KiB
@@ -1136,8 +1362,8 @@ and a categorized error, so a committed write is never lost to a later step:
 
 Never blindly repeat a committed mutation. `memory_copy_conversations` is idempotent: replaying the
 identical request with the same `idempotency_key` returns the existing durable receipt. The
-non-idempotent tools (`memory_store`, `memory_append`, `memory_replace`, `memory_restore_revision`)
-must inspect the current head (for example with `memory_list_revisions` or
+non-idempotent tools (`memory_store`, `memory_append`, `memory_replace`, `memory_edit_messages`,
+`memory_restore_revision`) must inspect the current head (for example with `memory_list_revisions` or
 `memory_get_conversation`) before retrying, so a durable commit is not duplicated. Canonical write
 failures and revision conflicts still return tool errors without a success receipt. See
 [recovery](operations-and-recovery.md).

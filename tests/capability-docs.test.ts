@@ -4,6 +4,7 @@ import {
   BATCH_RESPONSE_BYTES,
   MAX_APPEND_MESSAGES,
   MAX_DIRECT_IMPORT_BYTES,
+  MAX_EDIT_MESSAGES,
   MAX_INLINE_JSON_WRITE_BYTES,
   MAX_MESSAGE_CONTENT_CHARS,
   MAX_MULTIPART_PART_BYTES,
@@ -149,6 +150,12 @@ const claims: Claim[] = [
     claim: "100 append message maximum",
     pattern: /"memory_append": \{\s+"max_items": ([\d,]+)/u,
     expected: [MAX_APPEND_MESSAGES],
+  },
+  {
+    file: "docs/mcp.md",
+    claim: "100 edit message maximum",
+    pattern: /"memory_edit_messages": \{\s+"max_items": ([\d,]+)/u,
+    expected: [MAX_EDIT_MESSAGES],
   },
 ];
 

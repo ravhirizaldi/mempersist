@@ -72,6 +72,44 @@ continuation calls. An `oversizedMessage` is an explicit blocker at that offset;
 message-count limit cannot split it. Retrieve the original through an authorized canonical
 HTTP read/export and do not silently skip it.
 
+## Amend an existing message
+
+Use `memory_edit_messages` to change the text of one or more known messages without resubmitting the
+transcript. Send `conversation_id`, the exact `base_revision_id` you read, and 1–100 `edits`; each
+edit names a `source_node_id` that is unique within the request with `operation` `replace`, `append`,
+or `prepend`. `separator` is accepted only for `append`/`prepend` and defaults to a blank line; it is
+omitted at a boundary where either side is empty.
+
+1. Read first (`memory_get_conversation`, compact or canonical), retain the revision ID, and copy the
+   exact `sourceNodeId` values you intend to edit. The server applies the change against the pinned
+   base revision, so you do not need the complete transcript in context and cannot drop pages,
+   branches, metadata, or anomalies by reconstructing it.
+2. Submit one atomic request. Every target must exist in that revision; duplicate, missing, foreign,
+   malformed, oversized, or unsupported targets fail the whole request with no new revision and no
+   head change. Roles, timestamps, graph structure, titles, tags, namespaces, and message-node
+   identities are not editable here.
+3. Read the result by status. `status: "no_change"` means every computed text already matched, so no
+   revision or indexing job was created. Otherwise the returned `revision_id` supersedes
+   `previous_revision_id`, and each `edits[].status` reports `edited` or `unchanged`; a mixed request
+   still commits one revision and rewrites only the changed targets.
+4. Inspect `durable`, `indexing`, and `verification` independently, as for other writes. The head
+   advance is a compare-and-swap against `base_revision_id`, so a stale base fails with the existing
+   conflict error instead of overwriting concurrent work; the prepared revision is not made current
+   and is not queued. Queuing happens only after the head transition, and every older revision stays
+   immutable and readable for branch exploration or `memory_restore_revision`.
+5. On conflict, re-read the current revision, re-resolve the target nodes, recompute intent, and send
+   a new request. Never replay an edit against a different head. A post-commit indexing or
+   verification failure is not a failed edit: the write is durable, so inspect the returned revision
+   rather than repeating it.
+
+Verification rechecks every requested target against the committed R2 revision even when inline
+readback is omitted; `verification.readback_available` stays independent of what fit. When readback
+text is shed, the receipt lists the `omitted` paths and returns revision-pinned `readback_requests`
+selectors. Send those as the `requests` array of a first-call `memory_get_conversations`, then repeat
+`memory_get_conversations({ cursor: nextCursor })` with only that cursor until `nextCursor` is
+`null`; each selector pins the committed `revision_id`. Shedding is disclosure, not a verification
+failure, and no canonical text is lost.
+
 ## Runtime-rule amendment for review
 
 This passage is a proposed maintenance edit, **not applied to any stored runtime rules**.
@@ -95,7 +133,10 @@ appending anything. Preserve unrelated rules and owner references verbatim.
 > before declaring the save reviewed. Persistence verification cannot detect facts omitted
 > from the write request. Report durability, verification, and indexing separately. Never
 > repeat a committed write merely because verification or indexing failed. No multi-owner
-> atomicity is assumed.
+> atomicity is assumed. Amend a known message only with `memory_edit_messages`, sending the pinned
+> base revision and the exact `source_node_id` for each `replace`/`append`/`prepend` edit; an
+> all-unchanged request is a bounded `no_change` that queues no index job, and after a stale-base
+> conflict re-read the head instead of replaying the same edit.
 
 Repair broken owner references and disagreeing arc pointers in a separately authorized
 maintenance pass. Do not guess replacement IDs. Revision-aware unchanged responses,

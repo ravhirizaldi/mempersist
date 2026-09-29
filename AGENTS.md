@@ -77,6 +77,11 @@ Keep errors categorized with `AppError`. Validate every external JSON/query/path
 
 ## Search rules
 
+For natural-language repository discovery, use the installed `jg` (Jevgrep) first: `jg "<question>" .`.
+Do not use standard `grep`, `rg`, or shell text search for semantic/codebase discovery.
+Use exact-path reads or `grep` only for exact literals/patterns, known narrow ranges, generated/output validation, or when `jg` cannot answer the question.
+If `jg` is unavailable or unauthenticated, report that and ask the user to run `jg auth`; never request provider credentials in chat.
+
 Changes to the embedding model, dimensions, chunk strategy, token estimator, RRF constant, semantic threshold, recency boost, exact/title boosts, FTS query construction, Vectorize metadata, or deduplication require:
 
 1. deterministic unit tests;

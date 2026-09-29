@@ -36,7 +36,11 @@ Do not store routine commits, "I did X" churn, or facts you can read from the re
    descriptive nouns, not commands.
 4. **Update, never duplicate.** Use `memory_replace` to correct or supersede an existing memory,
    sending the complete intended message list and the `base_revision_id` returned by the previous
-   store/append/replace/restore. Use `memory_append` only for genuine continuation. Use `memory_restore_revision`
+   store/append/replace/edit/restore. Use `memory_edit_messages` to change the exact text of known
+   messages (`replace`, `append`, or `prepend`; `separator` applies only to append/prepend, defaults
+   to `"\n\n"`, and is omitted when either side is empty) without resubmitting the transcript; a
+   stale `base_revision_id` conflicts, so reread the current revision and recompute the edit before
+   retrying. Use `memory_append` only for genuine continuation. Use `memory_restore_revision`
    to restore an owned conversation to any historical revision using `base_revision_id` optimistic concurrency
    and an immutable head transition without creating duplicate canonical revisions. Use `memory_copy_conversations`
    for forks/templates/promotion between owned namespaces; search both namespaces if a copy exists.
@@ -47,8 +51,9 @@ Do not store routine commits, "I did X" churn, or facts you can read from the re
    tools; if search returns nothing, say memory is empty for that project.
 
 Call `memory_list_revisions` when you need a revision id you did not retain, or when
-reviewing what an earlier `memory_append`, `memory_replace`, or `memory_restore_revision` committed. It returns metadata
-only — newest first, with the snapshot head identified — and each returned `revision_id`
+reviewing what an earlier `memory_append`, `memory_replace`, `memory_edit_messages`, or
+`memory_restore_revision` committed. It returns metadata only — newest first, with the snapshot head
+identified — and each returned `revision_id`
 pins that historical revision for `memory_get_conversation` or `memory_restore_revision`. Follow `next_cursor` for older
 history; `current_revision_id` stays pinned, and only the page containing it has
 `current: true`.
@@ -117,6 +122,7 @@ suggested minimums without leaking text. The tool is strictly read-only and extr
 | `memory_store`                 | durable new memory (claims `project/<slug>` on first write) + bounded receipt |
 | `memory_append`                | extend an existing conversation, optimistic revision check, bounded receipt   |
 | `memory_replace`               | replace its transcript, optimistic revision check, bounded receipt            |
+| `memory_edit_messages`         | edit exact text of 1–100 source nodes, bounded receipt                        |
 | `memory_restore_revision`      | restore historical revision, optimistic revision check, bounded receipt       |
 | `memory_copy_conversations`    | lossless copy into another owned namespace, per-item bounded receipts         |
 | `memory_update_tags`           | change tags on an existing conversation                                       |
