@@ -1,250 +1,254 @@
-# Mempersist
+# MemPersist
 
-Mempersist is a clean-room, Cloudflare-native long-term memory service for AI conversations. It preserves original ChatGPT exports and normalized conversation graphs in R2, catalogs them in D1, builds disposable lexical and semantic indexes, and exposes compact retrieval and intentional writes through MCP.
+Long-term memory for AI conversations, running entirely on Cloudflare. Original ChatGPT
+exports and normalized conversation graphs live in R2, a D1 catalog makes them queryable,
+lexical and semantic indexes stay disposable, and MCP exposes compact retrieval plus
+intentional writes.
 
-It does not silently capture ChatGPT traffic, extract replacement “facts,” provide a SaaS billing layer, or make search indexes canonical. “Unlimited” means no application message quota; Cloudflare limits and billing still apply.
+|                  |                                                                   |
+| ---------------- | ----------------------------------------------------------------- |
+| **MCP endpoint** | `https://mempersist.codifiedtech.id/mcp`                          |
+| **Registry**     | `io.github.ravhirizaldi/mempersist` — version `1.0.1`             |
+| **Runtime**      | Workers, D1, R2, Queues, Workers AI (BGE-M3), Vectorize, OAuth KV |
+| **Protocol**     | MCP v2 over stateless Streamable HTTP, OAuth 2.1 with PKCE S256   |
+| **Scope**        | Single-operator V1, one Worker, one TypeScript package            |
+
+**What it does.** Preserves every uploaded ChatGPT export byte-for-byte, normalizes branches
+and node metadata into revision-pinned canonical JSONL, indexes derived FTS and vector data,
+and answers search, context, and batch reads with deterministic IDs. Writes are intentional,
+revision-checked, and durable before indexing is queued.
+
+**What it refuses to do.** It does not intercept ChatGPT traffic, extract replacement "facts",
+summarize with a model, or treat any index as canonical. No billing, organizations, or
+speculative multi-tenancy; no Durable Objects, Workflows, cron triggers, or containers. Deleting
+every chunk, FTS row, and vector does not delete memory. "Unlimited" means no application-level
+message quota — Cloudflare limits and billing still apply.
 
 ## Architecture
 
-```text
-ChatGPT conversations.json / MCP writes
-                  |
-          validation + IDs
-                  |
-          R2 canonical archive  <------ export / recovery
-                  |
-             D1 catalog
-                  |
-        Cloudflare Queues
-          /             \
-   D1 FTS5          Workers AI BGE-M3 -> Vectorize
-          \             /
-       normalized hybrid search
-                  |
-       HTTP + OAuth-protected MCP
+```mermaid
+flowchart TD
+  IN["ChatGPT conversations.json or MCP writes"] --> V["Validation and stable IDs"]
+  V --> R2[("R2 canonical archive<br/>raw import + immutable revisions")]
+  R2 --> D1[("D1 catalog<br/>imports, revisions, graph, R2 pointers")]
+  D1 --> Q["Cloudflare Queues<br/>import and index jobs"]
+  Q --> FTS[("D1 FTS5<br/>lexical chunks")]
+  Q --> AI["Workers AI BGE-M3"] --> VEC[("Vectorize<br/>embeddings")]
+  FTS --> SEARCH["Normalized hybrid search<br/>plus recent-canonical fallback"]
+  VEC --> SEARCH
+  SEARCH --> OUT["HTTP API and OAuth-protected MCP"]
+  R2 --> EXPORT["Lossless export and recovery"]
 ```
 
-R2 is the source of truth. D1 holds operational metadata and the derived FTS representation. Vectorize is disposable. A canonical write succeeds before indexing is queued, and an indexing failure never reports that durable memory was lost.
+R2 is the source of truth. A canonical write completes before its index job is queued, and an
+indexing failure never reports that durable memory was lost. Rebuilds read R2, so an export
+never needs to be uploaded twice. Full detail in [ARCHITECTURE.md](ARCHITECTURE.md) and
+[docs/storage-and-indexing.md](docs/storage-and-indexing.md).
 
-See [ARCHITECTURE.md](ARCHITECTURE.md), [SECURITY.md](SECURITY.md), and [docs/operations-and-recovery.md](docs/operations-and-recovery.md).
-
-## Prerequisites
-
-- WSL2/Linux, Node.js 22+, Yarn 1.22, and Wrangler 4.x
-- A Cloudflare account with Workers, D1, R2, Vectorize, Workers AI, and Queues available
-- Wrangler OAuth authentication: `yarn wrangler whoami`
-
-Use Yarn only.
-
-## Setup
+## Quickstart
 
 ```bash
 yarn install
-cp .dev.vars.example .dev.vars
+cp .dev.vars.example .dev.vars   # set a long random MEMORY_API_TOKEN
 yarn types:bindings
 yarn db:migrate:local
 yarn dev
 ```
 
-Set a long random `MEMORY_API_TOKEN` in `.dev.vars`. Local D1 and R2 are simulated; Workers AI and Vectorize bindings are remote in the main configuration. Unit and integration tests do not call remote AI.
+Requires WSL2/Linux, Node.js 22+, Yarn 1.22, and Wrangler 4.x authenticated with
+`yarn wrangler whoami`. Use Yarn only. Local D1, R2, KV, and Queues are simulated; Workers AI and
+Vectorize point at real remote bindings in the main configuration, while unit and integration
+tests never call remote AI.
 
-## Cloudflare provisioning
+## Connect a client
 
-Provisioning is intentionally manual and must be explicitly authorized. Follow [docs/cloudflare-resources.md](docs/cloudflare-resources.md), then add the real D1 `database_id` returned by Wrangler to `wrangler.jsonc`. Never invent IDs or reuse unrelated account resources.
+### ChatGPT
 
-Set the production secret without putting it in source:
+Add `https://mempersist.codifiedtech.id/mcp` as a custom MCP app in Developer mode. ChatGPT
+discovers OAuth automatically, opens the consent page, and keeps the issued access and refresh
+tokens. Never paste `MEMORY_API_TOKEN` into a connector. Already-configured connections keep
+working across upgrades without re-authorization; the legacy hostname stays supported, and moving
+one client to the primary hostname costs exactly one new authorization.
 
-```bash
-yarn wrangler secret put MEMORY_API_TOKEN
+### Coding agents
+
+Codex (`~/.codex/config.toml`, or project-scoped `.codex/config.toml`):
+
+```toml
+[mcp_servers.mempersist]
+type = "remote"
+url = "https://mempersist.codifiedtech.id/mcp"
+# auth = "oauth" is the default; run `codex mcp login mempersist` to authorize
 ```
 
-Apply migrations and deploy only after review:
+Claude Code: `claude mcp add --transport http mempersist https://mempersist.codifiedtech.id/mcp`,
+then complete the email prompt. Cursor, the ChatGPT desktop app, and the IDE extension share the
+Codex configuration.
+
+### Local, without deploying
+
+The MCP audience is deployment configuration, so point a development server at itself:
 
 ```bash
-yarn db:migrate:remote
-yarn deploy:dry-run
-yarn deploy
+yarn dev --local --port 8787 --local-protocol https \
+  --var MCP_ORIGIN_OVERRIDE:https://127.0.0.1:8787
 ```
+
+Discovery, consent, and token audiences then use `https://127.0.0.1:8787`, and both the
+`.dev.vars` developer token and the full OAuth flow work. Local `send_email` writes each magic
+link to `.wrangler/tmp/email/<id>/email-text/`. See
+[docs/development.md](docs/development.md).
+
+### Authentication
+
+Interactive clients use the OAuth 2.1 authorization-code flow with PKCE S256. The consent page
+takes an email and sends a single-use, 15-minute magic link through the `EMAIL` binding; the
+connection completes only after that link is opened. An existing email reconnects to its archive.
+The single scope is `memory`, and the sender address is configuration
+(`AUTH_EMAIL_FROM`, `LEGACY_AUTH_EMAIL_FROM`), not part of the API contract.
+
+Developer clients may send `Authorization: Bearer <MEMORY_API_TOKEN>` instead, which always maps
+to the owner archive. Every account may own multiple namespaces; the same namespace name in two
+accounts is separate data. A supplied `namespace` is honored only when the caller owns it.
+
+## Tools
+
+21 tools, each carrying a human-readable title and read-only or destructive annotations. Retrieve
+first, then expand only what you selected.
+
+### Read
+
+| Tool                           | Title                 | Notes                                                           |
+| ------------------------------ | --------------------- | --------------------------------------------------------------- |
+| `memory_search`                | Search memories       | Hybrid search, up to 20 compact references; tag filters         |
+| `memory_get_context`           | Get memory context    | Canonical messages around one result chunk, up to 10 each way   |
+| `memory_get_conversation`      | Get conversation      | Page one conversation's active timeline or full graph           |
+| `memory_get_conversations`     | Get conversations     | Revision-pinned batch read of 1–20 conversations, cursor-paged  |
+| `memory_list_conversations`    | List conversations    | Metadata and tags only, no bodies                               |
+| `memory_list_revisions`        | List revisions        | Immutable revision history, newest first                        |
+| `memory_resolve_conversations` | Resolve conversations | Exact-title lookup, no semantic search                          |
+| `memory_list_namespaces`       | List namespaces       | Owned namespaces with conversation counts                       |
+| `memory_stats`                 | Get memory statistics | Per-namespace counts and indexing health                        |
+| `memory_import_status`         | Get import status     | Import progress, duplicate, or failure                          |
+| `memory_get_capabilities`      | Get capabilities      | The deployed contract: versions, limits, per-tool bounds, flags |
+
+### Context assembly
+
+| Tool                   | Title                | Notes                                                                                                                           |
+| ---------------------- | -------------------- | ------------------------------------------------------------------------------------------------------------------------------- |
+| `memory_build_context` | Build memory context | Deterministic, revision-pinned pack from 1–20 required conversations, optional hybrid evidence, explicit token and byte budgets |
+
+### Write
+
+Each write returns a bounded durable receipt with separate indexing and verification status, and
+accepts `verify: true` to reload the committed R2 revision.
+
+| Tool                        | Title                   | Notes                                                                  |
+| --------------------------- | ----------------------- | ---------------------------------------------------------------------- |
+| `memory_store`              | Store memory            | New intentional memory; first write claims a namespace you name        |
+| `memory_append`             | Append memory           | Continue a conversation with `base_revision_id`                        |
+| `memory_replace`            | Replace memory          | Supersede with a complete transcript, preserving identity and tags     |
+| `memory_edit_messages`      | Edit memory messages    | Edit 1–100 known source nodes in place; structured content is rejected |
+| `memory_restore_revision`   | Restore memory revision | Move the head back to a historical revision, no duplicate revision     |
+| `memory_copy_conversations` | Copy conversations      | Lossless R2 copy into another owned namespace, idempotency-keyed       |
+| `memory_update_tags`        | Update memory tags      | Add or remove tags under optimistic concurrency                        |
+
+### Admin
+
+| Tool                          | Title                | Notes                                                   |
+| ----------------------------- | -------------------- | ------------------------------------------------------- |
+| `memory_delete_conversations` | Delete conversations | Up to 100, canonical and derived data together          |
+| `memory_empty_namespace`      | Empty namespace      | Bounded, resumable batch empty after exact confirmation |
+
+Retry, reindex, and integrity commands stay HTTP/CLI only so a model cannot trigger expensive
+maintenance. Full tool contracts, receipts, and batch semantics live in [docs/mcp.md](docs/mcp.md).
+
+## Limits
+
+`memory_get_capabilities` is the single contract: it reports the constants the transports
+enforce, so a quoted figure cannot drift from its enforcement. Deployed values:
+
+| Limit                                       | Value                      |
+| ------------------------------------------- | -------------------------- |
+| MCP tool output guard                       | 65,536 bytes (64 KiB)      |
+| Recommended tool output / receipt ceiling   | 49,152 bytes (48 KiB)      |
+| Inline JSON write on both transports        | 1,048,576 bytes (1 MiB)    |
+| Direct import body, and each multipart part | 16,777,216 bytes (16 MiB)  |
+| Single message content                      | 1,000,000 characters       |
+| Batch conversation read response            | 32 KiB default, 48 KiB max |
+| Protocol version / capabilities version     | `1` / `2026-09-29`         |
+
+Aggregate limits are the UTF-8 bytes of the complete serialized request, measured before any
+canonical work. An oversized request writes nothing and fails with
+`REQUEST_TOO_LARGE` (`retryable: false`) plus a conservative `suggested_max_items` estimate —
+never a silent truncation.
 
 ## ChatGPT import
 
-Export data from ChatGPT, extract `conversations.json`, then:
+Export your data from ChatGPT, extract `conversations.json`, then:
 
 ```bash
 MEMPERSIST_URL=http://localhost:8787 \
 MEMPERSIST_TOKEN='your-token' \
 yarn import:chatgpt /path/to/conversations.json
-```
 
-Files up to 16 MiB use direct streaming upload. Larger files use 16 MiB R2 multipart parts — the
-deployed `max_direct_import_bytes` and `max_multipart_part_bytes` values from
-`memory_get_capabilities`. The Worker hashes the completed object, preserves it unchanged, detects
-exact duplicate exports, and processes at most 25 conversations per queue turn. Check progress with:
-
-```bash
 MEMPERSIST_TOKEN='your-token' yarn import:status <import-id>
 ```
 
-See [docs/chatgpt-import.md](docs/chatgpt-import.md).
-
-## MCP
-
-The Streamable HTTP endpoint is `https://<worker>/mcp`. Interactive clients such as ChatGPT
-use OAuth 2.1 authorization-code flow with PKCE: the consent page takes an email, sends a
-single-use magic link, and completes the connection only after the link is opened. An existing
-email reconnects to its archive; a new archive is created after the first link. Each account can
-own multiple namespaces, and the same namespace name may exist in different accounts with fully
-separated data.
-Developer scripts and the CLI may keep sending `MEMORY_API_TOKEN` as a bearer token for the
-owner archive.
-
-Email authentication uses the `EMAIL` send binding. The sending address per endpoint is
-configuration (`AUTH_EMAIL_FROM`, `LEGACY_AUTH_EMAIL_FROM`), not part of the API contract.
-
-The public site, OAuth pages, and magic-link email support English and Bahasa Indonesia. Use the
-language switcher to persist a browser preference; otherwise MemPersist uses `Accept-Language` and
-falls back to English. API, MCP, and CLI contracts remain English.
+The uploaded bytes are stored unchanged and hashed server-side; exact duplicates are marked
+`duplicate` and never reprocessed. One queue turn processes 25 conversations from an ordinal
+checkpoint, so retries are safe and resumable. Larger files use R2 multipart upload. Unknown
+fields, alternate branches, and graph anomalies stay recoverable. See
+[docs/chatgpt-import.md](docs/chatgpt-import.md).
 
 ## Dashboard
 
-Open `/login` for passwordless access to the server-rendered dashboard. It includes archive totals,
-a deterministic memory map, revision-pinned canonical conversation reading, display-name editing,
-and a streamed lossless export of current memory. Namespace emptying runs asynchronously. Account
-deletion has a seven-day cancelable grace period and makes writes read-only while pending.
+Open `/login` for passwordless access to the server-rendered dashboard: archive totals, the
+deterministic memory map, revision-pinned canonical reading, display-name editing, and a streamed
+lossless export. Namespace emptying runs asynchronously; account deletion has a seven-day
+cancelable grace period and makes writes read-only while pending. No frontend framework or extra
+Cloudflare resource is required. See [docs/dashboard.md](docs/dashboard.md) and
+[ADR 0028](docs/adr/0028-passwordless-dashboard-export-and-deletion.md).
 
-See [docs/dashboard.md](docs/dashboard.md) and ADR 0028. No frontend framework, extra dependency,
-or additional Cloudflare resource is required.
+The public site, OAuth pages, and magic-link email are available in English and Bahasa Indonesia;
+API, MCP, and CLI contracts remain English.
 
-For the deployed Worker, add `https://mempersist.codifiedtech.id/mcp` as a custom MCP app in
-ChatGPT Developer mode. ChatGPT discovers OAuth automatically, opens the consent page, and
-stores the issued access/refresh tokens. Existing connections keep working after upgrades
-without re-authorization. Clients already configured with the legacy endpoint remain
-supported; changing one to the primary endpoint requires one new authorization. Do not paste
-`MEMORY_API_TOKEN` into ChatGPT's connector settings.
-
-Available tools:
-
-- `memory_search`
-- `memory_get_context`
-- `memory_get_conversation`
-- `memory_get_conversations`
-- `memory_list_conversations`
-- `memory_list_revisions`
-- `memory_resolve_conversations`
-- `memory_build_context`
-- `memory_list_namespaces`
-- `memory_stats`
-- `memory_store`
-- `memory_append`
-- `memory_replace`
-- `memory_edit_messages`
-- `memory_restore_revision`
-- `memory_copy_conversations`
-- `memory_get_capabilities`
-
-`memory_store` and `memory_append` accept optional tags (lowercased, deduplicated, up to 20);
-`memory_search` filters by tags with AND semantics and returns each conversation's tags. See
-[docs/mcp.md](docs/mcp.md) and ADR 0013.
-
-- `memory_delete_conversations`
-- `memory_empty_namespace`
-- `memory_import_status`
-
-Search returns compact references; call `memory_get_context` only for selected results. See [docs/mcp.md](docs/mcp.md).
-
-`memory_get_capabilities` returns the deployed capability contract: protocol and capabilities
-versions, transport and message limits, per-tool item and byte bounds, and feature flags. The
-limits quoted below are the same enforced values it reports, so treat that tool as the single
-contract rather than independent figures. Aggregate limits are measured as UTF-8 bytes of the
-complete serialized request before any canonical write begins: inline JSON writes on both
-transports are limited to 1,048,576 bytes (1 MiB), and imports are limited to 16 MiB direct and
-16 MiB per multipart part. An oversized request fails with code `REQUEST_TOO_LARGE` and a
-conservative `suggested_max_items` estimate, never a silent truncation.
-
-For known memories, start `memory_get_conversations` with a `requests` array of 1–20
-conversation requests and optional `max_serialized_bytes` (default 32,768; minimum 4,096;
-maximum 49,152 — the deployed values `memory_get_capabilities` reports). A continuation sends
-exactly one opaque `cursor` plus the optional budget —
-never both `requests` and `cursor`, and never neither. Results use the established camelCase
-batch fields `batchId`, `results`, `completed`, `remaining`, `nextCursor`,
-`usedSerializedBytes`, and `maxSerializedBytes`; `results` retain `requestIndex` and isolate
-individual errors. The complete UTF-8 JSON response, including its envelope and cursor, stays
-within the requested budget and the reported 49,152-byte ceiling.
-
-The first call pins every resolved revision before canonical bodies load; cursor calls keep
-those pins, so concurrent writes cannot mix revisions. Its response lists every requested
-`requestIndex`, while a cursor response is sparse and lists only the indexes it touched; an
-omitted index is neither a failure nor a completion. Admit whole compact messages in
-deterministic round-robin order and loop on the returned cursor until `nextCursor` is null:
-
-```text
-call memory_get_conversations({ cursor: nextCursor })
-```
-
-Per-item `continuation` values remain available for compatibility, but are not the primary
-workflow. An oversized message returns bounded `page.oversizedMessage` metadata
-(`conversationId`, `revisionId`, `sourceNodeId`, `offset`, `bytes`) without text and advances
-cursor state; recover its complete content through an authorized canonical HTTP read or account
-export rather than retrying the same batch page. Single reads accept `format: "compact"`;
-canonical output remains the default. `memory_resolve_conversations` resolves up to 20 known
-conversation owners by exact title without semantic search, returning conversation IDs, current
-revision IDs, and live tags. `memory_list_revisions` returns the immutable revision
-history of one owned conversation (metadata only, newest first, cursor-paged), so a client can
-pin and read any earlier revision with `memory_get_conversation` instead of relying on a
-retained write receipt. `memory_restore_revision` restores an owned conversation to any historical
-revision with `base_revision_id` optimistic concurrency, recording an immutable head transition
-without creating redundant canonical revisions. `memory_copy_conversations` performs a lossless
-canonical R2 copy of 1–20 owned conversations into another owned namespace using a required
-`idempotency_key` and attaching first-class `derivedFrom` provenance, rather than a compact-message
-restorable via `memory_store`. `memory_edit_messages` edits the exact text of 1–100 unique source
-nodes in one conversation server-side — `replace`, `append`, or `prepend` — with a required
-`base_revision_id`, atomically and without resubmitting the transcript; unsupported structured or
-multimodal content is rejected rather than coerced. A stale `base_revision_id` conflicts instead of
-overwriting concurrent work, so reread the current revision and recompute the edit before retrying.
-Store/append/replace/edit/restore/copy accept `verify: true` to reload the
-committed R2 revision and return compact readback with separate indexing/verification status.
-
-Store, append, replace, edit, and restore return a bounded durable receipt: a committed revision
-reports `durable: true` with separate indexing and verification status, and the whole receipt is fitted to a
-documented safe maximum of 49,152 bytes (48 KiB) below the 64 KiB MCP tool guard — the deployed
-`max_receipt_bytes` and `max_tool_output_bytes` values from `memory_get_capabilities`. Inline readback is
-returned only when it fits; otherwise the receipt carries `readback_requests` — selectors that are
-directly reusable as `memory_get_conversations` first-call `requests` (loop `nextCursor` until `null`)
-— plus an `omitted` list naming the shed field paths. Fitting sheds verbose fields in a fixed order and
-never drops identity, durable, or status fields, so a durable committed mutation never becomes a
-generic response-size error.
-See the [RP workflow and reviewable runtime-rule amendment](docs/rp-workflow.md).
-
-For prompt and task execution, `memory_build_context` compiles a deterministic, revision-pinned context pack
-from 1–20 required canonical conversations (exact title or conversation ID, full or tail mode,
-active or all branch, and optional `follow` pointer-expansion fields) and up to 8 optional hybrid-search retrieval
-requests within caller-specified token and serialized-byte limits (at most `max_response_bytes`,
-49,152 bytes / 48 KiB, from `memory_get_capabilities`). It pins required
-current revisions before loading canonical bodies, follows exact structured pointers (such as `current_scene` and
-`active_arc.owner`) deterministically without semantic fallback, deduplicates source messages structurally on
-`(conversation_id, revision_id, source_node_id)`, orders content deterministically by authority (explicit required,
-then required expanded, then optional expanded, then retrieved), priority, score, and stable IDs, and greedily fits
-whole messages. If required content alone exceeds either budget, it returns a bounded diagnostic with suggested minimums
-without leaking canonical text. Context packs are extractive-only, include full message provenance and an optional
-deterministic compiled text projection, have a deterministic `pack_id`, and perform no writes or generative summarization.
-
-## Quality gate
+## Development
 
 ```bash
 yarn verify
 ```
 
-This runs formatting, lint, strict TypeScript (Worker and the `web/mindmap/` browser project), the memory-map bundle freshness check, unit/MCP/retrieval tests, Workers-runtime D1/R2 integration tests, and a Wrangler deploy dry run. No command deploys unless `yarn deploy` is invoked explicitly.
-
-After changing anything under `web/mindmap/`, run `yarn build:mindmap` so the generated `src/mindmap-bundle.ts` matches its sources.
-
-## Operations
+Runs formatting, the binding-type freshness check, lint, strict TypeScript for the Worker and the
+`web/mindmap/` browser project, the memory-map bundle check, unit and MCP tests,
+Workers-runtime D1/R2 integration tests, and a Wrangler deploy dry run. Nothing deploys unless
+`yarn deploy` is invoked. After editing anything under `web/mindmap/`, run `yarn build:mindmap` so
+the generated bundle matches its sources.
 
 ```bash
-yarn admin search 'api.internal.example'
-yarn retry <job-id>
-yarn reindex
-yarn verify:integrity
+yarn admin search 'api.internal.example'   # CLI search against canonical data
+yarn retry <job-id>                        # re-run a failed import or index job
+yarn reindex                               # rebuild derived indexes from R2
+yarn verify:integrity                      # check catalog, R2 pointers, and revision hashes
 ```
 
-Reindexing reads canonical R2 data; the ChatGPT export does not need to be uploaded again. D1 migrations are numbered SQL files and must be applied through Wrangler—never by dashboard drift.
+Schema changes are numbered SQL migrations applied through Wrangler, never edited after they are
+applied. Architecture changes require an ADR in [docs/adr/](docs/adr/). See
+[CONTRIBUTING.md](CONTRIBUTING.md) and [AGENTS.md](AGENTS.md) before opening a pull request.
+
+## Documentation
+
+| Document                                                           | Contents                                                          |
+| ------------------------------------------------------------------ | ----------------------------------------------------------------- |
+| [ARCHITECTURE.md](ARCHITECTURE.md)                                 | System shape, canonical versus derived, write order, retrieval    |
+| [SECURITY.md](SECURITY.md)                                         | Threat model, trust boundaries, secret handling                   |
+| [docs/mcp.md](docs/mcp.md)                                         | Tool contracts, receipts, batches, capabilities, rejection shapes |
+| [docs/development.md](docs/development.md)                         | Local loop, local MCP clients, browser pages, memory map client   |
+| [docs/deployment.md](docs/deployment.md)                           | Provisioning, migration, deploy, post-deploy checks               |
+| [docs/cloudflare-resources.md](docs/cloudflare-resources.md)       | Required resources and manual provisioning steps                  |
+| [docs/chatgpt-import.md](docs/chatgpt-import.md)                   | Import guarantees, upload paths, parser ceilings                  |
+| [docs/dashboard.md](docs/dashboard.md)                             | Dashboard, export, and deletion flows                             |
+| [docs/storage-and-indexing.md](docs/storage-and-indexing.md)       | Canonical storage layout and index generations                    |
+| [docs/operations-and-recovery.md](docs/operations-and-recovery.md) | Recovery procedures and deletion-job re-enqueue                   |
+| [docs/rp-workflow.md](docs/rp-workflow.md)                         | Reviewable runtime-rule workflow                                  |
+| [docs/adr/](docs/adr/)                                             | Decision log, newest first                                        |
