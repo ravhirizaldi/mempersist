@@ -11,6 +11,8 @@ import {
   MCP_ORIGIN,
   MCP_RESOURCE,
   MCP_SCOPE,
+  mcpOriginForRequest,
+  overrideOrigin,
   type OAuthEnv,
 } from "../src/oauth";
 import { sha256 } from "../src/crypto";
@@ -635,5 +637,32 @@ describe("OAuth provider", () => {
       }),
     });
     expect(wrongOrigin.status).toBe(401);
+  });
+});
+
+describe("MCP origin resolution", () => {
+  it("keeps the deployed origins when no override is configured", () => {
+    expect(mcpOriginForRequest(new Request(`${MCP_ORIGIN}/mcp`))).toBe(MCP_ORIGIN);
+    expect(mcpOriginForRequest(new Request(`${LEGACY_MCP_ORIGIN}/mcp`))).toBe(LEGACY_MCP_ORIGIN);
+    expect(mcpOriginForRequest(new Request("http://127.0.0.1:8787/mcp"))).toBe(MCP_ORIGIN);
+    expect(overrideOrigin({})).toBeNull();
+  });
+
+  it("ignores an unusable override", () => {
+    expect(overrideOrigin({ MCP_ORIGIN_OVERRIDE: "   " })).toBeNull();
+    expect(overrideOrigin({ MCP_ORIGIN_OVERRIDE: "not-a-url" })).toBeNull();
+    expect(overrideOrigin({ MCP_ORIGIN_OVERRIDE: "ftp://example.com" })).toBeNull();
+    expect(overrideOrigin({ MCP_ORIGIN_OVERRIDE: "http://127.0.0.1:8787" })).toBeNull();
+  });
+
+  it("uses a normalized override for every request origin", () => {
+    const overrideEnv = { MCP_ORIGIN_OVERRIDE: "https://127.0.0.1:8787/" };
+    expect(overrideOrigin(overrideEnv)).toBe("https://127.0.0.1:8787");
+    expect(mcpOriginForRequest(new Request("https://127.0.0.1:8787/mcp"), overrideEnv)).toBe(
+      "https://127.0.0.1:8787",
+    );
+    expect(mcpOriginForRequest(new Request(`${LEGACY_MCP_ORIGIN}/mcp`), overrideEnv)).toBe(
+      "https://127.0.0.1:8787",
+    );
   });
 });

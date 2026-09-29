@@ -14,10 +14,10 @@ import { createMemoryMcpServer } from "./mcp";
 import {
   handleAuthorization,
   handleMagicLink,
-  LEGACY_MCP_ORIGIN,
   MCP_ORIGIN,
   MCP_SCOPE,
   mcpOriginForRequest,
+  overrideOrigin,
   type OAuthEnv,
 } from "./oauth";
 import { resolveTenant } from "./tenant";
@@ -83,21 +83,16 @@ function oauthOptions(origin: string): OAuthProviderOptions<AppEnv> {
   };
 }
 
-function createOAuthProvider(origin: string): OAuthProvider<AppEnv> {
-  return new OAuthProvider<AppEnv>(oauthOptions(origin));
-}
-
-const oauth = createOAuthProvider(MCP_ORIGIN);
-const legacyOauth = createOAuthProvider(LEGACY_MCP_ORIGIN);
-
 export default {
   async fetch(request: Request, env: AppEnv, ctx: ExecutionContext): Promise<Response> {
-    const provider = mcpOriginForRequest(request) === LEGACY_MCP_ORIGIN ? legacyOauth : oauth;
+    // The audience origin is deployment configuration, not request state: a
+    // development override resolves to the same value for every request.
+    const provider = new OAuthProvider<AppEnv>(oauthOptions(mcpOriginForRequest(request, env)));
     return provider.fetch(request, { ...env }, ctx);
   },
 
   async queue(batch: MessageBatch<JobMessage>, env: AppEnv): Promise<void> {
-    const oauthApi = getOAuthApi(oauthOptions(MCP_ORIGIN), env);
+    const oauthApi = getOAuthApi(oauthOptions(overrideOrigin(env) ?? MCP_ORIGIN), env);
     for (const message of batch.messages) {
       try {
         if (message.body.version !== 1 || typeof message.body.job_id !== "string") {

@@ -65,6 +65,41 @@ describe("MCP server", () => {
   it("discovers the compact V1 tool surface", async () => {
     const client = await connectedClient();
     const result = await client.listTools();
+    expect(client.getServerVersion()).toEqual({
+      name: "mempersist",
+      version: "1.0.1",
+      title: "MemPersist",
+      description: "Durable, revision-pinned memory storage and retrieval for AI conversations.",
+      websiteUrl: "https://mempersist.codifiedtech.id",
+    });
+    expect(client.getInstructions()).toContain("For exploration, use memory_search");
+    expect(client.getInstructions()).toContain("memory_build_context directly");
+    const expectedTitles: Record<string, string> = {
+      memory_append: "Append memory",
+      memory_build_context: "Build memory context",
+      memory_copy_conversations: "Copy conversations",
+      memory_delete_conversations: "Delete conversations",
+      memory_edit_messages: "Edit memory messages",
+      memory_empty_namespace: "Empty namespace",
+      memory_get_capabilities: "Get capabilities",
+      memory_get_context: "Get memory context",
+      memory_get_conversation: "Get conversation",
+      memory_get_conversations: "Get conversations",
+      memory_import_status: "Get import status",
+      memory_list_conversations: "List conversations",
+      memory_list_namespaces: "List namespaces",
+      memory_list_revisions: "List revisions",
+      memory_resolve_conversations: "Resolve conversations",
+      memory_replace: "Replace memory",
+      memory_restore_revision: "Restore memory revision",
+      memory_search: "Search memories",
+      memory_stats: "Get memory statistics",
+      memory_store: "Store memory",
+      memory_update_tags: "Update memory tags",
+    };
+    expect(Object.fromEntries(result.tools.map((tool) => [tool.name, tool.title]))).toEqual(
+      expectedTitles,
+    );
     expect(result.tools.map((tool) => tool.name).sort()).toEqual([
       "memory_append",
       "memory_build_context",
