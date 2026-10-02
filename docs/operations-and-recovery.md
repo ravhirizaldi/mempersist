@@ -9,12 +9,30 @@
 - Retrieval fixtures: `yarn retrieval:evaluate`
 - Worker logs: `yarn wrangler tail`
 
-Structured logs expose request/job IDs and categories. D1 tables `imports`, `import_items`, `jobs`, `chunk_index_state`, and `conversation_head_transitions` provide durable progress/error state. Cloudflare dashboards provide queue backlog, Worker latency/errors, storage growth, AI usage, and Vectorize counts without an extra monitoring stack.
+Structured logs expose request/job IDs and categories. D1 tables `imports`, `import_items`, `jobs`, `chunk_index_state`, `conversation_head_transitions`, and `search_snapshots` provide durable progress/error state. Cloudflare dashboards provide queue backlog, Worker latency/errors, storage growth, AI usage, and Vectorize counts without an extra monitoring stack.
 Dashboard deletion progress is separate in `deletion_jobs`. Namespace jobs remain locked after a
 failure; account jobs remain read-only. Fix the recorded error and re-enqueue the job ID rather than
 removing the lock or repeating the user's request.
 
 Search emits one content-free summary per request. It includes total and per-stage timings, semantic variant count, indexed/fallback/merged counts, aggregate indexing states, fallback use, and unavailable channels; it never includes the query or conversation text.
+
+Paginated `memory_search` creates one disposable D1 `search_snapshots` row with a 15-minute
+expiry. It stores at most 200 compact ranked candidates, `normalized-weighted-v6`, pinned revision
+IDs, the effective tenant/filter binding, and bounded retrieval diagnostics. It does not store
+canonical bodies or replace the canonical/index stores. Snapshot state is inspected only through
+the search response; do not treat it as a backup.
+
+Expired rows are lazily deleted on the first page or a continuation read. There is no cron job or
+manual cleanup step. If a D1 inspection is needed, count expired rows without selecting candidate
+payloads or user data, and do not manually delete a live snapshot while a request may be using it.
+Cleanup failure is a derived-state issue: search can still be retried, and canonical R2 data is
+unaffected.
+
+Treat cursors as opaque. A malformed, forged, expired, cross-user, namespace/filter-mismatched, or
+ranking-version-incompatible cursor must receive the bounded validation error and must not be
+decoded, repaired, or replayed under another account. Start a new first-page search instead. A
+continuation supplies only the cursor and new page/byte limits; changing `q` or filters on
+`/api/search` is rejected.
 
 ## Recovery cases
 
@@ -57,6 +75,24 @@ failed, enqueue current revisions through the existing reindex operation. Obtain
 authorization before remote maintenance; do not resend the conversation write.
 `indexing.status` is a required receipt field (ADR 0036), so it is reported even when the response
 budget forces other receipt detail to be shed.
+
+### Search snapshot continuation fails or omits candidates
+
+An expired, forged, malformed, tenant-bound, filter-bound, or incompatible cursor is not
+repairable. Restart the first search with the intended query and filters; do not retry by editing
+the cursor or by supplying a different user's cursor. A ranking-version mismatch similarly
+requires a fresh search, because interpreting the old ranked payload under a new strategy could
+change order and scores.
+
+If a later page reports stale, deleted, superseded, missing, or no-longer-owned candidates, treat
+the bounded omission counts/reasons as the complete diagnostic. The service intentionally does not
+replace those pinned revisions with newer revisions or reveal the foreign resource. A fresh search
+can discover currently eligible revisions. Deleting a conversation or namespace does not require
+snapshot repair and must never restore data from a snapshot.
+
+If D1 loses `search_snapshots`, pagination state is lost but canonical R2 revisions, catalog state,
+FTS, and Vectorize are unaffected. Restart searches after D1 recovery. Do not reconstruct
+snapshots from search chunks or canonical bodies, and do not treat a snapshot export as a backup.
 
 ### Verified save reports a failure
 

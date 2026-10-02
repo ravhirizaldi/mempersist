@@ -97,6 +97,42 @@ same concept; repeating the same broad word does not create extra evidence. Sear
 only the existing query embedding for the semantic channel and never embeds recent canonical
 candidate bodies synchronously.
 
+## Search snapshot pagination
+
+The first paginated `memory_search` call runs the normal hybrid search once and materializes a
+bounded D1 `search_snapshots` row. The row stores compact ranked result metadata, the exact pinned
+revision IDs, the normalized namespace/filter binding, the `normalized-weighted-v6` ranking
+version, bounded `degraded`/`unavailable` diagnostics, the current position, and
+`created_at`/`expires_at`. It never stores canonical message bodies, R2 keys, D1 row IDs, or
+foreign resource identifiers. Non-paginated internal `searchMemory` callers do not create this
+state unless pagination is explicitly requested.
+
+The snapshot retains at most **200 ranked candidates**, in their original order and with their
+final scores. A continuation reads that stored order rather than rerunning retrieval or applying a
+live offset. It validates each pinned candidate against the caller's ownership, namespace,
+deletion, and current-revision scope; missing, superseded, deleted, or no-longer-owned candidates
+are omitted, never replaced with a newer revision. The response reports only bounded aggregate
+omission counts and safe reason categories. The original degradation diagnostics remain visible on
+every page.
+
+Search pages use the shared UTF-8 JSON budget: 32,768 bytes by default, 4,096 minimum, and 49,152
+maximum. `used_serialized_bytes` and `max_serialized_bytes` make the selected budget explicit.
+Whole result entries are kept intact, so a page can end before its item limit when the byte budget
+is reached. The snapshot candidate cap and page byte budget are independent.
+
+The returned cursor is an opaque, HMAC-authenticated value valid for **15 minutes**. Its body has
+only a format version, opaque snapshot/session ID, and expiry; the HMAC binds the authenticated user
+and normalized namespaces. The snapshot row binds the query hash, tags, and tag mode, and a
+continuation accepts only the cursor plus page/byte limits, so the stored filter scope cannot be
+changed. Malformed, forged, expired, version-incompatible, cross-user, or scope-mismatched cursors
+receive a bounded validation error. `/api/search` does not allow `q` or filter changes when
+`cursor` is present.
+
+Expired rows are lazily deleted on snapshot reads, including continuation reads. This cleanup is
+derived-state maintenance only: it does not touch canonical R2 revisions, catalog heads, FTS, or
+Vectorize. See [ADR 0039](adr/0039-search-snapshot-cursors.md) for the rationale and migration
+contract.
+
 ## Revision history
 
 `memory_list_revisions` reads `conversation_revisions` only; it never loads a manifest or segment

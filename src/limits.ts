@@ -8,7 +8,7 @@ import { AppError } from "./errors";
  */
 
 export const CAPABILITIES_PROTOCOL_VERSION = "1";
-export const CAPABILITIES_VERSION = "2026-09-29";
+export const CAPABILITIES_VERSION = "2026-10-02";
 
 // Transport budgets.
 export const MAX_TOOL_OUTPUT_BYTES = 64 * 1024;
@@ -48,6 +48,13 @@ export const MAX_PAGE_ITEMS = 100;
 export const DEFAULT_PAGE_ITEMS = 20;
 export const MAX_SEARCH_ITEMS = 20;
 export const DEFAULT_SEARCH_ITEMS = 8;
+export const SEARCH_DEFAULT_SERIALIZED_BYTES = BATCH_DEFAULT_SERIALIZED_BYTES;
+export const SEARCH_MIN_SERIALIZED_BYTES = BATCH_MIN_SERIALIZED_BYTES;
+export const SEARCH_MAX_SERIALIZED_BYTES = BATCH_MAX_SERIALIZED_BYTES;
+export const SEARCH_CURSOR_MAX_CHARS = 16 * 1024;
+export const SEARCH_SNAPSHOT_TTL_MS = 15 * 60 * 1000;
+export const SEARCH_SNAPSHOT_CANDIDATE_CAP = 200;
+export const SEARCH_RANKING_VERSION = "normalized-weighted-v6";
 export const MAX_SEARCH_QUERY_CHARS = 2000;
 export const MAX_CHUNK_CONTEXT_MESSAGES = 10;
 export const MAX_BATCH_ITEMS = 20;
@@ -66,6 +73,11 @@ export const BATCH_RESPONSE_BYTES = {
   default: BATCH_DEFAULT_SERIALIZED_BYTES,
   min: BATCH_MIN_SERIALIZED_BYTES,
   max: BATCH_MAX_SERIALIZED_BYTES,
+} as const;
+export const SEARCH_RESPONSE_BYTES = {
+  default: SEARCH_DEFAULT_SERIALIZED_BYTES,
+  min: SEARCH_MIN_SERIALIZED_BYTES,
+  max: SEARCH_MAX_SERIALIZED_BYTES,
 } as const;
 
 export type RequestTooLargeDetails = {
@@ -193,7 +205,13 @@ export function memoryCapabilities(): MemoryCapabilities {
       max_receipt_bytes: MUTATION_RECEIPT_MAX_SERIALIZED_BYTES,
     },
     tools: {
-      memory_search: { max_items: MAX_SEARCH_ITEMS, default_items: DEFAULT_SEARCH_ITEMS },
+      memory_search: {
+        max_items: MAX_SEARCH_ITEMS,
+        default_items: DEFAULT_SEARCH_ITEMS,
+        default_response_bytes: SEARCH_RESPONSE_BYTES.default,
+        max_response_bytes: SEARCH_RESPONSE_BYTES.max,
+        supports_cursor: true,
+      },
       memory_get_context: { max_items: MAX_CHUNK_CONTEXT_MESSAGES },
       memory_get_conversation: { max_items: MAX_PAGE_ITEMS, default_items: DEFAULT_PAGE_ITEMS },
       memory_get_conversations: {

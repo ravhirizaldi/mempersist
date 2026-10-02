@@ -1,17 +1,37 @@
+import { AppError } from "./errors";
 import { z } from "zod";
 import { chunkConversation } from "./chunking";
 import { embedTexts, type EmbeddingEnv } from "./indexing";
 import { normalizeTags, type AppEnv, type SearchResponse, type SearchResult } from "./domain";
 import { SEMANTIC_CONCEPTS, semanticQueryVariants } from "./semantic-query";
 import { loadCanonicalRevision, loadConversationTags } from "./storage";
-
+import {
+  SEARCH_DEFAULT_SERIALIZED_BYTES,
+  SEARCH_MAX_SERIALIZED_BYTES,
+  SEARCH_MIN_SERIALIZED_BYTES,
+  SEARCH_RANKING_VERSION,
+  SEARCH_SNAPSHOT_CANDIDATE_CAP,
+} from "./limits";
+import {
+  createSearchSnapshot,
+  hashSearchQuery,
+  loadSearchSnapshot,
+  normalizeSearchNamespaces,
+  signSearchSnapshotCursor,
+  snapshotMetadata,
+  updateSearchSnapshotPosition,
+  type SearchSnapshotCandidate,
+  type SearchSnapshotEnv,
+  type SearchSnapshotRecord,
+} from "./search-snapshot";
 export const RECENT_UNINDEXED_DEFAULTS = {
   maxRevisions: 8,
   maxAgeSeconds: 86_400,
   maxMessages: 200,
 } as const;
 
-const RANKING_STRATEGY = "normalized-weighted-v6";
+export const RANKING_VERSION = SEARCH_RANKING_VERSION;
+const RANKING_STRATEGY = RANKING_VERSION;
 
 // Structured labels that are usable as precision signals when the query names
 // them explicitly (EVENT 16, PHASE 3, CHAPTER 8). Generic markers such as
@@ -147,14 +167,6 @@ const QUERY_STOP_WORDS = new Set([
   "kalian",
   "kami",
   "kamu",
-  "karena",
-  "ke",
-  "ketika",
-  "kita",
-  "mereka",
-  "pada",
-  "saat",
-  "saya",
   "sebagai",
   "sejak",
   "setelah",
@@ -166,6 +178,7 @@ const QUERY_STOP_WORDS = new Set([
 export type SearchEnv = Pick<AppEnv, "MEMORY_DB" | "MEMORY_BUCKET" | "ACTIVE_INDEX_GENERATION"> &
   EmbeddingEnv & {
     MEMORY_VECTOR: Pick<VectorizeIndex, "query">;
+    MEMORY_API_TOKEN?: string;
     RECENT_UNINDEXED_MAX_REVISIONS?: number | string;
     RECENT_UNINDEXED_MAX_AGE_SECONDS?: number | string;
     RECENT_UNINDEXED_MAX_MESSAGES?: number | string;
@@ -1039,16 +1052,179 @@ async function recentCanonicalSearch(
   };
 }
 
+interface SnapshotPage {
+  response: SearchResponse;
+  consumed: number;
+}
+
+function boundedSearchBytes(value: number | undefined): number {
+  const budget = value ?? SEARCH_DEFAULT_SERIALIZED_BYTES;
+  if (
+    !Number.isSafeInteger(budget) ||
+    budget < SEARCH_MIN_SERIALIZED_BYTES ||
+    budget > SEARCH_MAX_SERIALIZED_BYTES
+  ) {
+    throw new AppError(
+      "VALIDATION",
+      `max_serialized_bytes must be between ${SEARCH_MIN_SERIALIZED_BYTES} and ${SEARCH_MAX_SERIALIZED_BYTES}`,
+      400,
+    );
+  }
+  return budget;
+}
+
+function searchEnvelopeBytes(response: SearchResponse): number {
+  return new TextEncoder().encode(JSON.stringify(response)).byteLength;
+}
+
+function withMeasuredSearchBytes(
+  response: Omit<SearchResponse, "used_serialized_bytes">,
+  maxSerializedBytes: number,
+): SearchResponse {
+  let used = 0;
+  for (let index = 0; index < 3; index += 1) {
+    const measured: SearchResponse = {
+      ...response,
+      used_serialized_bytes: used,
+      max_serialized_bytes: maxSerializedBytes,
+    };
+    const next = searchEnvelopeBytes(measured);
+    if (next === used) return measured;
+    used = next;
+  }
+  return { ...response, used_serialized_bytes: used, max_serialized_bytes: maxSerializedBytes };
+}
+
+async function snapshotPage(
+  env: SearchSnapshotEnv,
+  record: SearchSnapshotRecord,
+  limit: number,
+  maxSerializedBytes: number,
+  userId: string | undefined,
+  namespaces: string[],
+): Promise<SnapshotPage> {
+  const ids = [
+    ...new Set(
+      record.candidates.slice(record.position).map((candidate) => candidate.conversation_id),
+    ),
+  ];
+  const current = new Map<
+    string,
+    {
+      current_revision_id: string | null;
+      user_id: string;
+      namespace: string;
+      deleted_at: string | null;
+    }
+  >();
+  if (ids.length) {
+    const rows = await env.MEMORY_DB.prepare(
+      `SELECT id, current_revision_id, user_id, namespace, deleted_at
+       FROM conversations WHERE id IN (${ids.map(() => "?").join(",")})`,
+    )
+      .bind(...ids)
+      .all<{
+        id: string;
+        current_revision_id: string | null;
+        user_id: string;
+        namespace: string;
+        deleted_at: string | null;
+      }>();
+    for (const row of rows.results) current.set(row.id, row);
+  }
+  const omitted = { stale: 0, deleted: 0, ownership: 0, unknown: 0 };
+  const valid: SearchResult[] = [];
+  let consumed = 0;
+  const cursorFor = async (hasRemaining: boolean): Promise<string | null> =>
+    hasRemaining ? signSearchSnapshotCursor(env, record, userId ?? record.userId) : null;
+  const buildResponse = async (
+    results: SearchResult[],
+    consumedCount: number,
+  ): Promise<SearchResponse> =>
+    withMeasuredSearchBytes(
+      {
+        results,
+        degraded: record.degraded,
+        unavailable: record.unavailable,
+        next_cursor: await cursorFor(record.position + consumedCount < record.candidates.length),
+        snapshot: snapshotMetadata(record, omitted),
+      },
+      maxSerializedBytes,
+    );
+
+  while (record.position + consumed < record.candidates.length && valid.length < limit) {
+    const candidate = record.candidates[record.position + consumed];
+    if (
+      !candidate ||
+      !candidate.conversation_id ||
+      !candidate.revision_id ||
+      !candidate.chunk_id ||
+      !candidate.result
+    ) {
+      consumed += 1;
+      omitted.unknown += 1;
+      continue;
+    }
+    const row = current.get(candidate.conversation_id);
+    if (!row) {
+      consumed += 1;
+      omitted.deleted += 1;
+      continue;
+    }
+    if (row.deleted_at) {
+      consumed += 1;
+      omitted.deleted += 1;
+      continue;
+    }
+    if (userId && row.user_id !== userId) {
+      consumed += 1;
+      omitted.ownership += 1;
+      continue;
+    }
+    if (namespaces.length > 0 && !namespaces.includes(row.namespace)) {
+      consumed += 1;
+      omitted.ownership += 1;
+      continue;
+    }
+    if (row.current_revision_id !== candidate.revision_id) {
+      consumed += 1;
+      omitted.stale += 1;
+      continue;
+    }
+    const prospective = [...valid, candidate.result];
+    const measured = await buildResponse(prospective, consumed + 1);
+    if ((measured.used_serialized_bytes ?? 0) > maxSerializedBytes) {
+      if (valid.length === 0 && consumed === 0) {
+        throw new AppError(
+          "REQUEST_TOO_LARGE",
+          "Search result exceeds serialized byte budget",
+          413,
+        );
+      }
+      break;
+    }
+    valid.push(candidate.result);
+    consumed += 1;
+  }
+
+  return { response: await buildResponse(valid, consumed), consumed };
+}
+
 export async function searchMemory(
   env: SearchEnv,
   input: {
-    query: string;
-    limit: number;
+    query?: string;
+    cursor?: string;
+    maxSerializedBytes?: number;
+    max_serialized_bytes?: number;
     namespace?: string;
+    limit: number;
     namespaces?: string[];
     userId?: string;
     tags?: string[];
     tagMode?: "any" | "all";
+    paginate?: boolean;
+    snapshot?: boolean;
     debug?: boolean;
   },
 ): Promise<SearchResponse> {
@@ -1072,7 +1248,72 @@ export async function searchMemory(
       timingsMs[name] = Math.max(0, Math.round(performance.now() - startedAt));
     }
   };
-  if (!lexicalTokens(input.query).length) {
+  const limit = Math.min(20, Math.max(1, input.limit));
+  const requestedTags = normalizeTags(input.tags ?? []);
+  const tagMode = input.tagMode === "any" ? "any" : "all";
+  const namespaces = normalizeSearchNamespaces(
+    input.namespaces?.length ? input.namespaces : input.namespace ? [input.namespace] : [],
+  );
+  const pagination = Boolean(
+    input.cursor ||
+    input.paginate ||
+    input.snapshot ||
+    input.maxSerializedBytes !== undefined ||
+    input.max_serialized_bytes !== undefined,
+  );
+  const maxSerializedBytes = boundedSearchBytes(
+    input.maxSerializedBytes ?? input.max_serialized_bytes,
+  );
+  if (pagination && !env.MEMORY_API_TOKEN) {
+    throw new AppError("VALIDATION", "Search pagination is unavailable", 400);
+  }
+  const snapshotEnv = env as SearchSnapshotEnv;
+  if (input.cursor) {
+    const record = await loadSearchSnapshot(snapshotEnv, input.cursor, input.userId ?? "");
+    if (input.query !== undefined && (await hashSearchQuery(input.query)) !== record.queryHash) {
+      throw new AppError("VALIDATION", "Invalid search cursor", 400);
+    }
+    if (input.tags !== undefined && JSON.stringify(requestedTags) !== JSON.stringify(record.tags)) {
+      throw new AppError("VALIDATION", "Invalid search cursor", 400);
+    }
+    if (input.tagMode !== undefined && tagMode !== record.tagMode) {
+      throw new AppError("VALIDATION", "Invalid search cursor", 400);
+    }
+    if (input.namespace !== undefined) {
+      if (JSON.stringify(namespaces) !== JSON.stringify(record.namespaces)) {
+        throw new AppError("VALIDATION", "Invalid search cursor", 400);
+      }
+    } else if (
+      input.namespaces !== undefined &&
+      !(
+        record.namespaces.length === 0 ||
+        (namespaces.length > 0 &&
+          record.namespaces.every((namespace) => namespaces.includes(namespace)))
+      )
+    ) {
+      throw new AppError("VALIDATION", "Invalid search cursor", 400);
+    }
+    const page = await snapshotPage(
+      snapshotEnv,
+      record,
+      limit,
+      maxSerializedBytes,
+      input.userId,
+      record.namespaces,
+    );
+    if (page.consumed > 0) {
+      await updateSearchSnapshotPosition(
+        snapshotEnv,
+        record.id,
+        record.position,
+        record.position + page.consumed,
+      );
+    }
+    return page.response;
+  }
+  if (!input.query) throw new AppError("VALIDATION", "Search query is required", 400);
+  const query = input.query;
+  if (!lexicalTokens(query).length) {
     timingsMs.total = Math.max(0, Math.round(performance.now() - searchStartedAt));
     console.info(
       JSON.stringify({
@@ -1088,36 +1329,52 @@ export async function searchMemory(
         unavailable: [],
       }),
     );
+    if (pagination) {
+      const created = await createSearchSnapshot(snapshotEnv, {
+        userId: input.userId ?? "",
+        namespaces,
+        tags: requestedTags,
+        tagMode,
+        queryHash: await hashSearchQuery(query),
+        candidates: [],
+        unavailable: [],
+        degraded: false,
+      });
+      const page = await snapshotPage(
+        snapshotEnv,
+        created.record,
+        limit,
+        maxSerializedBytes,
+        input.userId,
+        namespaces,
+      );
+      if (page.consumed > 0) {
+        await updateSearchSnapshotPosition(
+          snapshotEnv,
+          created.record.id,
+          created.record.position,
+          page.consumed,
+        );
+      }
+      return page.response;
+    }
     return { results: [], degraded: false, unavailable: [] };
   }
-  const limit = Math.min(20, Math.max(1, input.limit));
-  const requestedTags = normalizeTags(input.tags ?? []);
-  const tagMode = input.tagMode === "any" ? "any" : "all";
-  const namespaces = input.namespaces?.length
-    ? input.namespaces
-    : input.namespace
-      ? [input.namespace]
-      : undefined;
-  // Tag-filtered searches expand the pool so the AND predicate does not starve
-  // results on narrow tags; the cap keeps Vectorize topK and FTS reads bounded.
-  const candidateCount = Math.min(200, Math.max(20, limit * (requestedTags.length ? 8 : 4)));
+  // Pagination retains the complete snapshot pool; direct searches can size
+  // retrieval to the requested page without changing their existing behavior.
+  const candidateCount = pagination
+    ? SEARCH_SNAPSHOT_CANDIDATE_CAP
+    : Math.min(SEARCH_SNAPSHOT_CANDIDATE_CAP, Math.max(20, limit * (requestedTags.length ? 8 : 4)));
   const generation = env.ACTIVE_INDEX_GENERATION;
   const [lexicalResult, semanticResult, recentResult] = await Promise.allSettled([
     timed("lexical", () =>
-      lexicalSearch(env, input.query, generation, candidateCount, namespaces, input.userId),
+      lexicalSearch(env, query, generation, candidateCount, namespaces, input.userId),
     ),
     timed("semantic", () =>
-      semanticSearchWithRetry(
-        env,
-        input.query,
-        generation,
-        candidateCount,
-        namespaces,
-        input.userId,
-      ),
+      semanticSearchWithRetry(env, query, generation, candidateCount, namespaces, input.userId),
     ),
     timed("recent_canonical", () =>
-      recentCanonicalSearch(env, input.query, generation, candidateCount, namespaces, input.userId),
+      recentCanonicalSearch(env, query, generation, candidateCount, namespaces, input.userId),
     ),
   ]);
   const unavailable: UnavailableSource[] = [];
@@ -1161,7 +1418,7 @@ export async function searchMemory(
   const conversationTags = await timed("tags", () =>
     loadConversationTags(env, [...new Set([...rows.values()].map((row) => row.conversation_id))]),
   );
-  let ranked = rankCandidates([...merged.values()], input.query, rows, undefined, {
+  let ranked = rankCandidates([...merged.values()], query, rows, undefined, {
     conversationTags,
     requestedTags,
   });
@@ -1218,13 +1475,13 @@ export async function searchMemory(
   for (const item of ranked) {
     const row = rows.get(item.chunkId);
     if (!row) continue;
-    const exact = row.body.toLocaleLowerCase().includes(normalizeText(input.query));
+    const exact = row.body.toLocaleLowerCase().includes(normalizeText(query));
     if (item.score < 0.25 && !exact) continue;
     const count = perConversation.get(row.conversation_id) ?? 0;
     if (count >= PER_CONVERSATION_MAX_RESULTS) continue;
     perConversation.set(row.conversation_id, count + 1);
     results.push(buildResult(item, row));
-    if (results.length >= limit) break;
+    if (!pagination && results.length >= limit) break;
   }
   // Semantic recall guarantee: the strongest semantic candidate is the only
   // channel that understands paraphrases, so reserve it one page slot even
@@ -1239,7 +1496,7 @@ export async function searchMemory(
     if (headroom && row && !results.some((item) => item.chunkId === headroom.chunkId)) {
       results.push(buildResult(headroom, row));
       results.sort((a, b) => b.score - a.score || a.chunkId.localeCompare(b.chunkId));
-      if (results.length > limit) {
+      if (!pagination && results.length > limit) {
         const last = results.at(-1);
         if (last?.chunkId === headroom.chunkId) results.splice(results.length - 2, 1);
         else results.pop();
@@ -1259,7 +1516,7 @@ export async function searchMemory(
       semantic_variant_count:
         semanticResult.status === "fulfilled"
           ? semantic.variants.length
-          : semanticQueryVariants(input.query).length,
+          : semanticQueryVariants(query).length,
       indexed_result_count: [...indexedIds].filter((id) => rows.has(id)).length,
       recent_fallback_candidate_count: recent.candidateCount,
       recent_fallback_match_count: recent.matches.length,
@@ -1269,5 +1526,42 @@ export async function searchMemory(
       unavailable,
     }),
   );
+  if (pagination) {
+    const candidates: SearchSnapshotCandidate[] = results
+      .slice(0, SEARCH_SNAPSHOT_CANDIDATE_CAP)
+      .map((result) => ({
+        chunk_id: result.chunkId,
+        conversation_id: result.conversationId,
+        revision_id: result.revisionId,
+        result,
+      }));
+    const created = await createSearchSnapshot(snapshotEnv, {
+      userId: input.userId ?? "",
+      namespaces,
+      tags: requestedTags,
+      tagMode,
+      queryHash: await hashSearchQuery(query),
+      candidates,
+      unavailable,
+      degraded: unavailable.length > 0,
+    });
+    const page = await snapshotPage(
+      snapshotEnv,
+      created.record,
+      limit,
+      maxSerializedBytes,
+      input.userId,
+      namespaces,
+    );
+    if (page.consumed > 0) {
+      await updateSearchSnapshotPosition(
+        snapshotEnv,
+        created.record.id,
+        created.record.position,
+        page.consumed,
+      );
+    }
+    return page.response;
+  }
   return { results, degraded: unavailable.length > 0, unavailable };
 }

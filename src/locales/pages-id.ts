@@ -28,8 +28,8 @@ const replacements: ReadonlyArray<readonly [string, string]> = [
   ],
   ["“Why did we choose object storage?”", "“Mengapa kita memilih penyimpanan objek?”"],
   [
-    "Search across words and meaning. Each result points back to a canonical conversation and source range.",
-    "Cari berdasarkan kata dan makna. Setiap hasil merujuk kembali ke percakapan kanonis dan rentang sumber.",
+    "Search words and meaning with namespace and tag filters. Each compact reference points back to a canonical conversation and source range; stable snapshot pages preserve the ranked order.",
+    "Cari kata dan makna dengan filter namespace dan tag. Setiap referensi ringkas merujuk kembali ke percakapan kanonis dan rentang sumber; halaman snapshot yang stabil mempertahankan urutan peringkat.",
   ],
   ["“Right. Let’s build on that.”", "“Baik. Mari lanjutkan dari sana.”"],
   [
@@ -113,7 +113,10 @@ const replacements: ReadonlyArray<readonly [string, string]> = [
   ],
   ["Tools", "Alat"],
   ["Use", "Kegunaan"],
-  ["find memories; tags + tag_mode filter", "temukan memori; filter tags + tag_mode"],
+  [
+    "find ranked memories; namespace + tags/tag_mode filters; stable opaque snapshot pagination",
+    "temukan memori berperingkat; filter namespace + tags/tag_mode; pagination snapshot opak yang stabil",
+  ],
   ["original messages around a hit", "pesan asli di sekitar hasil"],
   ["page a full conversation", "tampilkan percakapan lengkap per halaman"],
   [
@@ -124,10 +127,17 @@ const replacements: ReadonlyArray<readonly [string, string]> = [
     "<code>memory_get_conversations</code> accepts exactly one of <code>requests</code> (the first call) or an opaque <code>cursor</code> (continuations), plus optional <code>max_serialized_bytes</code>: default 32,768, minimum 4,096, maximum 49,152. Responses report <code>batchId</code>, ordered <code>results</code>, <code>completed</code>, <code>remaining</code>, <code>nextCursor</code>, <code>usedSerializedBytes</code>, and <code>maxSerializedBytes</code>; UTF-8 JSON stays within the requested budget and the 49,152-byte ceiling. Current revisions are pinned before bodies load, so cursor pages never mix concurrent writes; individual errors remain isolated and whole compact messages are admitted in deterministic round-robin order. Loop with <code>{ cursor: nextCursor }</code> until <code>nextCursor</code> is null. Per-item continuations remain for compatibility. Oversized messages return bounded conversation/revision/source-node/offset/byte metadata without text and advance cursor state; recover complete content through an authorized canonical HTTP read or account export.",
     "<code>memory_get_conversations</code> menerima tepat salah satu dari <code>requests</code> (panggilan pertama) atau <code>cursor</code> opak (kelanjutan), serta <code>max_serialized_bytes</code> opsional: default 32.768, minimum 4.096, maksimum 49.152. Respons melaporkan <code>batchId</code>, <code>results</code> berurutan, <code>completed</code>, <code>remaining</code>, <code>nextCursor</code>, <code>usedSerializedBytes</code>, dan <code>maxSerializedBytes</code>; JSON UTF-8 tetap berada dalam anggaran yang diminta dan batas 49.152 byte. Revisi saat ini dipatok sebelum isi dimuat, sehingga halaman kursor tidak pernah mencampur penulisan bersamaan; setiap kesalahan tetap terisolasi dan pesan ringkas utuh diterima secara adil dalam urutan round-robin deterministik. Ulangi dengan <code>{ cursor: nextCursor }</code> sampai <code>nextCursor</code> bernilai null. Kelanjutan per-item tetap tersedia untuk kompatibilitas. Pesan yang terlalu besar mengembalikan metadata percakapan/revisi/node sumber/offset/byte yang dibatasi tanpa teks dan memajukan state kursor; pulihkan konten lengkap melalui pembacaan HTTP kanonis yang terotorisasi atau ekspor akun.",
   ],
+  [
+    "<code>memory_search</code> accepts <code>query</code>, namespace and tag filters, <code>limit</code>, and optional <code>max_serialized_bytes</code> on the first call. If more results remain, continue with only an opaque <code>cursor</code> plus page and byte limits; the tenant-bound snapshot pins the ranking version, order, scores, and revision references. Compact references stay within the requested UTF-8 JSON budget. Snapshots expire automatically; deleted or no-longer-owned candidates are omitted with bounded safe reasons, and preserved <code>degraded</code>/<code>unavailable</code> diagnostics explain retrieval failures. Continuations cannot change the original filters.",
+    "<code>memory_search</code> menerima <code>query</code>, filter namespace dan tag, <code>limit</code>, serta <code>max_serialized_bytes</code> opsional pada panggilan pertama. Jika masih ada hasil, lanjutkan hanya dengan <code>cursor</code> opak serta batas halaman dan byte; snapshot yang terikat tenant mempertahankan versi peringkat, urutan, skor, dan referensi revisi. Referensi ringkas tetap berada dalam anggaran JSON UTF-8 yang diminta. Snapshot kedaluwarsa secara otomatis; kandidat yang dihapus atau tidak lagi dimiliki dikeluarkan dengan alasan aman yang dibatasi, dan diagnosis <code>degraded</code>/<code>unavailable</code> yang dipertahankan menjelaskan kegagalan pengambilan. Filter asli tidak dapat diubah saat melanjutkan.",
+  ],
   ["metadata and tags", "metadata dan tag"],
   ["namespaces your account owns", "namespace milik akun Anda"],
   ["counts and indexing health", "jumlah dan kesehatan pengindeksan"],
-  ["returns the runtime limits contract", "mengembalikan kontrak batas runtime"],
+  [
+    "returns runtime limits, search pagination, and degradation contract",
+    "mengembalikan batas runtime, pagination pencarian, dan kontrak degradasi",
+  ],
   ["durable new memory", "memori baru yang tahan lama"],
   [
     "extend a conversation, optimistic revision check",
@@ -167,6 +177,10 @@ const replacements: ReadonlyArray<readonly [string, string]> = [
     "Pengambilan hibrida menggabungkan FTS leksikal, pencarian vektor semantik, dan fallback kanonis terbaru yang terbatas untuk penulisan yang belum diindeks. Pemeringkatan menggabungkan kanal secara deterministik dan melaporkan kanal yang menurun alih-alih diam-diam mengembalikan hasil parsial.",
   ],
   [
+    "Hybrid retrieval combines lexical FTS, semantic vector search, and a bounded recent-canonical fallback for unindexed writes. Namespace and tag filters apply before ranked results are exposed; stable opaque snapshots preserve ranking across pages, while degraded channels remain visible instead of silently returning partial results.",
+    "Pengambilan hibrida menggabungkan FTS leksikal, pencarian vektor semantik, dan fallback kanonis terbaru yang terbatas untuk penulisan yang belum diindeks. Filter namespace dan tag diterapkan sebelum hasil berperingkat ditampilkan; snapshot opak yang stabil mempertahankan peringkat antarhalaman, sementara kanal yang menurun tetap terlihat alih-alih diam-diam mengembalikan hasil parsial.",
+  ],
+  [
     "A query flows through three independent retrieval channels that are fused and ranked in one pass:",
     "Kueri mengalir melalui tiga kanal pengambilan independen yang digabungkan dan diperingkat dalam satu proses:",
   ],
@@ -190,6 +204,10 @@ const replacements: ReadonlyArray<readonly [string, string]> = [
     "MemPersist holds sensitive conversation history. The primary risks are unauthorized reads/writes, leaked tokens or magic links, mailbox compromise, malicious imports, oversized input, log leakage, and accidental canonical deletion.",
     "MemPersist menyimpan riwayat percakapan sensitif. Risiko utama mencakup pembacaan atau penulisan tanpa izin, kebocoran token atau tautan ajaib, kompromi kotak surat, impor berbahaya, masukan terlalu besar, kebocoran log, dan penghapusan data kanonis secara tidak sengaja.",
   ],
+  [
+    "Channel results are merged by deterministic chunk identity, then every candidate is verified against the caller's <code>(user_id, namespace)</code> scope before ranking. The final score combines lexical position, semantic similarity, and recency evidence; <code>memory_search</code> can return compact, revision-pinned references through a tenant-bound opaque snapshot. Expired snapshots and no-longer-owned candidates are handled safely, and channel failure remains visible as degraded.",
+    "Hasil kanal digabungkan berdasarkan identitas chunk yang deterministik, lalu setiap kandidat diverifikasi terhadap cakupan <code>(user_id, namespace)</code> pemanggil sebelum diperingkat. Skor akhir menggabungkan posisi leksikal, kemiripan semantik, dan bukti keterkinian; <code>memory_search</code> dapat mengembalikan referensi ringkas yang dipatok ke revisi melalui snapshot opak yang terikat tenant. Snapshot kedaluwarsa dan kandidat yang tidak lagi dimiliki ditangani dengan aman, sementara kegagalan kanal tetap terlihat sebagai degraded.",
+  ],
   ["Architecture decision records", "Catatan keputusan arsitektur"],
   ["ARCHITECTURE DECISION RECORDS", "CATATAN KEPUTUSAN ARSITEKTUR"],
   ["Accepted decisions", "Keputusan yang diterima"],
@@ -205,6 +223,10 @@ const replacements: ReadonlyArray<readonly [string, string]> = [
   ["Status", "Status"],
   ["Accepted", "Diterima"],
   ["No matching decisions", "Tidak ada keputusan yang cocok"],
+  [
+    "Tenant-bound memory-search snapshots and opaque cursors",
+    "Snapshot memory-search yang terikat tenant dan kursor opak",
+  ],
   [
     "Try “storage”, “OAuth”, or a decision number. Clear the search to see everything.",
     "Coba “penyimpanan”, “OAuth”, atau nomor keputusan. Bersihkan pencarian untuk melihat semuanya.",

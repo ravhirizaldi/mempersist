@@ -179,24 +179,76 @@ const conversationRequestOutputSchema = z.object({
   branch: z.enum(["active", "all"]),
   revision_id: z.string().optional(),
 });
+const searchResultOutputSchema = z.object({
+  conversationId: z.string(),
+  revisionId: z.string(),
+  chunkId: z.string(),
+  title: z.string(),
+  snippet: z.string(),
+  timestamp: nullableStringSchema,
+  namespace: z.string(),
+  tags: z.array(z.string()),
+  score: z.number(),
+  sources: z.array(z.enum(["lexical", "semantic", "recent_canonical"])),
+});
 const searchOutputSchema = z.object({
-  results: z.array(
-    z.object({
-      conversationId: z.string(),
-      revisionId: z.string(),
-      chunkId: z.string(),
-      title: z.string(),
-      snippet: z.string(),
-      timestamp: nullableStringSchema,
-      namespace: z.string(),
-      tags: z.array(z.string()),
-      score: z.number(),
-      sources: z.array(z.enum(["lexical", "semantic", "recent_canonical"])),
+  results: z.array(searchResultOutputSchema),
+  next_cursor: nullableStringSchema,
+  snapshot: z.object({
+    ranking_version: z.string(),
+    candidate_count: z.number().int().nonnegative(),
+    candidate_cap: z.number().int().nonnegative(),
+    created_at: z.string(),
+    expires_at: z.string(),
+    omitted: z.object({
+      stale: z.number().int().nonnegative(),
+      deleted: z.number().int().nonnegative(),
+      ownership: z.number().int().nonnegative(),
+      unknown: z.number().int().nonnegative(),
     }),
-  ),
+  }),
   degraded: z.boolean(),
   unavailable: z.array(z.enum(["fts", "semantic", "recent_canonical"])),
+  used_serialized_bytes: z.number().int().nonnegative(),
+  max_serialized_bytes: z
+    .number()
+    .int()
+    .min(BATCH_MIN_SERIALIZED_BYTES)
+    .max(BATCH_MAX_SERIALIZED_BYTES),
 });
+const searchInputSchema = z
+  .object({
+    query: z.string().min(1).max(MAX_SEARCH_QUERY_CHARS).optional(),
+    cursor: z.string().min(1).max(MAX_BATCH_CURSOR_CHARS).optional(),
+    limit: z.number().int().min(1).max(MAX_SEARCH_ITEMS).default(DEFAULT_SEARCH_ITEMS),
+    namespace: z.string().min(1).max(MAX_NAMESPACE_CHARS).optional(),
+    tags: tagsSchema.optional(),
+    tag_mode: z.enum(["any", "all"]).optional(),
+    max_serialized_bytes: z
+      .number()
+      .int()
+      .min(BATCH_MIN_SERIALIZED_BYTES)
+      .max(BATCH_MAX_SERIALIZED_BYTES)
+      .default(BATCH_DEFAULT_SERIALIZED_BYTES),
+  })
+  .strict()
+  .superRefine((input, context) => {
+    if ((input.query === undefined) === (input.cursor === undefined)) {
+      context.addIssue({
+        code: "custom",
+        message: "Provide exactly one of query or cursor",
+      });
+    }
+    if (
+      input.cursor !== undefined &&
+      (input.namespace !== undefined || input.tags !== undefined || input.tag_mode !== undefined)
+    ) {
+      context.addIssue({
+        code: "custom",
+        message: "Cursor continuation cannot include query filters",
+      });
+    }
+  });
 const contextOutputSchema = z.object({
   chunkId: z.string(),
   revisionId: z.string(),
@@ -772,28 +824,38 @@ export function createMemoryMcpServer(env: AppEnv, tenant: Tenant): McpServer {
         "Search durable conversation memory and return compact references. Scoped to your namespaces only; the same namespace name in another account is separate and invisible. Tags filter to conversations matching the given tags (tag_mode all = every tag, any = at least one).",
       annotations: readOnlyAnnotations,
       outputSchema: searchOutputSchema,
-      inputSchema: z.object({
-        query: z.string().min(1).max(MAX_SEARCH_QUERY_CHARS),
-        limit: z.number().int().min(1).max(MAX_SEARCH_ITEMS).default(DEFAULT_SEARCH_ITEMS),
-        namespace: z.string().min(1).max(MAX_NAMESPACE_CHARS).optional(),
-        tags: tagsSchema.optional(),
-        tag_mode: z.enum(["any", "all"]).default("all"),
-      }),
+      inputSchema: searchInputSchema,
     },
     async (input) => {
+      if (input.cursor !== undefined) {
+        return toolResult(
+          await searchMemory(env, {
+            cursor: input.cursor,
+            limit: input.limit,
+            maxSerializedBytes: input.max_serialized_bytes,
+            paginate: true,
+            namespaces: tenant.namespaces,
+            userId: tenant.userId,
+          }),
+        );
+      }
+      if (input.query === undefined) {
+        throw new AppError("VALIDATION", "Provide exactly one of query or cursor", 400);
+      }
       return toolResult(
         await searchMemory(env, {
           query: input.query,
           limit: input.limit,
+          maxSerializedBytes: input.max_serialized_bytes,
+          paginate: true,
           namespaces: scopeNamespaces(tenant, input.namespace),
           userId: tenant.userId,
           ...(input.tags ? { tags: input.tags } : {}),
-          tagMode: input.tag_mode,
+          tagMode: input.tag_mode ?? "all",
         }),
       );
     },
   );
-
   server.registerTool(
     "memory_get_context",
     {

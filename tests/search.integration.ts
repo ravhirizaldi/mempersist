@@ -1,7 +1,9 @@
 import { env } from "cloudflare:workers";
 import { describe, expect, it, vi } from "vitest";
 import { createMcpConversation } from "../src/chatgpt";
-import { EMBEDDING_DIMENSIONS } from "../src/domain";
+import { EMBEDDING_DIMENSIONS, type SearchResponse } from "../src/domain";
+import { SEARCH_RANKING_VERSION, SEARCH_SNAPSHOT_CANDIDATE_CAP } from "../src/limits";
+import { deleteConversations } from "../src/deletion";
 import { indexRevision, type IndexingEnv } from "../src/indexing";
 import { enqueueIndex, retryJob } from "../src/jobs";
 import { searchMemory, type SearchEnv } from "../src/search";
@@ -17,19 +19,21 @@ import { OWNER_DB_USER_ID } from "../src/tenant";
 
 const embedding = Array.from({ length: EMBEDDING_DIMENSIONS }, () => 0);
 
-function searchEnv(
-  config: {
-    maxRevisions?: number;
-    maxAgeSeconds?: number;
-    maxMessages?: number;
-    semanticFailure?: boolean;
-    semanticMatches?: Array<{ chunkId: string; score: number }>;
-  } = {},
-): SearchEnv {
+type SearchEnvConfig = {
+  activeIndexGeneration?: SearchEnv["ACTIVE_INDEX_GENERATION"];
+  maxRevisions?: number;
+  maxAgeSeconds?: number;
+  maxMessages?: number;
+  semanticFailure?: boolean;
+  semanticMatches?: Array<{ chunkId: string; score: number }>;
+};
+
+function searchEnv(config: SearchEnvConfig = {}): SearchEnv {
   return {
     MEMORY_DB: env.MEMORY_DB,
     MEMORY_BUCKET: env.MEMORY_BUCKET,
-    ACTIVE_INDEX_GENERATION: env.ACTIVE_INDEX_GENERATION,
+    ACTIVE_INDEX_GENERATION: config.activeIndexGeneration ?? env.ACTIVE_INDEX_GENERATION,
+    MEMORY_API_TOKEN: env.MEMORY_API_TOKEN,
     RECENT_UNINDEXED_MAX_REVISIONS: config.maxRevisions ?? env.RECENT_UNINDEXED_MAX_REVISIONS,
     RECENT_UNINDEXED_MAX_AGE_SECONDS: config.maxAgeSeconds ?? env.RECENT_UNINDEXED_MAX_AGE_SECONDS,
     RECENT_UNINDEXED_MAX_MESSAGES: config.maxMessages ?? env.RECENT_UNINDEXED_MAX_MESSAGES,
@@ -1003,8 +1007,8 @@ describe("message-boundary semantic chunking", () => {
         { role: "user", content: "A canonical memory used to verify generation rebuild." },
       ],
     });
-    const g1 = "bge-m3-chat-turn-v1" as const;
-    const g2 = "bge-m3-chat-turn-v2" as const;
+    const g1 = "bge-m3-chat-turn-v1";
+    const g2: SearchEnv["ACTIVE_INDEX_GENERATION"] = "bge-m3-chat-turn-v2";
     const deleted: string[][] = [];
     const upserted: string[][] = [];
     const captureIndexing = (): IndexingEnv => ({
@@ -1051,10 +1055,10 @@ describe("message-boundary semantic chunking", () => {
     expect(g1Count?.count).toBe(1);
 
     const seenFilters: Array<VectorizeVectorMetadataFilter | undefined> = [];
-    const searchGenEnv = {
-      ...searchEnv({ semanticMatches: [{ chunkId: g2Rows[0]?.id ?? "", score: 0.99 }] }),
-      ACTIVE_INDEX_GENERATION: g2,
-    };
+    const searchGenEnv = searchEnv({
+      semanticMatches: [{ chunkId: g2Rows[0]?.id ?? "", score: 0.99 }],
+      activeIndexGeneration: g2,
+    });
     const baseQuery = searchGenEnv.MEMORY_VECTOR.query;
     searchGenEnv.MEMORY_VECTOR.query = (embedding, options) => {
       seenFilters.push(options?.filter);
@@ -1262,5 +1266,489 @@ describe("per-user search isolation in same-named namespaces", () => {
     const conversationIds = results.results.map((item) => item.conversationId);
     expect(conversationIds).not.toContain(owner.id);
     expect(conversationIds).toContain(other.id);
+  });
+});
+
+function snapshotPage(response: SearchResponse): SearchResponse {
+  return response;
+}
+type MemoryFixture = {
+  conversation: { id: string };
+  stored: { revisionId: string };
+};
+
+describe("direct search mode", () => {
+  it("keeps direct internal searches snapshot-free", async () => {
+    const namespace = `snapshot-direct-${crypto.randomUUID()}`;
+    await storeMemory({
+      title: "Direct search",
+      namespace,
+      messages: [{ role: "user", content: "direct internal search marker" }],
+    });
+    const before = await env.MEMORY_DB.prepare(
+      "SELECT COUNT(*) AS count FROM search_snapshots",
+    ).first<{ count: number }>();
+    const result = await searchMemory(searchEnv(), {
+      query: "direct internal search marker",
+      limit: 8,
+      namespace,
+      userId: OWNER_DB_USER_ID,
+    });
+    const after = await env.MEMORY_DB.prepare(
+      "SELECT COUNT(*) AS count FROM search_snapshots",
+    ).first<{ count: number }>();
+    expect(result.results).toHaveLength(1);
+    expect(after?.count).toBe(before?.count);
+  });
+});
+
+describe("search snapshot pagination", () => {
+  it("returns a successful empty paginated page for a no-match query", async () => {
+    const namespace = `snapshot-empty-${crypto.randomUUID()}`;
+    const page: SearchResponse = await searchMemory(searchEnv(), {
+      query: `no-match-${crypto.randomUUID()}`,
+      limit: 20,
+      namespace,
+      paginate: true,
+      userId: OWNER_DB_USER_ID,
+      maxSerializedBytes: 4096,
+    });
+
+    expect(page.results).toEqual([]);
+    expect(page.next_cursor).toBeNull();
+
+    const snapshot: SearchResponse["snapshot"] = page.snapshot;
+    expect(snapshot).toBeDefined();
+    expect(snapshot).toMatchObject({
+      candidate_count: 0,
+      omitted: { stale: 0, deleted: 0, ownership: 0, unknown: 0 },
+    });
+    expect(snapshot?.ranking_version).toBe(SEARCH_RANKING_VERSION);
+    expect(typeof snapshot?.ranking_version).toBe("string");
+    expect(snapshot?.candidate_cap).toBe(SEARCH_SNAPSHOT_CANDIDATE_CAP);
+    expect(typeof snapshot?.candidate_cap).toBe("number");
+    expect(typeof snapshot?.created_at).toBe("string");
+    expect(typeof snapshot?.expires_at).toBe("string");
+    expect(Number.isNaN(Date.parse(snapshot?.created_at ?? ""))).toBe(false);
+    expect(Number.isNaN(Date.parse(snapshot?.expires_at ?? ""))).toBe(false);
+    expect(page.used_serialized_bytes).toBeLessThanOrEqual(4096);
+    expect(page.max_serialized_bytes).toBe(4096);
+  });
+
+  it("pins ranking order and scores while indexes gain newer revisions", async () => {
+    const namespace = `snapshot-stable-${crypto.randomUUID()}`;
+    const query = "snapshot stable marker";
+    const memories: MemoryFixture[] = [];
+    for (let index = 0; index < 4; index += 1) {
+      const memory = await storeMemory({
+        title: `Snapshot stable ${index}`,
+        namespace,
+        messages: [{ role: "user", content: `${query} item ${index}` }],
+      });
+      await indexRevision(indexingEnv(), memory.stored.revisionId, env.ACTIVE_INDEX_GENERATION);
+      memories.push(memory);
+    }
+
+    const baseline = await searchMemory(searchEnv(), {
+      query,
+      limit: 20,
+      namespace,
+      userId: OWNER_DB_USER_ID,
+    });
+    expect(baseline.results.length).toBeGreaterThanOrEqual(3);
+    const first = snapshotPage(
+      await searchMemory(searchEnv(), {
+        query,
+        limit: 1,
+        namespace,
+        paginate: true,
+        userId: OWNER_DB_USER_ID,
+        maxSerializedBytes: 4096,
+      }),
+    );
+    expect(first.next_cursor).toEqual(expect.any(String));
+    expect(first.snapshot?.ranking_version).toEqual(expect.any(String));
+    expect(first.snapshot?.candidate_count).toBeGreaterThanOrEqual(first.results.length);
+    expect(first.snapshot?.candidate_count).toBeLessThanOrEqual(first.snapshot?.candidate_cap ?? 0);
+    expect(first.used_serialized_bytes).toBeLessThanOrEqual(first.max_serialized_bytes ?? 0);
+    expect(first.next_cursor).not.toContain(memories[0]?.stored.revisionId);
+    expect(first.next_cursor).not.toContain(OWNER_DB_USER_ID);
+
+    const newlyIndexed = await storeMemory({
+      title: "Snapshot stable newly indexed",
+      namespace,
+      messages: [{ role: "user", content: `${query} new revision after snapshot` }],
+    });
+    await indexRevision(indexingEnv(), newlyIndexed.stored.revisionId, env.ACTIVE_INDEX_GENERATION);
+
+    const pages = [first];
+    let cursor = first.next_cursor;
+    while (cursor) {
+      const page = snapshotPage(
+        await searchMemory(searchEnv(), {
+          cursor,
+          limit: 1,
+          maxSerializedBytes: 4096,
+          userId: OWNER_DB_USER_ID,
+        }),
+      );
+      pages.push(page);
+      cursor = page.next_cursor;
+    }
+    const paged = pages.flatMap((page) => page.results);
+    expect(paged.map((result) => result.revisionId)).toEqual(
+      baseline.results.map((result) => result.revisionId),
+    );
+    expect(paged.map((result) => result.score)).toEqual(
+      baseline.results.map((result) => result.score),
+    );
+    expect(paged.map((result) => result.revisionId)).not.toContain(newlyIndexed.stored.revisionId);
+  });
+
+  it("preserves FTS-only sources and degradation across snapshot pages", async () => {
+    const namespace = `snapshot-fts-${crypto.randomUUID()}`;
+    const query = "snapshot fts-only marker";
+    for (let index = 0; index < 2; index += 1) {
+      const memory = await storeMemory({
+        title: `FTS-only ${index}`,
+        namespace,
+        messages: [{ role: "user", content: `${query} item ${index}` }],
+      });
+      await indexRevision(indexingEnv(), memory.stored.revisionId, env.ACTIVE_INDEX_GENERATION);
+    }
+
+    const first = await searchMemory(searchEnv({ semanticFailure: true }), {
+      query,
+      limit: 1,
+      namespace,
+      paginate: true,
+      userId: OWNER_DB_USER_ID,
+      maxSerializedBytes: 4096,
+    });
+    expect(first.results).toHaveLength(1);
+    expect(first.results[0]?.sources).toEqual(["lexical"]);
+    expect(first.unavailable).toContain("semantic");
+    expect(first.next_cursor).toEqual(expect.any(String));
+
+    const second = await searchMemory(searchEnv(), {
+      cursor: first.next_cursor ?? "",
+      limit: 20,
+      userId: OWNER_DB_USER_ID,
+      maxSerializedBytes: 4096,
+    });
+    expect(second.results).toHaveLength(1);
+    expect(second.results[0]?.sources).toEqual(["lexical"]);
+    expect(second.unavailable).toContain("semantic");
+  });
+
+  it("preserves vector-only sources and the cursor snapshot", async () => {
+    const namespace = `snapshot-vector-${crypto.randomUUID()}`;
+    const chunks: string[] = [];
+    for (let index = 0; index < 2; index += 1) {
+      const memory = await storeMemory({
+        title: `Vector-only ${index}`,
+        namespace,
+        messages: [{ role: "user", content: `semantic-only item ${index}` }],
+      });
+      await indexRevision(indexingEnv(), memory.stored.revisionId, env.ACTIVE_INDEX_GENERATION);
+      const chunk = await env.MEMORY_DB.prepare(
+        "SELECT id FROM chunks WHERE revision_id = ? LIMIT 1",
+      )
+        .bind(memory.stored.revisionId)
+        .first<{ id: string }>();
+      expect(chunk?.id).toBeTruthy();
+      chunks.push(chunk?.id ?? "");
+    }
+    const search = searchEnv({
+      semanticMatches: chunks.map((chunkId) => ({ chunkId, score: 0.9 })),
+    });
+
+    const first = await searchMemory(search, {
+      query: "quartz lantern probe",
+      limit: 1,
+      namespace,
+      paginate: true,
+      userId: OWNER_DB_USER_ID,
+      maxSerializedBytes: 4096,
+    });
+    expect(first.results).toHaveLength(1);
+    expect(first.results[0]?.sources).toEqual(["semantic"]);
+    expect(first.unavailable).toEqual([]);
+    expect(first.next_cursor).toEqual(expect.any(String));
+
+    const second = await searchMemory(search, {
+      cursor: first.next_cursor ?? "",
+      limit: 20,
+      userId: OWNER_DB_USER_ID,
+      maxSerializedBytes: 4096,
+    });
+    expect(second.results).toHaveLength(1);
+    expect(second.results[0]?.sources).toEqual(["semantic"]);
+    expect(second.unavailable).toEqual([]);
+  });
+
+  it("pins fused lexical and semantic sources on every snapshot page", async () => {
+    const namespace = `snapshot-fused-${crypto.randomUUID()}`;
+    const query = "snapshot fused marker";
+    const chunks: string[] = [];
+    for (let index = 0; index < 2; index += 1) {
+      const memory = await storeMemory({
+        title: `Fused ${index}`,
+        namespace,
+        messages: [{ role: "user", content: `${query} item ${index}` }],
+      });
+      await indexRevision(indexingEnv(), memory.stored.revisionId, env.ACTIVE_INDEX_GENERATION);
+      const chunk = await env.MEMORY_DB.prepare(
+        "SELECT id FROM chunks WHERE revision_id = ? LIMIT 1",
+      )
+        .bind(memory.stored.revisionId)
+        .first<{ id: string }>();
+      expect(chunk?.id).toBeTruthy();
+      chunks.push(chunk?.id ?? "");
+    }
+    const search = searchEnv({
+      semanticMatches: chunks.map((chunkId) => ({ chunkId, score: 0.9 })),
+    });
+    const first = await searchMemory(search, {
+      query,
+      limit: 1,
+      namespace,
+      paginate: true,
+      userId: OWNER_DB_USER_ID,
+      maxSerializedBytes: 4096,
+    });
+    expect(first.results).toHaveLength(1);
+    expect(first.results[0]?.sources).toEqual(["lexical", "semantic"]);
+    expect(first.next_cursor).toEqual(expect.any(String));
+
+    const second = await searchMemory(search, {
+      cursor: first.next_cursor ?? "",
+      limit: 20,
+      userId: OWNER_DB_USER_ID,
+      maxSerializedBytes: 4096,
+    });
+    expect(second.results).toHaveLength(1);
+    expect(second.results[0]?.sources).toEqual(["lexical", "semantic"]);
+    expect(second.unavailable).toEqual([]);
+  });
+
+  it("retains degraded diagnostics and safely omits deleted or re-owned candidates", async () => {
+    const namespace = `snapshot-omissions-${crypto.randomUUID()}`;
+    const query = "snapshot omission marker";
+    const memories: MemoryFixture[] = [];
+    for (let index = 0; index < 4; index += 1) {
+      memories.push(
+        await storeMemory({
+          title: `Snapshot omission ${index}`,
+          namespace,
+          messages: [{ role: "user", content: `${query} item ${index}` }],
+        }),
+      );
+    }
+    const baseline = await searchMemory(searchEnv(), {
+      query,
+      limit: 20,
+      namespace,
+      userId: OWNER_DB_USER_ID,
+    });
+    expect(baseline.results.length).toBeGreaterThanOrEqual(3);
+    const first = snapshotPage(
+      await searchMemory(searchEnv({ semanticFailure: true }), {
+        query,
+        limit: 1,
+        namespace,
+        paginate: true,
+        userId: OWNER_DB_USER_ID,
+        maxSerializedBytes: 4096,
+      }),
+    );
+    expect(first.next_cursor).toEqual(expect.any(String));
+    expect(first.degraded).toBe(true);
+    expect(first.unavailable).toContain("semantic");
+
+    const firstPageIds = new Set(first.results.map((result) => result.conversationId));
+    const degradedBaseline = await searchMemory(searchEnv({ semanticFailure: true }), {
+      query,
+      limit: 20,
+      namespace,
+      userId: OWNER_DB_USER_ID,
+    });
+    const mutationCandidates = degradedBaseline.results.filter(
+      (result) => !firstPageIds.has(result.conversationId),
+    );
+    expect(mutationCandidates.length).toBeGreaterThanOrEqual(3);
+    const deleted = mutationCandidates[0]?.conversationId;
+    const reowned = mutationCandidates[1]?.conversationId;
+    const stale = mutationCandidates[2]?.conversationId;
+    expect(deleted).toBeTruthy();
+    expect(reowned).toBeTruthy();
+    expect(stale).toBeTruthy();
+    const staleMemory = memories.find((memory) => memory.conversation.id === stale);
+    expect(staleMemory).toBeDefined();
+    await deleteConversations(env, [deleted ?? ""], undefined, OWNER_DB_USER_ID);
+    await env.MEMORY_DB.prepare("UPDATE conversations SET user_id = ? WHERE id = ?")
+      .bind("foreign-user", reowned ?? "")
+      .run();
+    await replaceConversation(
+      env,
+      staleMemory?.conversation.id ?? "",
+      staleMemory?.stored.revisionId ?? "",
+      [{ role: "user", content: `${query} replacement revision` }],
+    );
+
+    const continuation = snapshotPage(
+      await searchMemory(searchEnv(), {
+        cursor: first.next_cursor ?? "",
+        limit: 20,
+        maxSerializedBytes: 4096,
+        userId: OWNER_DB_USER_ID,
+      }),
+    );
+    expect(continuation.degraded).toBe(true);
+    expect(continuation.unavailable).toContain("semantic");
+    expect(continuation.results.map((result) => result.conversationId)).not.toContain(deleted);
+    expect(continuation.results.map((result) => result.conversationId)).not.toContain(reowned);
+    expect(continuation.results.map((result) => result.conversationId)).not.toContain(stale);
+    expect(continuation.snapshot?.omitted.deleted).toBeGreaterThanOrEqual(1);
+    expect(continuation.snapshot?.omitted.ownership).toBeGreaterThanOrEqual(1);
+    expect(continuation.snapshot?.omitted.stale).toBeGreaterThanOrEqual(1);
+    expect(JSON.stringify(continuation.snapshot?.omitted)).not.toContain("foreign-user");
+    expect(JSON.stringify(continuation.snapshot?.omitted)).not.toContain(reowned);
+  });
+
+  it("keeps namespace/tag filters and Unicode results within an exact UTF-8 page budget", async () => {
+    const namespace = `snapshot-unicode-${crypto.randomUUID()}`;
+    const matching = await storeMemory({
+      title: "東京の計画",
+      namespace,
+      tags: ["日本語", "重要"],
+      messages: [{ role: "user", content: "東京の計画 ✨ snapshot unicode marker" }],
+    });
+    await indexRevision(indexingEnv(), matching.stored.revisionId, env.ACTIVE_INDEX_GENERATION);
+    const foreign = await storeMemory({
+      title: "Other namespace",
+      namespace: `other-${crypto.randomUUID()}`,
+      tags: ["重要"],
+      messages: [{ role: "user", content: "東京の計画 ✨ snapshot unicode marker" }],
+    });
+    const oversized = await storeMemory({
+      title: "Unicode oversized item",
+      namespace,
+      tags: ["日本語", "重要"],
+      messages: [
+        {
+          role: "user",
+          content: `東京の計画 ✨ snapshot unicode marker ${"界".repeat(3000)}`,
+        },
+      ],
+    });
+    await indexRevision(indexingEnv(), oversized.stored.revisionId, env.ACTIVE_INDEX_GENERATION);
+
+    await indexRevision(indexingEnv(), foreign.stored.revisionId, env.ACTIVE_INDEX_GENERATION);
+
+    const page = snapshotPage(
+      await searchMemory(searchEnv(), {
+        query: "snapshot unicode",
+        limit: 20,
+        namespace,
+        tags: ["日本語", "重要"],
+        tagMode: "all",
+        paginate: true,
+        userId: OWNER_DB_USER_ID,
+        maxSerializedBytes: 4096,
+      }),
+    );
+    const resultRevisionIds = page.results.map((result) => result.revisionId);
+    expect(resultRevisionIds).toEqual(
+      expect.arrayContaining([matching.stored.revisionId, oversized.stored.revisionId]),
+    );
+    expect(resultRevisionIds).not.toContain(foreign.stored.revisionId);
+    expect(
+      page.results.find((result) => result.revisionId === oversized.stored.revisionId)?.snippet,
+    ).toHaveLength(500);
+    expect(
+      page.results.find((result) => result.revisionId === oversized.stored.revisionId)?.snippet,
+    ).toMatch(/\.\.\.$/u);
+    expect(new TextEncoder().encode(JSON.stringify(page)).byteLength).toBeLessThanOrEqual(4096);
+    expect(page.used_serialized_bytes).toBeLessThanOrEqual(4096);
+    expect(page.snapshot?.candidate_count).toBeLessThanOrEqual(page.snapshot?.candidate_cap ?? 0);
+  });
+
+  it("rejects malformed, forged, incompatible, expired, and cross-user cursors and lazily cleans snapshots", async () => {
+    const namespace = `snapshot-cursor-${crypto.randomUUID()}`;
+    await storeMemory({
+      title: "Cursor expiry 1",
+      namespace,
+      messages: [{ role: "user", content: "cursor expiry marker one" }],
+    });
+    await storeMemory({
+      title: "Cursor expiry 2",
+      namespace,
+      messages: [{ role: "user", content: "cursor expiry marker two" }],
+    });
+    const first = snapshotPage(
+      await searchMemory(searchEnv(), {
+        query: "cursor expiry marker",
+        limit: 1,
+        namespace,
+        paginate: true,
+        userId: OWNER_DB_USER_ID,
+        maxSerializedBytes: 4096,
+      }),
+    );
+    expect(first.next_cursor).toEqual(expect.any(String));
+
+    for (const cursor of ["", "not-a-cursor", "v999.forged", `${first.next_cursor}tampered`]) {
+      await expect(
+        searchMemory(searchEnv(), {
+          cursor,
+          limit: 1,
+          maxSerializedBytes: 4096,
+          userId: OWNER_DB_USER_ID,
+        }),
+      ).rejects.toMatchObject({ status: 400 });
+    }
+    await expect(
+      searchMemory(searchEnv(), {
+        cursor: first.next_cursor ?? "",
+        limit: 1,
+        maxSerializedBytes: 4096,
+        userId: "foreign-user",
+      }),
+    ).rejects.toMatchObject({ status: 400 });
+    await env.MEMORY_DB.prepare("UPDATE search_snapshots SET ranking_version = ?")
+      .bind("old-ranking-version")
+      .run();
+    await expect(
+      searchMemory(searchEnv(), {
+        cursor: first.next_cursor ?? "",
+        limit: 1,
+        maxSerializedBytes: 4096,
+        userId: OWNER_DB_USER_ID,
+      }),
+    ).rejects.toMatchObject({ status: 400 });
+    await env.MEMORY_DB.prepare("UPDATE search_snapshots SET ranking_version = ?")
+      .bind("normalized-weighted-v6")
+      .run();
+
+    const snapshotCount = await env.MEMORY_DB.prepare(
+      "SELECT COUNT(*) AS count FROM search_snapshots",
+    ).first<{ count: number }>();
+    expect(snapshotCount?.count).toBeGreaterThan(0);
+    await env.MEMORY_DB.prepare("UPDATE search_snapshots SET expires_at = ?")
+      .bind("2000-01-01T00:00:00.000Z")
+      .run();
+    await expect(
+      searchMemory(searchEnv(), {
+        cursor: first.next_cursor ?? "",
+        limit: 1,
+        maxSerializedBytes: 4096,
+        userId: OWNER_DB_USER_ID,
+      }),
+    ).rejects.toMatchObject({ status: 400 });
+    const cleaned = await env.MEMORY_DB.prepare(
+      "SELECT COUNT(*) AS count FROM search_snapshots",
+    ).first<{ count: number }>();
+    expect(cleaned?.count).toBe(0);
   });
 });
