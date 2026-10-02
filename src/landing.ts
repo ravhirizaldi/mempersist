@@ -213,7 +213,7 @@ export function landingPage(locale: Locale = "en"): Response {
       </div>
       <div aria-live="polite" aria-atomic="true">
         <article class="demo-panel" id="example-save" data-example><p class="eyebrow">MEMORY_STORE / INTENTIONAL WRITES</p><h2>“Keep the decision, not just the summary.”</h2><p>Save the original conversation with its context. A new revision preserves what was said.</p></article>
-        <article class="demo-panel" id="example-find" data-example><p class="eyebrow">MEMORY_SEARCH / HYBRID RETRIEVAL</p><h2>“Why did we choose object storage?”</h2><p>Search across words and meaning. Each result points back to a canonical conversation and source range.</p></article>
+        <article class="demo-panel" id="example-find" data-example><p class="eyebrow">MEMORY_SEARCH / HYBRID RETRIEVAL</p><h2>“Why did we choose object storage?”</h2><p>Search words and meaning with namespace and tag filters. Each compact reference points back to a canonical conversation and source range; stable snapshot pages preserve the ranked order.</p></article>
         <article class="demo-panel" id="example-continue" data-example><p class="eyebrow">MEMORY_GET_CONTEXT / ORIGINAL WORDS</p><h2>“Right. Let’s build on that.”</h2><p>Bring the surrounding messages into the next session. Verify the source before continuing the work.</p></article>
       </div>
       <div class="preview-bottom"><span>Original context. Not invented history.</span><span>01 — 03</span></div>
@@ -276,7 +276,7 @@ export function landingPage(locale: Locale = "en"): Response {
     <table>
       <thead><tr><th>Tool</th><th>Use</th></tr></thead>
       <tbody>
-        <tr><td><code>memory_search</code></td><td>find memories; tags + tag_mode filter</td></tr>
+        <tr><td><code>memory_search</code></td><td>find ranked memories; namespace + tags/tag_mode filters; stable opaque snapshot pagination</td></tr>
         <tr><td><code>memory_get_context</code></td><td>original messages around a hit</td></tr>
         <tr><td><code>memory_get_conversation</code></td><td>page a full conversation</td></tr>
         <tr><td><code>memory_get_conversations</code></td><td>start with 1–20 requests; resume fairly with one opaque cursor</td></tr>
@@ -286,7 +286,7 @@ export function landingPage(locale: Locale = "en"): Response {
         <tr><td><code>memory_build_context</code></td><td>compile revision-pinned context pack from owners and search evidence</td></tr>
         <tr><td><code>memory_list_namespaces</code></td><td>namespaces your account owns</td></tr>
         <tr><td><code>memory_stats</code></td><td>counts and indexing health</td></tr>
-        <tr><td><code>memory_get_capabilities</code></td><td>returns the runtime limits contract</td></tr>
+        <tr><td><code>memory_get_capabilities</code></td><td>returns runtime limits, search pagination, and degradation contract</td></tr>
         <tr><td><code>memory_store</code></td><td>durable new memory</td></tr>
         <tr><td><code>memory_append</code></td><td>extend a conversation, optimistic revision check</td></tr>
         <tr><td><code>memory_replace</code></td><td>replace its transcript, optimistic revision check</td></tr>
@@ -298,7 +298,8 @@ export function landingPage(locale: Locale = "en"): Response {
         <tr><td><code>memory_empty_namespace</code></td><td>empty one namespace (exact confirmation)</td></tr>
       </tbody>
     </table>
-    <p><code>memory_get_conversations</code> accepts exactly one of <code>requests</code> (the first call) or an opaque <code>cursor</code> (continuations), plus optional <code>max_serialized_bytes</code>: default 32,768, minimum 4,096, maximum 49,152. Responses report <code>batchId</code>, ordered <code>results</code>, <code>completed</code>, <code>remaining</code>, <code>nextCursor</code>, <code>usedSerializedBytes</code>, and <code>maxSerializedBytes</code>; UTF-8 JSON stays within the requested budget and the 49,152-byte ceiling. Current revisions are pinned before bodies load, so cursor pages never mix concurrent writes; individual errors remain isolated and whole compact messages are admitted in deterministic round-robin order. Loop with <code>{ cursor: nextCursor }</code> until <code>nextCursor</code> is null. Per-item continuations remain for compatibility. Oversized messages return bounded conversation/revision/source-node/offset/byte metadata without text and advance cursor state; recover complete content through an authorized canonical HTTP read or account export.</p>
+    <p><code>memory_get_conversations</code> accepts exactly one of <code>requests</code> (the first call) or an opaque <code>cursor</code> (continuations), plus optional <code>max_serialized_bytes</code>: default 32,768, minimum 4,096, maximum 49,152. Responses report <code>batchId</code>, ordered <code>results</code>, <code>completed</code>, <code>remaining</code>, <code>nextCursor</code>, <code>usedSerializedBytes</code>, and <code>maxSerializedBytes</code>; UTF-8 JSON stays within the requested budget and the 49,152-byte ceiling. Current revisions are pinned before bodies load, so cursor pages never mix concurrent writes; individual errors remain isolated and whole compact messages are admitted in deterministic round-robin order. Loop with <code>{ cursor: … }</code> until <code>nextCursor</code> is absent.</p>
+    <p><code>memory_search</code> accepts <code>query</code>, namespace and tag filters, <code>limit</code>, and optional <code>max_serialized_bytes</code> on the first call. If more results remain, continue with only an opaque <code>cursor</code> plus page and byte limits; the tenant-bound snapshot pins the ranking version, order, scores, and revision references. Compact references stay within the requested UTF-8 JSON budget. Snapshots expire automatically; deleted or no-longer-owned candidates are omitted with bounded safe reasons, and preserved <code>degraded</code>/<code>unavailable</code> diagnostics explain retrieval failures. Continuations cannot change the original filters.</p>
   </section>
 
   <section>
@@ -539,7 +540,7 @@ function whitepaperPage(locale: Locale = "en"): Response {
 
   <section>
     <h2>Retrieval</h2>
-    <p>Hybrid retrieval combines lexical FTS, semantic vector search, and a bounded recent-canonical fallback for unindexed writes. Ranking fuses the channels deterministically and reports degraded channels instead of silently returning partial results.</p>
+    <p>Hybrid retrieval combines lexical FTS, semantic vector search, and a bounded recent-canonical fallback for unindexed writes. Namespace and tag filters apply before ranked results are exposed; stable opaque snapshots preserve ranking across pages, while degraded channels remain visible instead of silently returning partial results.</p>
   </section>
 
   <section>
@@ -555,7 +556,7 @@ function whitepaperPage(locale: Locale = "en"): Response {
       <li><strong>Semantic.</strong> Query variants are embedded with Workers AI (bge-m3) and matched against the Vectorize index.</li>
       <li><strong>Recent-canonical.</strong> A bounded fallback scans the newest unindexed revisions directly from canonical storage, so fresh writes are searchable before indexing finishes.</li>
     </ol>
-    <p>Channel results are merged by deterministic chunk identity, then every candidate is verified against the caller's <code>(user_id, namespace)</code> scope before ranking. The final score combines lexical position, semantic similarity, and recency evidence; a channel that fails is reported as degraded instead of silently returning partial results.</p>
+    <p>Channel results are merged by deterministic chunk identity, then every candidate is verified against the caller's <code>(user_id, namespace)</code> scope before ranking. The final score combines lexical position, semantic similarity, and recency evidence; <code>memory_search</code> can return compact, revision-pinned references through a tenant-bound opaque snapshot. Expired snapshots and no-longer-owned candidates are handled safely, and channel failure remains visible as degraded.</p>
     ${searchFlowDiagram()}
   </section>
 
@@ -712,6 +713,7 @@ function adrsPage(locale: Locale = "en"): Response {
     ["0036", "Bounded mutation receipts"],
     ["0037", "Runtime capabilities and aggregate byte budgets"],
     ["0038", "Message-edit provenance"],
+    ["0039", "Tenant-bound memory-search snapshots and opaque cursors"],
   ];
   const rows = adrs
     .map(

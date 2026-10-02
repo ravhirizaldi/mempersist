@@ -130,19 +130,19 @@ first, then expand only what you selected.
 
 ### Read
 
-| Tool                           | Title                 | Notes                                                           |
-| ------------------------------ | --------------------- | --------------------------------------------------------------- |
-| `memory_search`                | Search memories       | Hybrid search, up to 20 compact references; tag filters         |
-| `memory_get_context`           | Get memory context    | Canonical messages around one result chunk, up to 10 each way   |
-| `memory_get_conversation`      | Get conversation      | Page one conversation's active timeline or full graph           |
-| `memory_get_conversations`     | Get conversations     | Revision-pinned batch read of 1–20 conversations, cursor-paged  |
-| `memory_list_conversations`    | List conversations    | Metadata and tags only, no bodies                               |
-| `memory_list_revisions`        | List revisions        | Immutable revision history, newest first                        |
-| `memory_resolve_conversations` | Resolve conversations | Exact-title lookup, no semantic search                          |
-| `memory_list_namespaces`       | List namespaces       | Owned namespaces with conversation counts                       |
-| `memory_stats`                 | Get memory statistics | Per-namespace counts and indexing health                        |
-| `memory_import_status`         | Get import status     | Import progress, duplicate, or failure                          |
-| `memory_get_capabilities`      | Get capabilities      | The deployed contract: versions, limits, per-tool bounds, flags |
+| Tool                           | Title                 | Notes                                                                |
+| ------------------------------ | --------------------- | -------------------------------------------------------------------- |
+| `memory_search`                | Search memories       | Hybrid search, 1–20 references; filters and opaque cursor pagination |
+| `memory_get_context`           | Get memory context    | Canonical messages around one result chunk, up to 10 each way        |
+| `memory_get_conversation`      | Get conversation      | Page one conversation's active timeline or full graph                |
+| `memory_get_conversations`     | Get conversations     | Revision-pinned batch read of 1–20 conversations, cursor-paged       |
+| `memory_list_conversations`    | List conversations    | Metadata and tags only, no bodies                                    |
+| `memory_list_revisions`        | List revisions        | Immutable revision history, newest first                             |
+| `memory_resolve_conversations` | Resolve conversations | Exact-title lookup, no semantic search                               |
+| `memory_list_namespaces`       | List namespaces       | Owned namespaces with conversation counts                            |
+| `memory_stats`                 | Get memory statistics | Per-namespace counts and indexing health                             |
+| `memory_import_status`         | Get import status     | Import progress, duplicate, or failure                               |
+| `memory_get_capabilities`      | Get capabilities      | The deployed contract: versions, limits, per-tool bounds, flags      |
 
 ### Context assembly
 
@@ -175,20 +175,44 @@ accepts `verify: true` to reload the committed R2 revision.
 Retry, reindex, and integrity commands stay HTTP/CLI only so a model cannot trigger expensive
 maintenance. Full tool contracts, receipts, and batch semantics live in [docs/mcp.md](docs/mcp.md).
 
+### Search pagination
+
+The first `memory_search` call requires `query` and accepts `limit` (1–20, default 8), an optional
+`namespace`, `tags`, `tag_mode` (`all` or `any`), and optional `max_serialized_bytes`. The byte
+budget defaults to 32 KiB and accepts 4–48 KiB. A response may include `next_cursor`; continue
+with that opaque cursor, the next `limit`, and the byte budget. Do not resubmit the query or change
+filters on a continuation.
+
+Compatibility responses that do not request pagination may omit the pagination-only metadata.
+
+Search cursors identify a short-lived, tenant-bound snapshot. The snapshot preserves the exact
+ranking, scores, and order from the first call, pins each result's revision, and carries the
+original `degraded` and `unavailable` diagnostics forward. Its metadata reports the ranking
+version, candidate count and cap, creation and expiry times, and bounded omission counts/reasons.
+Expired cursors are cleaned up when read. Malformed, forged, expired, incompatible, or
+cross-account cursors return a bounded validation error; cursors expose no internal storage or
+account identifiers.
+
+Search is scoped to the authenticated account. A namespace filter is valid only for a namespace
+the account owns; omitting it searches the account's owned namespaces. Deleted, stale, or no-longer
+owned snapshot candidates are omitted with safe bounded diagnostics rather than replacing the
+snapshot or exposing another account's data. Search cursors are for MCP/HTTP search pagination
+only; they are not export or canonical-read cursors.
+
 ## Limits
 
 `memory_get_capabilities` is the single contract: it reports the constants the transports
 enforce, so a quoted figure cannot drift from its enforcement. Deployed values:
 
-| Limit                                       | Value                      |
-| ------------------------------------------- | -------------------------- |
-| MCP tool output guard                       | 65,536 bytes (64 KiB)      |
-| Recommended tool output / receipt ceiling   | 49,152 bytes (48 KiB)      |
-| Inline JSON write on both transports        | 1,048,576 bytes (1 MiB)    |
-| Direct import body, and each multipart part | 16,777,216 bytes (16 MiB)  |
-| Single message content                      | 1,000,000 characters       |
-| Batch conversation read response            | 32 KiB default, 48 KiB max |
-| Protocol version / capabilities version     | `1` / `2026-09-29`         |
+| Limit                                       | Value                                 |
+| ------------------------------------------- | ------------------------------------- |
+| MCP tool output guard                       | 65,536 bytes (64 KiB)                 |
+| Recommended tool output / receipt ceiling   | 49,152 bytes (48 KiB)                 |
+| Inline JSON write on both transports        | 1,048,576 bytes (1 MiB)               |
+| Direct import body, and each multipart part | 16,777,216 bytes (16 MiB)             |
+| Single message content                      | 1,000,000 characters                  |
+| Batch conversation read response            | 32 KiB default, 48 KiB max            |
+| Search response budget                      | 32 KiB default, 4 KiB min, 48 KiB max |
 
 Aggregate limits are the UTF-8 bytes of the complete serialized request, measured before any
 canonical work. An oversized request writes nothing and fails with

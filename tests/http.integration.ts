@@ -164,6 +164,91 @@ describe("HTTP security boundary", () => {
   });
 });
 
+describe("search cursor transport contract", () => {
+  const authorization = "Bearer integration-test-token";
+  const jsonHeaders = { authorization, "content-type": "application/json" };
+
+  it("returns a paginated first page and rejects changed continuation inputs", async () => {
+    const query = `cursor-contract-${crypto.randomUUID()}`;
+    for (let index = 0; index < 2; index += 1) {
+      const created = await app.request(
+        "/api/memories",
+        {
+          method: "POST",
+          headers: jsonHeaders,
+          body: JSON.stringify({
+            title: `Cursor contract ${index}`,
+            messages: [{ role: "user", content: `${query} memory ${index}` }],
+          }),
+        },
+        env,
+      );
+      expect(created.status).toBe(201);
+    }
+    const headers = { authorization };
+    const first = await app.request(
+      `/api/search?q=${encodeURIComponent(query)}&limit=1&max_serialized_bytes=4096`,
+      { headers },
+      env,
+    );
+    expect(first.status).toBe(200);
+    const parseJsonObject = async (response: Response): Promise<Record<string, unknown>> => {
+      const value = JSON.parse(await response.text()) as unknown;
+      if (typeof value !== "object" || value === null || Array.isArray(value)) {
+        throw new Error("Expected a JSON object");
+      }
+      return value as Record<string, unknown>;
+    };
+    const page = await parseJsonObject(first);
+    expect(page).toHaveProperty("results");
+    expect(page).toHaveProperty("next_cursor");
+    expect(page).toHaveProperty("snapshot");
+    expect(page).toHaveProperty("used_serialized_bytes");
+    expect(page.max_serialized_bytes).toBe(4096);
+    const cursor = page.next_cursor;
+    expect(typeof cursor).toBe("string");
+    const continuation = await app.request(
+      `/api/search?cursor=${encodeURIComponent(String(cursor))}&limit=1&max_serialized_bytes=4096`,
+      { headers },
+      env,
+    );
+    expect(continuation.status).toBe(200);
+    const continuationPage = await parseJsonObject(continuation);
+    expect(continuationPage).toHaveProperty("results");
+    expect(continuationPage).toHaveProperty("next_cursor");
+    expect(continuationPage).toHaveProperty("snapshot");
+    expect(continuationPage).toHaveProperty("used_serialized_bytes");
+    expect(continuationPage).toHaveProperty("max_serialized_bytes");
+    expect(continuationPage.max_serialized_bytes).toBe(4096);
+
+    for (const path of [
+      `/api/search?cursor=forged&limit=1`,
+      `/api/search?q=${encodeURIComponent(query)}&cursor=forged&limit=1`,
+      `/api/search?cursor=forged&namespace=other&limit=1`,
+      `/api/search?cursor=forged&tags=private&limit=1`,
+      `/api/search?cursor=${encodeURIComponent(String(cursor))}&q=${encodeURIComponent(query)}&limit=1`,
+      `/api/search?cursor=${encodeURIComponent(String(cursor))}&namespace=other&limit=1`,
+      `/api/search?cursor=${encodeURIComponent(String(cursor))}&tags=private&limit=1`,
+    ]) {
+      const response = await app.request(path, { headers }, env);
+      expect(response.status, path).toBe(400);
+    }
+  });
+
+  it("enforces search response byte bounds at the HTTP boundary", async () => {
+    const headers = { authorization };
+    const query = `cursor-budget-${crypto.randomUUID()}`;
+    for (const value of [4095, 49153]) {
+      const response = await app.request(
+        `/api/search?q=${encodeURIComponent(query)}&max_serialized_bytes=${value}`,
+        { headers },
+        env,
+      );
+      expect(response.status).toBe(400);
+    }
+  });
+});
+
 describe("aggregate byte budgets", () => {
   const authorization = "Bearer integration-test-token";
   const jsonHeaders = { authorization, "content-type": "application/json" };

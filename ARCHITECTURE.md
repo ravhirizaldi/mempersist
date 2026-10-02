@@ -45,6 +45,17 @@ Queue job rows use short leases and deterministic job IDs. R2 content addressing
 
 FTS, semantic search, and a bounded recent-canonical fallback start concurrently. The fallback selects only current revisions in `queued`, `processing`, or recent `failed` state through D1, then reads those canonical R2 revisions and applies lightweight phrase/term overlap to recent active messages. All channels use the same deterministic chunk IDs, so indexing races merge into one result. Current-revision joins prevent superseded chunks from winning. RRF keeps indexed confidence dominant, exact identifiers and titles receive bounded boosts, and recency contributes at most 3%. Results are limited to two chunks per conversation and return snippets plus IDs. Context retrieval then reads the canonical revision and returns surrounding source messages.
 
+Paginated search is a server-side snapshot, not a live offset walk. The first MCP or HTTP page
+materializes up to 200 compact ranked candidates in D1 `search_snapshots`, preserving
+`normalized-weighted-v6` scores, degradation diagnostics, and pinned revision IDs. Continuations
+read that ordered state and verify ownership, namespace, deletion, and current-revision validity;
+they omit stale, deleted, or no-longer-owned candidates with bounded safe aggregate reasons rather
+than substituting newer revisions. Snapshot rows expire after 15 minutes and expired rows are
+deleted lazily on snapshot reads. The opaque HMAC-bound cursor carries only its format version,
+snapshot/session ID, and expiry; it does not expose tenant, query, or storage identifiers.
+Page responses use 4,096/32,768/49,152-byte minimum/default/maximum UTF-8 budgets. Internal
+non-paginated `searchMemory` callers do not create snapshots.
+
 ## Generation migration
 
 Chunks record generation, strategy, model, dimensions, revision, and deterministic vector ID. A rebuild reads R2, not the original upload. Model/dimension migrations require a new Vectorize index and generation. For a future zero-downtime switch, temporarily bind old and new indexes, build and validate the new generation, change `ACTIVE_INDEX_GENERATION`, then retire the old binding/index. V1 keeps one active Vectorize binding to avoid unused dual-index code.

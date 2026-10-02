@@ -22,13 +22,20 @@ import {
 } from "./jobs";
 import {
   assertInlineWriteBudget,
+  BATCH_DEFAULT_SERIALIZED_BYTES,
+  BATCH_MAX_SERIALIZED_BYTES,
+  BATCH_MIN_SERIALIZED_BYTES,
+  DEFAULT_SEARCH_ITEMS,
   MAX_APPEND_MESSAGES,
+  MAX_BATCH_CURSOR_CHARS,
   MAX_DIRECT_IMPORT_BYTES,
   MAX_INLINE_JSON_WRITE_BYTES,
   MAX_MESSAGE_CONTENT_CHARS,
   MAX_MESSAGE_ROLE_CHARS,
   MAX_MULTIPART_PART_BYTES,
   MAX_NAMESPACE_CHARS,
+  MAX_SEARCH_ITEMS,
+  MAX_SEARCH_QUERY_CHARS,
   MAX_STORE_MESSAGES,
   MAX_TITLE_CHARS,
   requestTooLargeError,
@@ -134,17 +141,65 @@ app.get("/language/:locale", (c) => {
 });
 
 app.get("/api/search", async (c) => {
-  const query = z.string().min(1).max(2000).parse(c.req.query("q"));
-  const limit = z.coerce.number().int().min(1).max(20).default(8).parse(c.req.query("limit"));
+  const queryParams = c.req.query();
+  const limit = z.coerce
+    .number()
+    .int()
+    .min(1)
+    .max(MAX_SEARCH_ITEMS)
+    .default(DEFAULT_SEARCH_ITEMS)
+    .parse(queryParams.limit);
+  const maxSerializedBytes = z.coerce
+    .number()
+    .int()
+    .min(BATCH_MIN_SERIALIZED_BYTES)
+    .max(BATCH_MAX_SERIALIZED_BYTES)
+    .default(BATCH_DEFAULT_SERIALIZED_BYTES)
+    .parse(queryParams.max_serialized_bytes);
+  const cursor = z.string().min(1).max(MAX_BATCH_CURSOR_CHARS).optional().parse(queryParams.cursor);
+  const tenant = await ownerTenant(c.env);
+  if (cursor !== undefined) {
+    if (
+      queryParams.q !== undefined ||
+      queryParams.namespace !== undefined ||
+      queryParams.tags !== undefined ||
+      queryParams.tag_mode !== undefined ||
+      queryParams.filter !== undefined
+    ) {
+      throw new AppError(
+        "VALIDATION",
+        "Search cursor continuation cannot include query or filters",
+        400,
+      );
+    }
+    return c.json(
+      await searchMemory(c.env, {
+        cursor,
+        limit,
+        maxSerializedBytes,
+        paginate: true,
+        namespaces: tenant.namespaces,
+        userId: tenant.userId,
+      }),
+    );
+  }
+  const query = z.string().min(1).max(MAX_SEARCH_QUERY_CHARS).parse(queryParams.q);
   const namespace = z
     .string()
     .min(1)
     .max(MAX_NAMESPACE_CHARS)
     .optional()
-    .parse(c.req.query("namespace"));
-  const tenant = await ownerTenant(c.env);
-  const namespaces = scopeNamespaces(tenant, namespace);
-  return c.json(await searchMemory(c.env, { query, limit, namespaces, userId: tenant.userId }));
+    .parse(queryParams.namespace);
+  return c.json(
+    await searchMemory(c.env, {
+      query,
+      limit,
+      maxSerializedBytes,
+      paginate: true,
+      namespaces: scopeNamespaces(tenant, namespace),
+      userId: tenant.userId,
+    }),
+  );
 });
 
 app.get("/api/conversations", async (c) => {

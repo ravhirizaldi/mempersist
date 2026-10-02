@@ -385,6 +385,47 @@ describe("MCP server", () => {
     });
     expect(result.isError).toBe(true);
   });
+  it("enforces the memory_search first-page and cursor-only continuation contract", async () => {
+    const client = await connectedClient();
+    const listed = await client.listTools();
+    const tool = listed.tools.find((candidate) => candidate.name === "memory_search");
+    expect(tool).toBeDefined();
+
+    const inputSchemaText = JSON.stringify(tool!.inputSchema);
+    expect(inputSchemaText).toContain("query");
+    expect(inputSchemaText).toContain("cursor");
+    expect(inputSchemaText).toContain("max_serialized_bytes");
+    expect(inputSchemaText).toContain("4096");
+    expect(inputSchemaText).toContain("49152");
+
+    const outputSchema = tool!.outputSchema as {
+      properties?: Record<string, unknown>;
+    };
+    for (const field of [
+      "results",
+      "next_cursor",
+      "snapshot",
+      "degraded",
+      "unavailable",
+      "used_serialized_bytes",
+      "max_serialized_bytes",
+    ]) {
+      expect(outputSchema.properties, field).toHaveProperty(field);
+    }
+
+    const invalidArguments: Array<Record<string, unknown>> = [
+      {},
+      { cursor: "opaque", query: "must-not-change" },
+      { cursor: "opaque", namespace: "must-not-change" },
+      { cursor: "opaque", tags: ["must-not-change"] },
+      { query: "first page", max_serialized_bytes: 4095 },
+      { query: "first page", max_serialized_bytes: 49153 },
+    ];
+    for (const arguments_ of invalidArguments) {
+      const result = await client.callTool({ name: "memory_search", arguments: arguments_ });
+      expect(result.isError, JSON.stringify(arguments_)).toBe(true);
+    }
+  });
 
   it("validates batch bounds, pagination, read formats, and verification flags", async () => {
     const client = await connectedClient();
@@ -1205,9 +1246,16 @@ describe("MCP server", () => {
     expect(result.isError).toBeFalsy();
     const capabilities = capabilitiesOutputSchema.parse(result.structuredContent);
     expect(capabilities.protocol_version).toBe("1");
-    expect(capabilities.capabilities_version).toBe("2026-09-29");
+    expect(capabilities.capabilities_version).toBe("2026-10-02");
     expect(capabilities.limits.max_tool_output_bytes).toBe(65536);
     expect(capabilities.limits.max_inline_json_write_bytes).toBe(1048576);
+    expect(capabilities.tools.memory_search).toEqual({
+      max_items: 20,
+      default_items: 8,
+      default_response_bytes: 32768,
+      max_response_bytes: 49152,
+      supports_cursor: true,
+    });
     expect(capabilities.tools.memory_store).toEqual({
       max_items: 1000,
       max_request_bytes: 1048576,

@@ -77,29 +77,29 @@ complete the email prompt).
 See [SKILLS.md](../SKILLS.md) for the memory conventions coding agents should follow
 (`project/<slug>` namespaces, search-first workflow, event records).
 
-| Tool                           | Important inputs                                                                  | Result                                                                    |
-| ------------------------------ | --------------------------------------------------------------------------------- | ------------------------------------------------------------------------- |
-| `memory_search`                | query, limit 1–20, tags, tag_mode                                                 | compact ranked chunk references and degradation state                     |
-| `memory_get_context`           | chunk ID, before/after 0–10                                                       | canonical matched ranges and surrounding messages                         |
-| `memory_get_conversation`      | conversation ID, branch, offset, limit                                            | paginated active timeline or all graph nodes                              |
-| `memory_get_conversations`     | `requests` or `cursor`, `max_serialized_bytes`                                    | fair, revision-pinned compact batch pages                                 |
-| `memory_list_conversations`    | cursor, limit, tags, tag_mode                                                     | metadata and tags only                                                    |
-| `memory_list_revisions`        | conversation ID, cursor, limit 1–100                                              | revision metadata newest first, current head marked                       |
-| `memory_resolve_conversations` | 1–20 exact titles, optional namespace and tags                                    | conversation IDs, current revision IDs, and live tags                     |
-| `memory_build_context`         | task, 1–20 required selectors, max 8 retrieve, budgets, options                   | deterministic revision-pinned context pack within token/byte caps         |
-| `memory_list_namespaces`       | —                                                                                 | namespaces you own with conversation counts                               |
-| `memory_stats`                 | —                                                                                 | per-namespace counts plus indexing health                                 |
-| `memory_get_capabilities`      | —                                                                                 | deployed capability contract: versions, limits, per-tool bounds, flags    |
-| `memory_store`                 | title, tags, 1–1000 messages                                                      | bounded durable receipt plus queued index job                             |
-| `memory_append`                | conversation ID, base revision, tags, messages                                    | bounded optimistic durable receipt plus queued index job                  |
-| `memory_replace`               | conversation ID, base revision, messages                                          | bounded replacement receipt plus queued index job                         |
-| `memory_edit_messages`         | conversation ID, base revision, 1–100 unique source nodes, edits, verify          | per-target results; bounded durable receipt and index job                 |
-| `memory_update_tags`           | conversation ID, base revision, add/remove                                        | live tag list after revision-safe mutation                                |
-| `memory_restore_revision`      | conversation ID, revision ID, base revision, verify                               | restores head to historic revision; bounded durable receipt and index job |
-| `memory_copy_conversations`    | target_namespace, create_target_namespace, idempotency_key, 1–20 requests, verify | ordered per-item bounded durable receipts                                 |
-| `memory_delete_conversations`  | 1–100 unique conversation IDs                                                     | deleted, missing, and per-ID failures                                     |
-| `memory_empty_namespace`       | matching namespace confirmation pair                                              | deletes one of your namespaces; bounded, resumable                        |
-| `memory_import_status`         | import UUID                                                                       | progress, duplicate, or failure metadata                                  |
+| Tool                           | Important inputs                                                                              | Result                                                                    |
+| ------------------------------ | --------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------- |
+| `memory_search`                | first call: query, filters, limit 1–20, byte budget; continuation: cursor, limit, byte budget | stable ranked references, snapshot metadata, degradation state            |
+| `memory_get_context`           | chunk ID, before/after 0–10                                                                   | canonical matched ranges and surrounding messages                         |
+| `memory_get_conversation`      | conversation ID, branch, offset, limit                                                        | paginated active timeline or all graph nodes                              |
+| `memory_get_conversations`     | `requests` or `cursor`, `max_serialized_bytes`                                                | fair, revision-pinned compact batch pages                                 |
+| `memory_list_conversations`    | cursor, limit, tags, tag_mode                                                                 | metadata and tags only                                                    |
+| `memory_list_revisions`        | conversation ID, cursor, limit 1–100                                                          | revision metadata newest first, current head marked                       |
+| `memory_resolve_conversations` | 1–20 exact titles, optional namespace and tags                                                | conversation IDs, current revision IDs, and live tags                     |
+| `memory_build_context`         | task, 1–20 required selectors, max 8 retrieve, budgets, options                               | deterministic revision-pinned context pack within token/byte caps         |
+| `memory_list_namespaces`       | —                                                                                             | namespaces you own with conversation counts                               |
+| `memory_stats`                 | —                                                                                             | per-namespace counts plus indexing health                                 |
+| `memory_get_capabilities`      | —                                                                                             | deployed capability contract: versions, limits, per-tool bounds, flags    |
+| `memory_store`                 | title, tags, 1–1000 messages                                                                  | bounded durable receipt plus queued index job                             |
+| `memory_append`                | conversation ID, base revision, tags, messages                                                | bounded optimistic durable receipt plus queued index job                  |
+| `memory_replace`               | conversation ID, base revision, messages                                                      | bounded replacement receipt plus queued index job                         |
+| `memory_edit_messages`         | conversation ID, base revision, 1–100 unique source nodes, edits, verify                      | per-target results; bounded durable receipt and index job                 |
+| `memory_update_tags`           | conversation ID, base revision, add/remove                                                    | live tag list after revision-safe mutation                                |
+| `memory_restore_revision`      | conversation ID, revision ID, base revision, verify                                           | restores head to historic revision; bounded durable receipt and index job |
+| `memory_copy_conversations`    | target_namespace, create_target_namespace, idempotency_key, 1–20 requests, verify             | ordered per-item bounded durable receipts                                 |
+| `memory_delete_conversations`  | 1–100 unique conversation IDs                                                                 | deleted, missing, and per-ID failures                                     |
+| `memory_empty_namespace`       | matching namespace confirmation pair                                                          | deletes one of your namespaces; bounded, resumable                        |
+| `memory_import_status`         | import UUID                                                                                   | progress, duplicate, or failure metadata                                  |
 
 Every tool advertises an output schema and returns successful structured data in both
 `structuredContent` and JSON text content for client compatibility.
@@ -134,7 +134,7 @@ Output:
 ```json
 {
   "protocol_version": "1",
-  "capabilities_version": "2026-09-29",
+  "capabilities_version": "2026-10-02",
   "limits": {
     "max_tool_output_bytes": 65536,
     "recommended_tool_output_bytes": 49152,
@@ -145,6 +145,13 @@ Output:
     "max_receipt_bytes": 49152
   },
   "tools": {
+    "memory_search": {
+      "max_items": 20,
+      "default_items": 8,
+      "default_response_bytes": 32768,
+      "max_response_bytes": 49152,
+      "supports_cursor": true
+    },
     "memory_get_conversations": {
       "max_items": 20,
       "default_response_bytes": 32768,
@@ -184,7 +191,7 @@ never describe the caller's data volume, account, or Cloudflare billing plan.
 - `protocol_version` (`1`) identifies the shape of this document and of the rejection object
   described below. It changes only when a field is removed, renamed, or changes meaning: an additive
   optional field keeps the current value, a breaking shape change increments it.
-- `capabilities_version` (`2026-09-29`) identifies the set of enforced limits. It changes when any
+- `capabilities_version` (`2026-10-02`) identifies the set of enforced limits. It changes when any
   reported value or feature flag changes, including a change made in another module. Any change to a
   value reported by `memory_get_capabilities` updates `capabilities_version` in the same change, plus
   the documentation that quotes the value.
@@ -241,6 +248,100 @@ Transport envelopes differ:
 
 Validation still follows Zod input validation: schemas reject malformed input, and the byte budget
 only rejects well-formed requests that are too large to accept.
+
+## Search and cursor pagination
+
+`memory_search` performs hybrid search across the authenticated account's owned namespaces. Its MCP
+input schema requires exactly one of a first-page `query` (up to 2,000 characters) or an opaque
+continuation `cursor`. The first call accepts:
+
+- `limit`: 1–20 results, default 8.
+- `namespace`: optional owned namespace; omitting it searches all namespaces owned by the account.
+- `tags`: optional normalized conversation tags, with `tag_mode: "all"` (default) or `"any"`.
+- `max_serialized_bytes`: optional UTF-8 response budget, default 32,768; minimum 4,096 and
+  maximum 49,152. The complete response envelope, including results, snapshot metadata,
+  diagnostics, and `next_cursor`, is measured.
+
+The first call creates a snapshot when pagination is requested. A response has the following shape:
+
+```json
+{
+  "results": [
+    {
+      "conversationId": "<conversation ID>",
+      "revisionId": "<pinned revision ID>",
+      "chunkId": "<chunk ID>",
+      "title": "Deployment recovery",
+      "snippet": "Exact compact result text",
+      "timestamp": "2026-09-17T00:00:00.000Z",
+      "namespace": "project/example",
+      "tags": ["runbook"],
+      "score": 0.88,
+      "sources": ["lexical", "semantic"]
+    }
+  ],
+  "next_cursor": "<opaque cursor or null>",
+  "snapshot": {
+    "ranking_version": "<ranking version>",
+    "candidate_count": 42,
+    "candidate_cap": 200,
+    "created_at": "2026-10-02T12:00:00.000Z",
+    "expires_at": "2026-10-02T12:15:00.000Z",
+    "omitted": {
+      "stale": 1,
+      "deleted": 0,
+      "ownership": 0,
+      "unknown": 0
+    }
+  },
+  "degraded": false,
+  "unavailable": [],
+  "used_serialized_bytes": 1234,
+  "max_serialized_bytes": 32768
+}
+```
+
+Non-paginated compatibility responses may omit `next_cursor`, `snapshot`,
+`used_serialized_bytes`, and `max_serialized_bytes`; the pagination fields are present when the
+MCP or HTTP request asks for paginated search.
+
+When `next_cursor` is non-null, send a continuation with only the opaque `cursor`, `limit`, and
+`max_serialized_bytes`. Do not send `query`, `namespace`, `tags`, or `tag_mode` again. The snapshot
+preserves the first call's exact ranking, scores, and order, and pins each candidate to its result
+revision. Continuations retain the first call's `degraded` and `unavailable` values. `snapshot`
+reports the explicit ranking version, bounded candidate count and cap, creation and expiry times,
+and safe omission counts/reasons for candidates that cannot be returned.
+
+Search cursors are signed, versioned, tenant/user-bound, and bound to the normalized namespace and tag
+filters. They contain no user IDs, D1 row IDs, R2 keys, or other internal storage identifiers.
+Validate a cursor before reading a snapshot. Malformed, forged, expired, ranking-version
+incompatible, and cross-account cursors all return the same bounded `Invalid cursor` validation
+error. Expired snapshot rows are lazily removed when read. A continuation never replaces a pinned
+candidate with a live search result: deleted, stale, or no-longer-owned candidates are omitted and
+reported only through bounded safe diagnostics.
+
+`degraded` is true when one or more search sources could not participate; `unavailable` identifies
+the unavailable source categories without exposing backend details. These diagnostics are retained
+across pages. A snapshot does not make canonical content available: use `memory_get_context` or a
+revision-pinned conversation read for a selected result.
+
+The HTTP `/api/search` route exposes the same snapshot contract with `q` for the first-call query
+and `cursor` for continuation, plus the page, filter, and byte-budget parameters. During a cursor
+walk, query and filter values must be omitted or match the original request exactly; changed
+values are rejected. Search snapshots and cursors are transport pagination state only: they are not
+canonical export cursors, and internal/context search calls do not create one unless pagination is
+explicitly requested by MCP or HTTP.
+
+```text
+GET /api/search?q=deployment%20recovery&namespace=project%2Fexample&limit=8&max_serialized_bytes=32768
+GET /api/search?cursor=<opaque-cursor>&limit=8&max_serialized_bytes=32768
+```
+
+HTTP clients may include the original `q` and filters on a continuation only when they are
+unchanged; omitting them avoids an accidental filter mismatch.
+
+If a cursor expires or is rejected, start a new first-call search. Do not retry a rejected cursor
+with a different query or filter set.
 
 ## Compact reads and batches
 
@@ -608,7 +709,7 @@ apply. Empty final text is valid when it passes that validation.
           "role": "assistant",
           "text": "Final exact message text",
           "createdAt": "2026-09-11T00:00:00.000Z",
-          "updatedAt": "2026-09-29T00:00:00.000Z"
+          "updatedAt": "2026-10-02T00:00:00.000Z"
         }
       ],
       "offset": 0,

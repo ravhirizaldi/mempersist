@@ -50,6 +50,39 @@ Do not store routine commits, "I did X" churn, or facts you can read from the re
 6. **Never invent memory.** Cite the conversation ids and revision ids returned by the
    tools; if search returns nothing, say memory is empty for that project.
 
+### Search pagination
+
+The first `memory_search` call requires `query` and may include `limit` (1–20), `namespace`,
+`tags`, `tag_mode` (`"all"` or `"any"`), and `max_serialized_bytes`. The byte budget defaults to
+32,768 bytes and accepts 4,096–49,152 bytes. Example:
+
+```json
+{
+  "query": "deployment recovery",
+  "namespace": "project/mempersist",
+  "tags": ["runbook"],
+  "tag_mode": "all",
+  "limit": 8,
+  "max_serialized_bytes": 32768
+}
+```
+
+If `next_cursor` is non-null, continue with only that opaque cursor plus the next page `limit` and
+byte budget; do not resend the query or change filters. The snapshot keeps the original ranking,
+scores, order, and result revision pins. Every page retains the original `degraded` and
+`unavailable` diagnostics. `snapshot` reports `ranking_version`, `candidate_count`, `candidate_cap`,
+`created_at`, `expires_at`, and bounded omission counts/reasons. Deleted, stale, or no-longer-owned
+candidates are omitted safely rather than replaced with live results.
+
+Search is always limited to the authenticated account's owned namespaces. Malformed, forged,
+expired, incompatible, or cross-account cursors return a bounded validation error. Cursors are
+opaque and do not expose account, user, D1, R2, or other internal identifiers; they are for
+MCP/HTTP search pagination, not canonical reads or exports.
+
+If a continuation is no longer valid, start a new search. Use `memory_get_context` or a
+revision-pinned conversation read for a selected result; do not treat a search cursor as a
+canonical-data export.
+
 Call `memory_list_revisions` when you need a revision id you did not retain, or when
 reviewing what an earlier `memory_append`, `memory_replace`, `memory_edit_messages`, or
 `memory_restore_revision` committed. It returns metadata only — newest first, with the snapshot head
@@ -108,7 +141,7 @@ suggested minimums without leaking text. The tool is strictly read-only and extr
 
 | Tool                           | Use                                                                           |
 | ------------------------------ | ----------------------------------------------------------------------------- |
-| `memory_search`                | find memories; tags + `tag_mode` filter                                       |
+| `memory_search`                | find memories; filters plus opaque stable cursor pagination                   |
 | `memory_get_context`           | original messages around a search hit                                         |
 | `memory_get_conversation`      | page a full conversation                                                      |
 | `memory_get_conversations`     | batch 1–20 via requests, then opaque cursor loop                              | fair, revision-pinned compact pages |

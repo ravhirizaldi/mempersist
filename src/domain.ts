@@ -163,10 +163,30 @@ export interface SearchResultDebug {
   sources: SearchResult["sources"];
 }
 
+export interface SearchSnapshotOmitted {
+  stale: number;
+  deleted: number;
+  ownership: number;
+  unknown: number;
+}
+
+export interface SearchSnapshotMetadata {
+  ranking_version: string;
+  candidate_count: number;
+  candidate_cap: number;
+  created_at: string;
+  expires_at: string;
+  omitted: SearchSnapshotOmitted;
+}
+
 export interface SearchResponse {
   results: SearchResult[];
   degraded: boolean;
   unavailable: Array<"fts" | "semantic" | "recent_canonical">;
+  next_cursor?: string | null;
+  snapshot?: SearchSnapshotMetadata;
+  used_serialized_bytes?: number;
+  max_serialized_bytes?: number;
 }
 
 export interface JobMessage {

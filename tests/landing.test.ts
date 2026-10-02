@@ -129,8 +129,8 @@ describe("Minimalist public pages", () => {
       );
       expect(landing, locale).toContain(
         locale === "en"
-          ? "returns the runtime limits contract"
-          : "mengembalikan kontrak batas runtime",
+          ? "returns runtime limits, search pagination, and degradation contract"
+          : "mengembalikan batas runtime, pagination pencarian, dan kontrak degradasi",
       );
     }
   });
