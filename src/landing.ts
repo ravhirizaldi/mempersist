@@ -279,17 +279,21 @@ export function landingPage(locale: Locale = "en"): Response {
         <tr><td><code>memory_search</code></td><td>find ranked memories; namespace + tags/tag_mode filters; stable opaque snapshot pagination</td></tr>
         <tr><td><code>memory_get_context</code></td><td>original messages around a hit</td></tr>
         <tr><td><code>memory_get_conversation</code></td><td>page a full conversation</td></tr>
+        <tr><td><code>memory_get_messages</code></td><td>read-only exact source-node or optional message-key lookup; ordered 1–100, revision-pinned, opaque cursor</td></tr>
         <tr><td><code>memory_get_conversations</code></td><td>start with 1–20 requests; resume fairly with one opaque cursor</td></tr>
         <tr><td><code>memory_list_conversations</code></td><td>metadata and tags</td></tr>
         <tr><td><code>memory_list_revisions</code></td><td>immutable revision history of one conversation</td></tr>
         <tr><td><code>memory_resolve_conversations</code></td><td>resolve up to 20 exact titles without semantic search</td></tr>
         <tr><td><code>memory_build_context</code></td><td>compile revision-pinned context pack from owners and search evidence</td></tr>
+        <tr><td><code>memory_import_status</code></td><td>import progress, duplicate, or failure</td></tr>
         <tr><td><code>memory_list_namespaces</code></td><td>namespaces your account owns</td></tr>
         <tr><td><code>memory_stats</code></td><td>counts and indexing health</td></tr>
         <tr><td><code>memory_get_capabilities</code></td><td>returns runtime limits, search pagination, and degradation contract</td></tr>
         <tr><td><code>memory_store</code></td><td>durable new memory</td></tr>
+        <tr><td><code>memory_upsert_messages</code></td><td>atomic upsert of 1–100 keyed messages; insert/update/no-op with required base revision</td></tr>
         <tr><td><code>memory_append</code></td><td>extend a conversation, optimistic revision check</td></tr>
         <tr><td><code>memory_replace</code></td><td>replace its transcript, optimistic revision check</td></tr>
+        <tr><td><code>memory_commit_batch</code></td><td>atomically append/replace 1–20 conversations with explicit base revisions</td></tr>
         <tr><td><code>memory_edit_messages</code></td><td>edit known message text (replace/append/prepend), revision-pinned and atomic</td></tr>
         <tr><td><code>memory_restore_revision</code></td><td>restore historical revision, optimistic revision check</td></tr>
         <tr><td><code>memory_copy_conversations</code></td><td>lossless copy into another owned namespace</td></tr>
@@ -298,6 +302,9 @@ export function landingPage(locale: Locale = "en"): Response {
         <tr><td><code>memory_empty_namespace</code></td><td>empty one namespace (exact confirmation)</td></tr>
       </tbody>
     </table>
+    <p><code>memory_upsert_messages</code> writes 1–100 unique keyed text messages for one owned conversation and requires an exact current <code>base_revision_id</code>. Keys are 1–128 lowercase ASCII characters matching <code>[a-z0-9._/-]</code>, beginning and ending with a letter or digit. Existing keys replace text while preserving identity, role, creation time, graph, and metadata; role changes are rejected. Missing keys append after the active node in request order. Validate all entries before one atomic revision: all-unchanged requests return <code>no_change</code> without a revision or index job, while mixed inserts and updates commit once. <code>verify: true</code> reloads the committed canonical revision and reports bounded per-key receipt/readback status.</p>
+    <p><code>memory_get_messages</code> is annotated <code>readOnlyHint: true</code> and <code>destructiveHint: false</code>. Send 1–100 ordered selectors, each with a <code>conversation_id</code>, optional <code>revision_id</code>, and exactly one of <code>source_node_id</code> (up to 200 characters) or forward-compatible <code>message_key</code> (issue #7's 1–128-character lowercase ASCII key). For example: <code>{ "conversation_id": "…", "source_node_id": "node-42" }</code>. Omitted revisions pin the current head before any R2 load; canonical loads are deduplicated by pinned revision, and duplicate selectors keep their ordered duplicate results. The read uses canonical data only, never FTS or Vectorize.</p>
+    <p>Use exactly one of <code>requests</code> (first call) or an opaque, HMAC-signed, tenant-bound <code>cursor</code> (continuation), with an optional 4,096–49,152-byte serialized budget (32,768 default). Results use snake_case envelope fields, admit whole messages only, and return bounded identity/byte diagnostics without text when a message is oversized. Missing, foreign, deleted, or unknown conversations, revisions, nodes, and keys share a uniform <code>NOT_FOUND</code> result. Duplicate canonical message keys return a bounded canonical-storage error and are never resolved by choosing one. The optional key selector reads the <code>messageKey</code> fields created by <code>memory_upsert_messages</code> (and other canonical keyed data); keyed writes are shipped.</p>
     <p><code>memory_get_conversations</code> accepts exactly one of <code>requests</code> (the first call) or an opaque <code>cursor</code> (continuations), plus optional <code>max_serialized_bytes</code>: default 32,768, minimum 4,096, maximum 49,152. Responses report <code>batchId</code>, ordered <code>results</code>, <code>completed</code>, <code>remaining</code>, <code>nextCursor</code>, <code>usedSerializedBytes</code>, and <code>maxSerializedBytes</code>; UTF-8 JSON stays within the requested budget and the 49,152-byte ceiling. Current revisions are pinned before bodies load, so cursor pages never mix concurrent writes; individual errors remain isolated and whole compact messages are admitted in deterministic round-robin order. Loop with <code>{ cursor: … }</code> until <code>nextCursor</code> is absent.</p>
     <p><code>memory_search</code> accepts <code>query</code>, namespace and tag filters, <code>limit</code>, and optional <code>max_serialized_bytes</code> on the first call. If more results remain, continue with only an opaque <code>cursor</code> plus page and byte limits; the tenant-bound snapshot pins the ranking version, order, scores, and revision references. Compact references stay within the requested UTF-8 JSON budget. Snapshots expire automatically; deleted or no-longer-owned candidates are omitted with bounded safe reasons, and preserved <code>degraded</code>/<code>unavailable</code> diagnostics explain retrieval failures. Continuations cannot change the original filters.</p>
   </section>
@@ -714,6 +721,9 @@ function adrsPage(locale: Locale = "en"): Response {
     ["0037", "Runtime capabilities and aggregate byte budgets"],
     ["0038", "Message-edit provenance"],
     ["0039", "Tenant-bound memory-search snapshots and opaque cursors"],
+    ["0040", "Atomic multi-conversation commits"],
+    ["0041", "Exact revision-pinned message lookup"],
+    ["0042", "Stable keyed message upserts"],
   ];
   const rows = adrs
     .map(

@@ -297,6 +297,7 @@ describe("dashboard authentication and isolation", () => {
       tags: ["own-tag"],
       messages: [{ role: "user", content: "<img src=x onerror=alert(1)>" }],
     });
+    own.nodes[0]!.messageKey = "state.exported";
     const foreign = await createMcpConversation({
       title: "foreign title",
       namespace: "shared-map",
@@ -341,11 +342,12 @@ describe("dashboard authentication and isolation", () => {
     );
     const exportJson = await exported.json<{
       format: string;
-      conversations: Array<{ id: string; nodes: Array<{ raw: unknown }> }>;
+      conversations: Array<{ id: string; nodes: Array<{ raw: unknown; messageKey?: string }> }>;
     }>();
     expect(exportJson.format).toBe("mempersist.account-export.v1");
     expect(exportJson.conversations.map((item) => item.id)).toEqual([own.id]);
     expect(exportJson.conversations[0]?.nodes[0]).toHaveProperty("raw");
+    expect(exportJson.conversations[0]?.nodes[0]?.messageKey).toBe("state.exported");
     expect(second.csrf).toBeTruthy();
 
     const manifest = await test.env.MEMORY_DB.prepare(

@@ -40,37 +40,115 @@ Use `format: "compact"` for individual conversation/context reads in fallback mo
 original text and corrections; they are not generated summaries. Use canonical output when
 branch relationships, raw source fields, or multimodal references are needed.
 
+## Recover one exact message
+
+When a caller already knows the message identity, use `memory_get_messages` rather than
+`memory_search` or a search result's text. The first call accepts 1–100 ordered `requests` and
+each request names `conversation_id`, an optional `revision_id`, and exactly one of
+`source_node_id` or `message_key`. `source_node_id` is the canonical node identity (at most 200
+characters); `message_key` is the exact stable upsert key (1–128 lowercase ASCII characters from
+`[a-z0-9._/-]`, starting and ending with an alphanumeric character). It resolves only when the
+canonical node carries that key. Never infer an identity from similar text, ranking, title, offset,
+or a search hit.
+
+Omit `revision_id` only when the current head is intended. The server pins that head for every
+request before loading any R2 body. An explicit revision must belong to the conversation. The
+pin remains fixed for the whole call and for any continuation, so a concurrent save cannot replace
+the message with text from a newer head. A deleted, foreign, missing, or stale conversation,
+revision, node, or key has the same bounded `NOT_FOUND` outcome.
+
+Resolution is canonical-only and supports both active and inactive branch nodes. A source node
+does not become invalid merely because it is absent from `activeSourceNodeIds`; use a canonical
+conversation read when the UI needs to inspect branch membership before selecting it. Duplicate
+requests remain duplicate ordered result entries, while the implementation may load each unique
+pinned revision once. A duplicate `message_key` in one canonical revision is a bounded canonical
+storage error, never an arbitrary choice.
+
+The response reports `results`, `next_cursor`, `used_serialized_bytes`, and
+`max_serialized_bytes`. Each result retains its `request_index`, `conversation_id`, and
+`revision_id`, with `status: "ok"`, `"error"`, or `"oversized"`. Successful messages contain
+`sourceNodeId`, `messageKey` (or `null`), `role`, exact `text`, `createdAt`, and `updatedAt`.
+Errors are bounded and isolated to their request; do not discard successful entries because one
+selector failed. Whole messages are admitted only within the shared UTF-8 budget (default
+32,768; minimum 4,096; maximum 49,152). An oversized result reports a bounded
+`oversized_message` identity and bytes but never text; recover that text through an authorized
+canonical HTTP read or export.
+
+When `next_cursor` is non-null, call `memory_get_messages` again with only that opaque cursor and
+the optional byte budget. Cursors and readbacks are tenant-bound: they are HMAC-signed with the
+`MEMORY_API_TOKEN` secret and bind the authenticated user and effective namespaces. Treat a
+malformed, expired, forged, cross-tenant, or scope-mismatched cursor as unrecoverable; restart
+the first request instead of editing it. Do not persist request state in module globals or expose
+R2 object keys in a UI, API response, error, cursor, or recovery instruction.
+
+The dashboard/API may display the public conversation ID, pinned revision ID, and source-node
+identity and may link an authorized canonical read for recovery. It must not reconstruct exact
+text from search indexes, offsets, FTS/vector records, or internal R2 paths. A stale current head
+is normal: an omitted revision reads the head pinned at request start, while an explicit revision
+continues to address that immutable historical text until it is deleted or authorization changes.
+
+## Maintain keyed state
+
+Use `memory_upsert_messages` when RP state has a stable application field such as
+`state.relationship` or `current_scene.summary` and the caller wants to update that field without
+resubmitting an owner transcript. Send one owned conversation, the exact `base_revision_id` read
+from that owner, and 1–100 unique keyed text messages with their required roles. Keys are
+case-sensitive and must match the 1–128-character lowercase ASCII shape
+`[a-z0-9._/-]`; do not derive keys from prose or titles.
+
+The operation validates every item before writing. Existing keys keep their source-node identity,
+role, creation time, graph links, branch membership, raw fields, and metadata; only text changes,
+and `updatedAt` changes only when text changes. A role mismatch rejects the whole request. A
+missing key is appended after the active current node in request order with a server ID/timestamp.
+Keys are unique across the complete canonical graph, including inactive branches, so do not reuse a
+key for an alternate branch or assume active-only uniqueness.
+
+Expect one revision for any changed item, with canonical R2 write before head CAS and indexing
+after the successful CAS. A stale base is a conflict; reread the owner and recompute intent rather
+than rebasing. `status: "no_change"` means no revision or index job. Inspect `durable`, `indexing`,
+and `verification` independently; a durable commit with a queue or verification failure remains
+the saved state and must not be blindly replayed. Verification should confirm each key, role, and
+exact text at the returned revision.
+
+Choose the mutation by intent: use append for a new unkeyed transcript entry, edit for a known
+`source_node_id` text correction or append/prepend, replace for a complete transcript, and upsert
+for keyed field-level state. Upsert cannot change identity, role, graph, metadata, or a stale base.
+Copy, restore, and export preserve keys as part of canonical graph data; canonical recovery and
+integrity checks must revalidate key shape and complete-graph uniqueness rather than using search
+indexes as a source of truth.
+
 ## Save 3–6 owners
 
-1. Read each affected owner completely and retain its revision ID. Reconcile the intended
-   facts against prior facts and the existing owner boundaries before writing.
-2. After `simpan state`, use `memory_append` for continuation or `memory_replace` with the
-   **complete** intended transcript for corrections/supersession. Supply `base_revision_id`
-   and `verify: true`. Use `memory_store` with verification only for a genuinely new owner.
-3. Inspect `durable`, `revision_id`, `indexing`, and `verification` independently. A passed
-   verification means the server reloaded that exact committed R2 revision, checked its
-   integrity, and compared all intended messages. Read `verification.readback_available`: when it
-   is `true`, the persisted compact readback is in this response; when the response budget was
-   tight, the receipt lists the shed fields in `omitted` and returns `readback_requests` instead.
-4. Check the persisted readback semantically. When `verification.readback` is present, append
-   readback starts at the first new message's active offset; follow `readback.nextOffset` through
-   `memory_get_conversation` with the receipt's conversation ID, `revision_id`,
-   `format: "compact"`, and that offset until complete. When inline readback was shed, send the
-   `readback_requests` selectors as the `requests` array of a first-call
-   `memory_get_conversations`, then repeat `memory_get_conversations({ cursor: nextCursor })` with
-   only that cursor until `nextCursor` is `null`; each selector pins the committed `revision_id`.
-   Shedding is disclosure, not a verification failure, and no readback text is lost. A successful
-   persistence check does not mean the AI included every fact it should have.
-5. A conflict requires rereading the current owner and reconciling before another write.
-   A post-commit verification/indexing failure requires inspecting the returned revision,
-   not blindly repeating the write. Report which owners committed if a later owner fails;
-   earlier saves remain committed.
+1. Read each affected owner completely and retain its current revision ID. Reconcile the
+   intended facts against prior facts and existing owner boundaries before writing.
+2. When several owners must change as one coordinated save, call `memory_commit_batch` once
+   with a stable `idempotency_key` and one operation per owner. Each operation must use the
+   explicit revision ID just read as `base_revision_id`. Use `operation: "append"` for
+   continuation (optionally supplying tags) and `operation: "replace"` with the **complete**
+   intended transcript for corrections or supersession. The batch may span namespaces owned by
+   the same account; it cannot span accounts.
+3. Set `verify: true` when the save needs canonical readback. The batch is all-or-none for
+   head advancement: a stale or invalid middle operation commits none of the owners. Inspect
+   `status`, `durable`, every ordered result's `revision_id`, `indexing`, and `verification`
+   independently. A committed batch returns a bounded receipt with `batch_id`, per-owner
+   `request_index`, prior revision, new revision, and post-commit states.
+4. Check each persisted readback semantically. When inline readback is present, follow its
+   continuation to completion. When receipt fitting sheds readback, use `readback_requests` as
+   the `requests` array of a first-call `memory_get_conversations`, then repeat with only
+   `cursor` until `nextCursor` is `null`. Shedding is disclosure, not a verification failure.
+5. Keep the exact request material for safe retry. Replaying the same account/key/material
+   returns the durable receipt without duplicate revisions or jobs. A changed material or
+   base under the same key conflicts. If a batch did not commit because a base was stale,
+   reread **all** affected owners and reconcile before submitting a new batch.
+6. A post-commit indexing or verification failure is not a failed save. Inspect the returned
+   revision IDs, retry indexing or recover readback as documented, and do not blindly repeat
+   the write. If atomic coordination is unnecessary, ordinary `memory_append`,
+   `memory_replace`, or `memory_store` calls remain valid.
 
-For readbacks that fit in one response, 3–6 owners require 3–6 write/verification calls rather
-than 6–12 separate write/readback calls, excluding preparatory reads. Large readbacks require
-continuation calls. An `oversizedMessage` is an explicit blocker at that offset; a smaller
-message-count limit cannot split it. Retrieve the original through an authorized canonical
-HTTP read/export and do not silently skip it.
+For a coordinated 3–6-owner save, this is one write/verification call rather than one call per
+owner. Large readbacks still require continuation calls. An `oversizedMessage` is an explicit
+blocker at that offset; retrieve the original through an authorized canonical HTTP read/export
+and do not silently skip it.
 
 ## Amend an existing message
 
@@ -126,17 +204,21 @@ appending anything. Preserve unrelated rules and owner references verbatim.
 > require authorized canonical HTTP/export recovery. Later corrective messages supersede earlier facts.
 > Resolve the active arc and relevant owners after runtime loading; archived arcs remain source-on-demand.
 >
-> For authorized saves, retain owner boundaries and optimistic base revisions. Request
-> `verify: true` for each store/append/replace. Server readback counts as persistence
-> verification only when it reports `verification.status: "passed"` for the returned
-> committed revision. Check the persisted readback semantically and finish any pagination
-> before declaring the save reviewed. Persistence verification cannot detect facts omitted
-> from the write request. Report durability, verification, and indexing separately. Never
-> repeat a committed write merely because verification or indexing failed. No multi-owner
-> atomicity is assumed. Amend a known message only with `memory_edit_messages`, sending the pinned
-> base revision and the exact `source_node_id` for each `replace`/`append`/`prepend` edit; an
-> all-unchanged request is a bounded `no_change` that queues no index job, and after a stale-base
-> conflict re-read the head instead of replaying the same edit.
+> For authorized saves, retain owner boundaries and optimistic base revisions. For a coordinated
+> 3–6-owner save, send one `memory_commit_batch` with a stable `idempotency_key`, one
+> operation per owner, explicit `base_revision_id` values, and `verify: true`; use append for
+> continuation and complete replace for corrections. Same-account namespaces are allowed, but
+> cross-account writes are not. The batch advances every head or none, so a stale middle owner
+> must cause a reread of all affected owners before a new batch.
+>
+> Server readback counts as persistence verification only when it reports
+> `verification.status: "passed"` for each returned committed revision. Check persisted readback
+> semantically and finish pagination before declaring the save reviewed. Persistence verification
+> cannot detect facts omitted from the write request. Report durability, verification, and
+> indexing separately. Never repeat a committed batch merely because verification or indexing
+> failed; replay the same key/material only to recover an ambiguous result. Amend a known message
+> only with `memory_edit_messages`, sending the pinned base revision and exact `source_node_id`
+> for each `replace`/`append`/`prepend` edit.
 
 Repair broken owner references and disagreeing arc pointers in a separately authorized
 maintenance pass. Do not guess replacement IDs. Revision-aware unchanged responses,
@@ -166,3 +248,7 @@ Continuation reads use the same pinned revisions for every sample. Save comparis
 one synthetic correction per owner; separate reads start at the newly appended offset.
 The continuation payload reduction was 49.7%. Local elapsed times are noisy and should be
 remeasured on the deployed workflow before choosing further latency work.
+
+The historical save rows above measure separate per-owner writes and readbacks; they do not
+measure the coordinated `memory_commit_batch` path. Use the batch workflow for new 3–6-owner
+saves when all-head atomicity is required, and do not infer batch latency from these samples.

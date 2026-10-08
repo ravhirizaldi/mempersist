@@ -34,6 +34,89 @@ decoded, repaired, or replayed under another account. Start a new first-page sea
 continuation supplies only the cursor and new page/byte limits; changing `q` or filters on
 `/api/search` is rejected.
 
+### Exact message lookup and recovery
+
+Use `memory_get_messages` when the caller knows the canonical `source_node_id` or exact
+`message_key` written by `memory_upsert_messages`. Do not use search ranking, FTS/vector chunks,
+titles, offsets, or similar text to guess an identity. Each first-call selector includes a
+conversation, optional revision, and exactly one identity selector. The server pins omitted
+revisions to the current head for every request before any R2 body load; explicit revisions must
+belong to the conversation. The selected revisions remain fixed through continuations, even if a
+newer head is committed while the caller is reading.
+
+The lookup is canonical-only and can resolve known nodes on either the active or an inactive
+branch. It preserves duplicate ordered requests and isolates failures per result. Missing,
+foreign, deleted, or stale conversations, revisions, nodes, and keys intentionally return the same
+bounded `NOT_FOUND` behavior. Duplicate canonical message keys are a bounded storage error, not
+a reason to choose one matching node. A canonical R2 read may be deduplicated by unique pinned
+revision, but this is invisible to callers.
+
+The response uses whole messages and the shared UTF-8 budget: default 32,768 bytes, minimum 4,096,
+maximum 49,152. `status: "error"` entries contain a bounded `error`; `status: "oversized"`
+entries contain only a bounded `oversized_message` with the public conversation/revision/source-node
+(or key) identity and byte count, never text. Partial errors do not invalidate successful entries.
+Continue with only `next_cursor` until it is `null`; do not resubmit selectors or retry the same
+cursor after a terminal oversized or validation result.
+
+Recovery for an oversized message or canonical read failure is an authorized canonical HTTP read
+or account export at the returned conversation and pinned revision. If canonical R2 is missing or
+corrupt, restore it from an independent canonical backup and verify the manifest/segment hashes.
+Never rebuild exact prose from FTS, Vectorize, D1 chunks, a search snapshot, or an internal R2 key.
+The public dashboard/API may show the conversation ID, revision ID, and source-node identity, but
+must not expose bucket paths or internal object keys.
+
+Treat the cursor and any readback selector as tenant-bound capabilities, not portable bookmarks.
+They are HMAC-signed with `MEMORY_API_TOKEN` and bind the authenticated user and effective
+namespaces. Validation occurs before R2 access; malformed, expired, forged, cross-tenant, or
+scope-mismatched cursors receive the same bounded validation category and require a new first call.
+Do not decode, edit, repair, or store request state in module globals.
+
+If the head changed between UI display and lookup, that is not a lookup failure: omitted revision
+selectors use the head pinned when the request began, while explicit revision selectors continue
+to address the immutable historical text. If that revision was deleted or is no longer authorized,
+report the same not-found result and do not silently substitute the new head.
+
+### Keyed message upsert runbook
+
+The deployed capabilities response advertises `features.message_keys: true`; use that capability
+rather than treating keyed writes as a future or compatibility-only feature.
+
+`memory_upsert_messages` is the durable mutation for 1–100 keyed text messages in one owned,
+non-deleted conversation. Require the caller's exact `base_revision_id` and a role for every item.
+Validate each key as 1–128 lowercase ASCII characters matching `[a-z0-9._/-]`, beginning and ending
+with an alphanumeric character, and reject duplicate keys in the request before canonical work.
+Missing, foreign, deleted, and unowned conversations must remain indistinguishable; do not probe
+ownership by retrying with alternate namespaces or selectors.
+
+Before any write, load and integrity-check the pinned complete graph, including inactive branches.
+An existing key is updated only in text: source-node ID, role, `createdAt`, graph links, branch
+membership, raw fields, and metadata remain unchanged, and `updatedAt` moves only when text changes.
+A role mismatch is a whole-request error. A missing key gets a server-generated node ID and
+timestamp and is appended after the active current node in request order. The server validates all
+items, text limits, and key uniqueness before writing, so one bad item cannot create a partial
+revision.
+
+For a changed request, expect one immutable revision. R2 canonical manifest/segment durability
+must precede the D1 head CAS against the supplied base; only a successful CAS may enqueue indexing.
+A stale base is a conflict and never overwrites the newer head. `status: "no_change"` means no
+canonical object, head transition, or index job was written. Treat `durable: true` as authoritative
+even when queueing or verification reports failure: retry the indexed revision or read it by its
+pinned revision, never resubmit the mutation blindly. When verification is requested, confirm
+every keyed item, exact text, role, and canonical hash in the committed revision.
+
+Copy and restore preserve keys as canonical data, not as a separate index. A lossless copy keeps
+keys on all active and inactive nodes while assigning destination IDs; restore reactivates the key
+set from the selected historical revision. Full exports must include `messageKey`; on import or
+restore, rerun key-shape and complete-graph uniqueness checks. If an export, copy, or restore has
+malformed or duplicate keys, stop and repair the canonical manifest/segment from an independent
+backup. `yarn verify:integrity` is the authority for manifest/segment hashes, malformed segment
+line reports, and key violations; never reconstruct keyed messages from FTS, Vectorize, chunks, or
+search snapshots.
+
+Use append for new unkeyed transcript entries, `memory_edit_messages` for source-node text edits,
+and replace for a complete transcript. Upsert is not an alias for any of these: it never changes
+identity, role, graph, metadata, or a stale base.
+
 ## Recovery cases
 
 ### Vectorize deleted or model changed
@@ -54,6 +137,57 @@ generation); a memory deletion clears vectors and rows for every generation.
 ### Import/queue crash
 
 Inspect the import/job. Canonical revisions already written are safe. Retry the job; it resumes from the committed ordinal and all writes are idempotent. For DLQ messages, correct the underlying cause before invoking retry.
+
+### Atomic batch commit interrupted or replayed
+
+`memory_commit_batch` coordinates 1–20 unique append/replace operations for one
+authenticated account. Every operation carries an explicit base revision; operations may target
+different namespaces owned by that account, but never another account. `replace` includes the
+complete intended transcript, while `append` adds messages and may union tags. A stale,
+deleted, foreign, unknown, invalid, or over-budget operation aborts the entire D1 commit:
+no conversation head advances and no index job is eligible for enqueueing.
+
+The service prepares immutable canonical R2 manifests and segments before the single D1
+transaction. It records the expected prepared objects durably before or while writing them so a
+Worker crash can be resumed. R2 cannot roll back, so a failed or interrupted D1 commit may
+leave trackable prepared objects while all live heads remain unchanged. This recovery path requires
+the numbered `0015_atomic_batch_recovery.sql` migration; apply it remotely before deploying code
+that uses the cleanup command or endpoint.
+
+**Runbook**
+
+1. Keep the original `idempotency_key`, operation order, messages, tags, and base revisions.
+   Retry the same request after a transient failure; the deterministic preparation path reuses
+   existing immutable objects rather than duplicating them.
+2. If the batch committed, a replay of the same account/key/material returns the durable
+   bounded receipt and creates no revisions or duplicate indexing jobs. If the material or
+   bases changed under that key, treat the conflict as intentional and choose a new key only
+   for a genuinely new mutation.
+3. If a receipt reports `durable: true` with an indexing or verification failure, do not
+   resend the batch. Inspect each returned `revision_id`; retry the recorded index jobs or run
+   `yarn reindex`, and use the revision-pinned readback/integrity tools to investigate
+   verification failures.
+4. Do not delete prepared R2 objects or preparation records manually. After confirming that the
+   corresponding batch did not commit, run the authenticated operator cleanup:
+
+   ```sh
+   yarn admin cleanup-batches
+   # Or use an explicit ISO-8601 cutoff:
+   yarn admin cleanup-batches 2026-09-01T00:00:00.000Z
+   ```
+
+   The equivalent authenticated endpoint is `POST /api/admin/commit-batches/cleanup` with an empty
+   body (the default cutoff) or `{"older_than":"2026-09-01T00:00:00.000Z"}`. This operation deletes
+   only aged, uncommitted preparations and their unreachable objects; it leaves objects referenced
+   by a committed revision intact.
+
+5. If the same batch remains ambiguous after a Worker restart, retry the exact request rather
+   than constructing a different operation set. The idempotency record and deterministic material
+   identify whether preparation can resume, the batch committed, or the key conflicts.
+
+This is a recovery boundary, not an external distributed transaction: it cannot roll back
+immutable R2 data, coordinate another account, or make queue/index workers part of the D1
+transaction. Derived-index repair is always post-commit.
 
 ### Dashboard deletion interrupted or Worker rolled back
 

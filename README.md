@@ -125,24 +125,46 @@ link to `.wrangler/tmp/email/<id>/email-text/`. See
 
 ## Tools
 
-21 tools, each carrying a human-readable title and read-only or destructive annotations. Retrieve
+24 tools, each carrying a human-readable title and read-only or destructive annotations. Retrieve
 first, then expand only what you selected.
 
 ### Read
 
-| Tool                           | Title                 | Notes                                                                |
-| ------------------------------ | --------------------- | -------------------------------------------------------------------- |
-| `memory_search`                | Search memories       | Hybrid search, 1–20 references; filters and opaque cursor pagination |
-| `memory_get_context`           | Get memory context    | Canonical messages around one result chunk, up to 10 each way        |
-| `memory_get_conversation`      | Get conversation      | Page one conversation's active timeline or full graph                |
-| `memory_get_conversations`     | Get conversations     | Revision-pinned batch read of 1–20 conversations, cursor-paged       |
-| `memory_list_conversations`    | List conversations    | Metadata and tags only, no bodies                                    |
-| `memory_list_revisions`        | List revisions        | Immutable revision history, newest first                             |
-| `memory_resolve_conversations` | Resolve conversations | Exact-title lookup, no semantic search                               |
-| `memory_list_namespaces`       | List namespaces       | Owned namespaces with conversation counts                            |
-| `memory_stats`                 | Get memory statistics | Per-namespace counts and indexing health                             |
-| `memory_import_status`         | Get import status     | Import progress, duplicate, or failure                               |
-| `memory_get_capabilities`      | Get capabilities      | The deployed contract: versions, limits, per-tool bounds, flags      |
+| Tool                           | Title                 | Notes                                                                                                                           |
+| ------------------------------ | --------------------- | ------------------------------------------------------------------------------------------------------------------------------- |
+| `memory_search`                | Search memories       | Hybrid search, 1–20 references; filters and opaque cursor pagination                                                            |
+| `memory_get_context`           | Get memory context    | Canonical messages around one result chunk, up to 10 each way                                                                   |
+| `memory_get_conversation`      | Get conversation      | Page one conversation's active timeline or full graph                                                                           |
+| `memory_get_messages`          | Get messages          | Exact source-node or optional keyed lookup, revision-pinned, ordered batch with opaque cursor and byte budget                   |
+| `memory_get_conversations`     | Get conversations     | Revision-pinned batch read of 1–20 conversations, cursor-paged                                                                  |
+| `memory_list_conversations`    | List conversations    | Metadata and tags only, no bodies                                                                                               |
+| `memory_list_revisions`        | List revisions        | Immutable revision history, newest first                                                                                        |
+| `memory_resolve_conversations` | Resolve conversations | Exact-title lookup, no semantic search                                                                                          |
+| `memory_list_namespaces`       | List namespaces       | Owned namespaces with conversation counts                                                                                       |
+| `memory_stats`                 | Get memory statistics | Per-namespace counts and indexing health                                                                                        |
+| `memory_import_status`         | Get import status     | Import progress, duplicate, or failure                                                                                          |
+| `memory_get_capabilities`      | Get capabilities      | The deployed contract: versions, limits, per-tool bounds, and `message_keys` / `atomic_multi_conversation_commit` feature flags |
+
+`memory_get_messages` accepts 1–100 ordered selectors. Each selector names a
+`conversation_id`, optionally pins a `revision_id`, and uses exactly one of
+`source_node_id` (up to 200 characters) or the forward-compatible `message_key`
+(1–128 lowercase ASCII letters, digits, `.`, `_`, `/`, or `-`, starting and ending
+with a letter or digit). Omitted revisions pin each conversation's current head
+before any canonical R2 body is loaded; canonical loads are deduplicated by
+unique pinned revision, while duplicate selectors retain duplicate ordered results.
+The read-only lookup does not use FTS or Vectorize. Missing, foreign, deleted, or
+unknown conversations, revisions, nodes, and keys share the same bounded
+`NOT_FOUND` result. Duplicate canonical message keys return a bounded
+canonical-storage error and are never resolved by choosing one. Whole messages
+are admitted within the 32 KiB default, 4 KiB minimum, and 48 KiB maximum
+serialized budgets; an oversized message is not truncated and returns only
+bounded identity/byte diagnostics. Continuations
+use an opaque, HMAC-signed, tenant-bound cursor that preserves selector order and
+revision pins.
+
+The optional `message_key` selector reads keyed fields written by `memory_upsert_messages` (and
+any canonical data that carries them). `memory_upsert_messages` is the stable-key writer for
+logical records; its contract is documented in the Write section below.
 
 ### Context assembly
 
@@ -153,17 +175,37 @@ first, then expand only what you selected.
 ### Write
 
 Each write returns a bounded durable receipt with separate indexing and verification status, and
-accepts `verify: true` to reload the committed R2 revision.
+accepts `verify: true` to reload the committed R2 revision. `memory_commit_batch` applies 1–20
+append or complete-replace operations across distinct conversations in one same-account atomic
+commit; every operation supplies an explicit `base_revision_id`.
 
-| Tool                        | Title                   | Notes                                                                  |
-| --------------------------- | ----------------------- | ---------------------------------------------------------------------- |
-| `memory_store`              | Store memory            | New intentional memory; first write claims a namespace you name        |
-| `memory_append`             | Append memory           | Continue a conversation with `base_revision_id`                        |
-| `memory_replace`            | Replace memory          | Supersede with a complete transcript, preserving identity and tags     |
-| `memory_edit_messages`      | Edit memory messages    | Edit 1–100 known source nodes in place; structured content is rejected |
-| `memory_restore_revision`   | Restore memory revision | Move the head back to a historical revision, no duplicate revision     |
-| `memory_copy_conversations` | Copy conversations      | Lossless R2 copy into another owned namespace, idempotency-keyed       |
-| `memory_update_tags`        | Update memory tags      | Add or remove tags under optimistic concurrency                        |
+`memory_upsert_messages` accepts 1–100 unique keyed text messages for one owned conversation. Every
+request requires `base_revision_id` and a role; keys are exact 1–128-character lowercase ASCII
+strings matching `[a-z0-9._/-]`, starting and ending with a letter or digit. Existing keys replace
+text while preserving source identity, role, creation time, graph, and metadata; a role mismatch is
+rejected. Missing keys append in request order with server identity and timestamps. All entries are
+validated before one atomic revision is committed. An all-unchanged request returns `no_change`
+without a revision or index job; mixed inserts, updates, and unchanged entries create one revision.
+`verify: true` checks the committed canonical revision and reports per-key results in the durable
+receipt; indexing starts only after a successful head transition.
+The deployed capability response advertises `features.message_keys: true`.
+
+Batch replay with the same idempotency key and material returns the existing result without duplicate
+revisions or jobs. Changed material under a used key conflicts, and a stale operation prevents every
+operation in that batch from committing. Owned namespaces may be mixed in one batch; accounts
+remain isolated.
+
+| Tool                        | Title                   | Notes                                                                     |
+| --------------------------- | ----------------------- | ------------------------------------------------------------------------- |
+| `memory_store`              | Store memory            | New intentional memory; first write claims a namespace you name           |
+| `memory_upsert_messages`    | Upsert keyed messages   | Atomic 1–100 insert/update/no-op by exact key; required base revision     |
+| `memory_append`             | Append memory           | Continue a conversation with `base_revision_id`                           |
+| `memory_replace`            | Replace memory          | Supersede with a complete transcript, preserving identity and tags        |
+| `memory_commit_batch`       | Commit memory batch     | Atomically append/replace 1–20 conversations with explicit base revisions |
+| `memory_edit_messages`      | Edit memory messages    | Edit 1–100 known source nodes in place; structured content is rejected    |
+| `memory_restore_revision`   | Restore memory revision | Move the head back to a historical revision, no duplicate revision        |
+| `memory_copy_conversations` | Copy conversations      | Lossless R2 copy into another owned namespace, idempotency-keyed          |
+| `memory_update_tags`        | Update memory tags      | Add or remove tags under optimistic concurrency                           |
 
 ### Admin
 
@@ -212,7 +254,8 @@ enforce, so a quoted figure cannot drift from its enforcement. Deployed values:
 | Direct import body, and each multipart part | 16,777,216 bytes (16 MiB)             |
 | Single message content                      | 1,000,000 characters                  |
 | Batch conversation read response            | 32 KiB default, 48 KiB max            |
-| Search response budget                      | 32 KiB default, 4 KiB min, 48 KiB max |
+| Search response                             | 32 KiB default, 4 KiB min, 48 KiB max |
+| Exact message lookup response               | 32 KiB default, 4 KiB min, 48 KiB max |
 
 Aggregate limits are the UTF-8 bytes of the complete serialized request, measured before any
 canonical work. An oversized request writes nothing and fails with
@@ -274,18 +317,19 @@ applied. Architecture changes require an ADR in [docs/adr/](docs/adr/). See
 
 ## Documentation
 
-| Document                                                           | Contents                                                          |
-| ------------------------------------------------------------------ | ----------------------------------------------------------------- |
-| [ARCHITECTURE.md](ARCHITECTURE.md)                                 | System shape, canonical versus derived, write order, retrieval    |
-| [CONTRIBUTING.md](CONTRIBUTING.md)                                 | Setup, per-change requirements, tests, authorization gates        |
-| [SECURITY.md](SECURITY.md)                                         | Threat model, trust boundaries, limits, rotation, reporting       |
-| [docs/mcp.md](docs/mcp.md)                                         | Tool contracts, receipts, batches, capabilities, rejection shapes |
-| [docs/development.md](docs/development.md)                         | Local loop, local MCP clients, browser pages, memory map client   |
-| [docs/deployment.md](docs/deployment.md)                           | Provisioning, migration, deploy, post-deploy checks               |
-| [docs/cloudflare-resources.md](docs/cloudflare-resources.md)       | Required resources and manual provisioning steps                  |
-| [docs/chatgpt-import.md](docs/chatgpt-import.md)                   | Import guarantees, upload paths, parser ceilings                  |
-| [docs/dashboard.md](docs/dashboard.md)                             | Dashboard, export, and deletion flows                             |
-| [docs/storage-and-indexing.md](docs/storage-and-indexing.md)       | Canonical storage layout and index generations                    |
-| [docs/operations-and-recovery.md](docs/operations-and-recovery.md) | Recovery procedures and deletion-job re-enqueue                   |
-| [docs/rp-workflow.md](docs/rp-workflow.md)                         | Reviewable runtime-rule workflow                                  |
-| [docs/adr/](docs/adr/)                                             | Decision log, newest first                                        |
+| Document                                                                                               | Contents                                                          |
+| ------------------------------------------------------------------------------------------------------ | ----------------------------------------------------------------- |
+| [ARCHITECTURE.md](ARCHITECTURE.md)                                                                     | System shape, canonical versus derived, write order, retrieval    |
+| [CONTRIBUTING.md](CONTRIBUTING.md)                                                                     | Setup, per-change requirements, tests, authorization gates        |
+| [SECURITY.md](SECURITY.md)                                                                             | Threat model, trust boundaries, limits, rotation, reporting       |
+| [docs/mcp.md](docs/mcp.md)                                                                             | Tool contracts, receipts, batches, capabilities, rejection shapes |
+| [docs/development.md](docs/development.md)                                                             | Local loop, local MCP clients, browser pages, memory map client   |
+| [docs/deployment.md](docs/deployment.md)                                                               | Provisioning, migration, deploy, post-deploy checks               |
+| [docs/cloudflare-resources.md](docs/cloudflare-resources.md)                                           | Required resources and manual provisioning steps                  |
+| [docs/chatgpt-import.md](docs/chatgpt-import.md)                                                       | Import guarantees, upload paths, parser ceilings                  |
+| [docs/dashboard.md](docs/dashboard.md)                                                                 | Dashboard, export, and deletion flows                             |
+| [docs/storage-and-indexing.md](docs/storage-and-indexing.md)                                           | Canonical storage layout and index generations                    |
+| [docs/operations-and-recovery.md](docs/operations-and-recovery.md)                                     | Recovery procedures and deletion-job re-enqueue                   |
+| [docs/rp-workflow.md](docs/rp-workflow.md)                                                             | Reviewable runtime-rule workflow                                  |
+| [docs/adr/](docs/adr/)                                                                                 | Decision log, newest first                                        |
+| [docs/adr/0040-atomic-multi-conversation-commit.md](docs/adr/0040-atomic-multi-conversation-commit.md) | Atomic multi-conversation commits, replay, recovery               |

@@ -1,10 +1,15 @@
 import type { AppEnv, CanonicalConversation, CanonicalNode } from "./domain";
+import { isValidMessageKey } from "./domain";
 import { AppError } from "./errors";
 import {
   BATCH_DEFAULT_SERIALIZED_BYTES,
   BATCH_MAX_SERIALIZED_BYTES,
   BATCH_MIN_SERIALIZED_BYTES,
   COMPACT_RESPONSE_BYTES,
+  MAX_EXACT_MESSAGE_CURSOR_CHARS,
+  MAX_EXACT_MESSAGE_REQUESTS,
+  MAX_MESSAGE_KEY_CHARS,
+  MAX_EXACT_SOURCE_NODE_ID_CHARS,
 } from "./limits";
 import { loadCanonicalRevision, loadConversationTags } from "./storage";
 
@@ -266,6 +271,7 @@ export function jsonBytes(value: unknown): number {
 
 export interface CompactMessage {
   sourceNodeId: string;
+  messageKey?: string;
   role: string | null;
   createdAt: string | null;
   updatedAt: string | null;
@@ -297,12 +303,20 @@ export interface CompactPage {
 
 function compactMessage({
   sourceNodeId,
+  messageKey,
   role,
   createdAt,
   updatedAt,
   text,
 }: CanonicalNode): CompactMessage {
-  return { sourceNodeId, role, createdAt, updatedAt, text };
+  return {
+    sourceNodeId,
+    ...(messageKey === undefined ? {} : { messageKey }),
+    role,
+    createdAt,
+    updatedAt,
+    text,
+  };
 }
 
 function compactMetadata(
@@ -1522,29 +1536,655 @@ export async function getConversations(
     return getLegacyConversations(env, input, expectedNamespaces, expectedUserId);
   return getCursorConversations(env, input, expectedNamespaces, expectedUserId, secret);
 }
+export interface ExactMessageRequest {
+  conversation_id: string;
+  revision_id?: string;
+  source_node_id?: string;
+  message_key?: string;
+}
+
+export interface ExactMessagesInput {
+  requests?: ExactMessageRequest[];
+  cursor?: string;
+  max_serialized_bytes?: number;
+}
+
+export interface ExactMessage {
+  sourceNodeId: string;
+  messageKey: string | null;
+  role: string | null;
+  text: string;
+  createdAt: string | null;
+  updatedAt: string | null;
+}
+
+export interface ExactMessageResult {
+  request_index: number;
+  status: "ok" | "error" | "oversized";
+  conversation_id: string;
+  revision_id?: string;
+  message?: ExactMessage;
+  error?: { code: "NOT_FOUND" | "CANONICAL_STORAGE"; message: string };
+  oversized_message?: {
+    sourceNodeId: string;
+    messageKey: string | null;
+    bytes: number;
+  };
+}
+
+export interface ExactMessagesResult {
+  results: ExactMessageResult[];
+  next_cursor: string | null;
+  used_serialized_bytes: number;
+  max_serialized_bytes: number;
+}
+
+export type GetMessagesInput = ExactMessagesInput;
+export type GetMessageRequest = ExactMessageRequest;
+export type GetMessagesResult = ExactMessagesResult;
+type ExactState = {
+  conversationId: string;
+  revisionId?: string;
+  selector: { kind: "source_node_id" | "message_key"; value: string };
+  errorCode?: "NOT_FOUND" | "CANONICAL_STORAGE";
+};
+
+type ExactCursorPayload = {
+  v: 1;
+  s: 2;
+  e: number;
+  p: number;
+  q: Array<[string, string, 0 | 1, string, "" | "NOT_FOUND" | "CANONICAL_STORAGE"]>;
+};
+
+const EXACT_CURSOR_TTL_MS = 15 * 60 * 1000;
+
+function invalidExactCursor(): never {
+  throw new AppError("VALIDATION", "Invalid message cursor", 400);
+}
+
+function normalizeExactBudget(value: unknown): number {
+  if (value === undefined) return BATCH_DEFAULT_SERIALIZED_BYTES;
+  if (
+    typeof value === "number" &&
+    Number.isSafeInteger(value) &&
+    value >= BATCH_MIN_SERIALIZED_BYTES &&
+    value <= BATCH_MAX_SERIALIZED_BYTES
+  ) {
+    return value;
+  }
+  throw new AppError(
+    "VALIDATION",
+    `max_serialized_bytes must be between ${BATCH_MIN_SERIALIZED_BYTES} and ${BATCH_MAX_SERIALIZED_BYTES}`,
+    400,
+  );
+}
+
+function validateExactRequest(value: unknown): ExactMessageRequest {
+  if (!isRecord(value)) throw new AppError("VALIDATION", "Invalid message request", 400);
+  const conversationId = value.conversation_id;
+  const revisionId = value.revision_id;
+  const sourceNodeId = value.source_node_id;
+  const messageKey = value.message_key;
+  const selectorCount = Number(sourceNodeId !== undefined) + Number(messageKey !== undefined);
+  if (
+    typeof conversationId !== "string" ||
+    conversationId.length < 1 ||
+    conversationId.length > 128 ||
+    (revisionId !== undefined &&
+      (typeof revisionId !== "string" || revisionId.length < 1 || revisionId.length > 128)) ||
+    selectorCount !== 1
+  ) {
+    throw new AppError("VALIDATION", "Invalid message request", 400);
+  }
+  if (
+    sourceNodeId !== undefined &&
+    (typeof sourceNodeId !== "string" ||
+      sourceNodeId.length < 1 ||
+      sourceNodeId.length > MAX_EXACT_SOURCE_NODE_ID_CHARS)
+  ) {
+    throw new AppError("VALIDATION", "Invalid source_node_id", 400);
+  }
+  if (
+    messageKey !== undefined &&
+    (typeof messageKey !== "string" ||
+      messageKey.length < 1 ||
+      messageKey.length > MAX_MESSAGE_KEY_CHARS ||
+      !/^[a-z0-9](?:[a-z0-9._/-]*[a-z0-9])?$/u.test(messageKey))
+  ) {
+    throw new AppError("VALIDATION", "Invalid message_key", 400);
+  }
+  return {
+    conversation_id: conversationId,
+    ...(revisionId === undefined ? {} : { revision_id: revisionId }),
+    ...(sourceNodeId === undefined ? {} : { source_node_id: sourceNodeId }),
+    ...(messageKey === undefined ? {} : { message_key: messageKey }),
+  };
+}
+
+function exactCursorBody(payload: ExactCursorPayload): string {
+  const wire = {
+    ...payload,
+    q: payload.q.map(([conversationId, revisionId, selectorKind, selector, error]) => [
+      encodeCursorId(conversationId),
+      revisionId ? encodeCursorId(revisionId) : "",
+      selectorKind,
+      base64UrlEncode(textEncoder.encode(selector)),
+      error,
+    ]),
+  };
+  return base64UrlEncode(textEncoder.encode(JSON.stringify(wire)));
+}
+
+async function signExactCursor(
+  payload: ExactCursorPayload,
+  secret: string,
+  expectedUserId: string,
+  expectedNamespaces: string[],
+): Promise<string> {
+  if (!secret) invalidExactCursor();
+  const body = exactCursorBody(payload);
+  const key = await cursorKey(secret);
+  const signature = new Uint8Array(
+    await crypto.subtle.sign(
+      "HMAC",
+      key,
+      textEncoder.encode(`${cursorBinding(expectedUserId, expectedNamespaces)}.${body}`),
+    ),
+  );
+  return `${body}.${base64UrlEncode(signature)}`;
+}
+
+function decodeExactState(value: unknown, index: number): ExactState {
+  if (!Array.isArray(value) || value.length !== 5) invalidExactCursor();
+  const [encodedConversationId, encodedRevisionId, selectorKind, encodedSelector, errorCode] =
+    value as [unknown, unknown, unknown, unknown, unknown];
+  if (
+    typeof encodedConversationId !== "string" ||
+    typeof encodedRevisionId !== "string" ||
+    (selectorKind !== 0 && selectorKind !== 1) ||
+    typeof encodedSelector !== "string" ||
+    (errorCode !== "" && errorCode !== "NOT_FOUND" && errorCode !== "CANONICAL_STORAGE")
+  ) {
+    invalidExactCursor();
+  }
+  const conversationId = decodeCursorId(encodedConversationId);
+  const revisionId = encodedRevisionId ? decodeCursorId(encodedRevisionId) : undefined;
+  const selector = new TextDecoder().decode(base64UrlDecode(encodedSelector));
+  const selectorLimit = selectorKind === 0 ? MAX_EXACT_SOURCE_NODE_ID_CHARS : MAX_MESSAGE_KEY_CHARS;
+  if (!selector || selector.length > selectorLimit || !conversationId || index < 0)
+    invalidExactCursor();
+  if (selectorKind === 1 && !/^[a-z0-9](?:[a-z0-9._/-]*[a-z0-9])?$/u.test(selector)) {
+    invalidExactCursor();
+  }
+  return {
+    conversationId,
+    ...(revisionId ? { revisionId } : {}),
+    selector: {
+      kind: selectorKind === 0 ? "source_node_id" : "message_key",
+      value: selector,
+    },
+    ...(errorCode ? { errorCode } : {}),
+  };
+}
+
+async function decodeExactCursor(
+  cursor: unknown,
+  secret: string,
+  expectedUserId: string,
+  expectedNamespaces: string[],
+): Promise<{ position: number; expiresAt: number; states: ExactState[] }> {
+  if (
+    typeof cursor !== "string" ||
+    cursor.length < 16 ||
+    cursor.length > MAX_EXACT_MESSAGE_CURSOR_CHARS ||
+    !secret
+  ) {
+    invalidExactCursor();
+  }
+  const separator = cursor.lastIndexOf(".");
+  if (separator <= 0 || separator === cursor.length - 1) invalidExactCursor();
+  const body = cursor.slice(0, separator);
+  const signature = base64UrlDecode(cursor.slice(separator + 1));
+  if (signature.byteLength !== 32) invalidExactCursor();
+  const key = await cursorKey(secret);
+  let valid = false;
+  try {
+    valid = await crypto.subtle.verify(
+      "HMAC",
+      key,
+      signature.slice().buffer,
+      textEncoder.encode(`${cursorBinding(expectedUserId, expectedNamespaces)}.${body}`),
+    );
+  } catch {
+    invalidExactCursor();
+  }
+  if (!valid) invalidExactCursor();
+  let decoded: unknown;
+  try {
+    decoded = JSON.parse(new TextDecoder().decode(base64UrlDecode(body))) as unknown;
+  } catch {
+    invalidExactCursor();
+  }
+  if (!isRecord(decoded)) invalidExactCursor();
+  if (
+    decoded.v !== 1 ||
+    decoded.s !== 2 ||
+    typeof decoded.e !== "number" ||
+    !Number.isSafeInteger(decoded.e) ||
+    decoded.e <= Date.now() ||
+    decoded.e > Date.now() + EXACT_CURSOR_TTL_MS + 60_000 ||
+    !isSafeInteger(decoded.p) ||
+    !Array.isArray(decoded.q) ||
+    decoded.q.length < 1 ||
+    decoded.q.length > MAX_EXACT_MESSAGE_REQUESTS ||
+    decoded.p < 0 ||
+    decoded.p > decoded.q.length
+  ) {
+    invalidExactCursor();
+  }
+  const states = decoded.q.map((state, index) => decodeExactState(state, index));
+  if (states.slice(decoded.p).some((state) => !state.revisionId && !state.errorCode)) {
+    invalidExactCursor();
+  }
+  return { position: decoded.p, expiresAt: decoded.e, states };
+}
+
+async function pinExactRequest(
+  env: AppEnv,
+  request: ExactMessageRequest,
+  expectedNamespaces: string[],
+  expectedUserId: string,
+): Promise<ExactState> {
+  const selector =
+    request.source_node_id !== undefined
+      ? { kind: "source_node_id" as const, value: request.source_node_id }
+      : { kind: "message_key" as const, value: request.message_key! };
+  try {
+    const row = await env.MEMORY_DB.prepare(
+      `SELECT c.current_revision_id, c.namespace, c.user_id, r.id AS pinned_revision_id
+       FROM conversations c
+       LEFT JOIN conversation_revisions r
+         ON r.id = ? AND r.conversation_id = c.id
+       WHERE c.id = ? AND c.deleted_at IS NULL`,
+    )
+      .bind(request.revision_id ?? null, request.conversation_id)
+      .first<{
+        current_revision_id: string | null;
+        namespace: string;
+        user_id: string;
+        pinned_revision_id: string | null;
+      }>();
+    const revisionId = request.revision_id ?? row?.current_revision_id;
+    const denied =
+      !row ||
+      row.user_id !== expectedUserId ||
+      (expectedNamespaces.length > 0 && !expectedNamespaces.includes(row.namespace)) ||
+      !revisionId ||
+      (request.revision_id !== undefined && row.pinned_revision_id !== revisionId);
+    return {
+      conversationId: request.conversation_id,
+      ...(denied ? {} : { revisionId }),
+      selector,
+      ...(denied ? { errorCode: "NOT_FOUND" as const } : {}),
+    };
+  } catch {
+    return {
+      conversationId: request.conversation_id,
+      selector,
+      errorCode: "CANONICAL_STORAGE",
+    };
+  }
+}
+
+function exactError(
+  index: number,
+  state: ExactState,
+  code: "NOT_FOUND" | "CANONICAL_STORAGE",
+): ExactMessageResult {
+  return {
+    request_index: index,
+    status: "error",
+    conversation_id: state.conversationId,
+    ...(state.revisionId ? { revision_id: state.revisionId } : {}),
+    error:
+      code === "NOT_FOUND"
+        ? { code, message: "Conversation, revision, or message not found" }
+        : { code, message: "Canonical read failed" },
+  };
+}
+
+function exactMessageFromNode(node: CanonicalNode): ExactMessage {
+  return {
+    sourceNodeId: node.sourceNodeId,
+    messageKey: node.messageKey ?? null,
+    role: node.role,
+    text: node.text,
+    createdAt: node.createdAt,
+    updatedAt: node.updatedAt,
+  };
+}
+
+export async function getMessages(
+  env: AppEnv,
+  input: ExactMessagesInput,
+  expectedNamespaces: string[],
+  expectedUserId: string,
+  secret = env.MEMORY_API_TOKEN,
+): Promise<ExactMessagesResult> {
+  const hasRequests = input.requests !== undefined;
+  const hasCursor = input.cursor !== undefined;
+  if (hasRequests === hasCursor) {
+    throw new AppError("VALIDATION", "Provide exactly one of requests or cursor", 400);
+  }
+  const maxSerializedBytes = normalizeExactBudget(input.max_serialized_bytes);
+  let states: ExactState[];
+  let position: number;
+  let expiresAt: number;
+  if (hasRequests) {
+    if (
+      !Array.isArray(input.requests) ||
+      input.requests.length < 1 ||
+      input.requests.length > MAX_EXACT_MESSAGE_REQUESTS
+    ) {
+      throw new AppError("VALIDATION", `Expected 1–${MAX_EXACT_MESSAGE_REQUESTS} requests`, 400);
+    }
+    const requests = input.requests.map(validateExactRequest);
+    // Pin every request before starting any canonical R2 load.
+    states = await Promise.all(
+      requests.map((request) => pinExactRequest(env, request, expectedNamespaces, expectedUserId)),
+    );
+    position = 0;
+    expiresAt = Date.now() + EXACT_CURSOR_TTL_MS;
+  } else {
+    const decoded = await decodeExactCursor(
+      input.cursor,
+      secret,
+      expectedUserId,
+      expectedNamespaces,
+    );
+    states = decoded.states;
+    position = decoded.position;
+    expiresAt = decoded.expiresAt;
+  }
+
+  const revisionIds = [
+    ...new Set(states.flatMap((state) => (state.revisionId ? [state.revisionId] : []))),
+  ];
+  const loaded = new Map<
+    string,
+    { conversation: CanonicalConversation } | { error: "CANONICAL_STORAGE" }
+  >();
+  for (const revisionId of revisionIds) {
+    try {
+      loaded.set(revisionId, {
+        conversation: (await loadCanonicalRevision(env, revisionId)).conversation,
+      });
+    } catch {
+      loaded.set(revisionId, { error: "CANONICAL_STORAGE" });
+    }
+  }
+
+  const resolve = (index: number, state: ExactState): ExactMessageResult => {
+    if (state.errorCode) return exactError(index, state, state.errorCode);
+    if (!state.revisionId) return exactError(index, state, "NOT_FOUND");
+    const revision = loaded.get(state.revisionId);
+    if (!revision || "error" in revision) return exactError(index, state, "CANONICAL_STORAGE");
+    if (revision.conversation.id !== state.conversationId) {
+      return exactError(index, state, "CANONICAL_STORAGE");
+    }
+    const matches = revision.conversation.nodes.filter((node) =>
+      state.selector.kind === "source_node_id"
+        ? node.sourceNodeId === state.selector.value
+        : node.messageKey === state.selector.value,
+    );
+    if (matches.length === 0) return exactError(index, state, "NOT_FOUND");
+    if (matches.length > 1) return exactError(index, state, "CANONICAL_STORAGE");
+    const message = exactMessageFromNode(matches[0]!);
+    if (jsonBytes(message) > maxSerializedBytes) {
+      return {
+        request_index: index,
+        status: "oversized",
+        conversation_id: state.conversationId,
+        revision_id: state.revisionId,
+        oversized_message: {
+          sourceNodeId: message.sourceNodeId,
+          messageKey: message.messageKey,
+          bytes: jsonBytes(message),
+        },
+      };
+    }
+    return {
+      request_index: index,
+      status: "ok",
+      conversation_id: state.conversationId,
+      revision_id: state.revisionId,
+      message,
+    };
+  };
+
+  const cursorFor = async (nextPosition: number): Promise<string | null> =>
+    nextPosition >= states.length
+      ? null
+      : signExactCursor(
+          {
+            v: 1,
+            s: 2,
+            e: expiresAt,
+            p: nextPosition,
+            q: states.map((state) => [
+              state.conversationId,
+              state.revisionId ?? "",
+              state.selector.kind === "source_node_id" ? 0 : 1,
+              state.selector.value,
+              state.errorCode ?? "",
+            ]),
+          },
+          secret,
+          expectedUserId,
+          expectedNamespaces,
+        );
+  const results: ExactMessageResult[] = [];
+  for (let index = position; index < states.length; index++) {
+    const entry = resolve(index, states[index]!);
+    const nextCursor = await cursorFor(index + 1);
+    const candidate: ExactMessagesResult = {
+      results: [...results, entry],
+      next_cursor: nextCursor,
+      used_serialized_bytes: 0,
+      max_serialized_bytes: maxSerializedBytes,
+    };
+    for (let attempt = 0; attempt < 3; attempt++) {
+      const used = jsonBytes(candidate);
+      if (candidate.used_serialized_bytes === used) break;
+      candidate.used_serialized_bytes = used;
+    }
+    if (jsonBytes(candidate) > maxSerializedBytes) {
+      if (results.length === 0) {
+        throw new AppError(
+          "VALIDATION",
+          "max_serialized_bytes is too small for the message response",
+          400,
+        );
+      }
+      break;
+    }
+    results.push(entry);
+  }
+  const nextCursor = await cursorFor(position + results.length);
+  const value: ExactMessagesResult = {
+    results,
+    next_cursor: nextCursor,
+    used_serialized_bytes: 0,
+    max_serialized_bytes: maxSerializedBytes,
+  };
+  for (let attempt = 0; attempt < 3; attempt++) {
+    const used = jsonBytes(value);
+    if (value.used_serialized_bytes === used) break;
+    value.used_serialized_bytes = used;
+  }
+  return value;
+}
 
 export async function verifyIntegrity(env: AppEnv): Promise<{
   checkedRevisions: number;
   missingManifests: string[];
   missingSegments: string[];
+  corruptManifests: string[];
+  corruptSegments: Array<{
+    revisionId: string;
+    segmentIndex: number;
+    lineNumber: number;
+  }>;
+  invalidMessageKeys: Array<{
+    conversationId: string;
+    revisionId: string;
+    sourceNodeId: string;
+    reason: "invalid_format" | "invalid_type";
+  }>;
+  duplicateMessageKeys: Array<{
+    conversationId: string;
+    revisionId: string;
+    messageKey: string;
+    sourceNodeIds: string[];
+  }>;
 }> {
   const revisions = await env.MEMORY_DB.prepare(
     "SELECT id, manifest_object_key FROM conversation_revisions ORDER BY created_at",
   ).all<{ id: string; manifest_object_key: string }>();
   const missingManifests: string[] = [];
   const missingSegments: string[] = [];
+  const corruptManifests: string[] = [];
+  const corruptSegments: Array<{
+    revisionId: string;
+    segmentIndex: number;
+    lineNumber: number;
+  }> = [];
+  const invalidMessageKeys: Array<{
+    conversationId: string;
+    revisionId: string;
+    sourceNodeId: string;
+    reason: "invalid_format" | "invalid_type";
+  }> = [];
+  const duplicateMessageKeys: Array<{
+    conversationId: string;
+    revisionId: string;
+    messageKey: string;
+    sourceNodeIds: string[];
+  }> = [];
   for (const revision of revisions.results) {
     const manifest = await env.MEMORY_BUCKET.get(revision.manifest_object_key);
     if (!manifest) {
       missingManifests.push(revision.id);
       continue;
     }
-    const parsed = JSON.parse(await manifest.text()) as { segments?: Array<{ key?: string }> };
-    for (const segment of parsed.segments ?? []) {
+    let parsed: {
+      conversationId?: string;
+      segments: Array<{ id?: string; key?: string }>;
+    };
+    try {
+      const value: unknown = JSON.parse(await manifest.text());
+      if (
+        !isRecord(value) ||
+        !Array.isArray(value.segments) ||
+        value.segments.some(
+          (segment) =>
+            !isRecord(segment) || (segment.key !== undefined && typeof segment.key !== "string"),
+        )
+      ) {
+        corruptManifests.push(revision.id);
+        continue;
+      }
+      parsed = {
+        ...(typeof value.conversationId === "string"
+          ? { conversationId: value.conversationId }
+          : {}),
+        segments: value.segments as Array<{ id?: string; key?: string }>,
+      };
+    } catch {
+      corruptManifests.push(revision.id);
+      continue;
+    }
+    const nodesByKey = new Map<string, string[]>();
+    for (const [segmentIndex, segment] of parsed.segments.entries()) {
       if (!segment.key || !(await env.MEMORY_BUCKET.head(segment.key))) {
-        missingSegments.push(`${revision.id}:${segment.key ?? "missing-key"}`);
+        // Report only the revision and segment position; R2 object keys are internal.
+        missingSegments.push(`${revision.id}:segment-${segmentIndex}`);
+        continue;
+      }
+      const segmentObject = await env.MEMORY_BUCKET.get(segment.key);
+      if (!segmentObject) continue;
+      const lines = (await segmentObject.text()).split("\n");
+      for (const [lineIndex, line] of lines.entries()) {
+        if (!line) continue;
+        let entry: unknown;
+        try {
+          entry = JSON.parse(line) as unknown;
+        } catch {
+          corruptSegments.push({
+            revisionId: revision.id,
+            segmentIndex,
+            lineNumber: lineIndex + 1,
+          });
+          continue;
+        }
+        if (lineIndex === 0 && (!isRecord(entry) || !isRecord(entry.conversation))) {
+          corruptSegments.push({
+            revisionId: revision.id,
+            segmentIndex,
+            lineNumber: lineIndex + 1,
+          });
+          continue;
+        }
+        if (lineIndex === 0) continue;
+        if (
+          !isRecord(entry) ||
+          entry.type !== "node" ||
+          !isRecord(entry.node) ||
+          typeof entry.node.sourceNodeId !== "string"
+        ) {
+          corruptSegments.push({
+            revisionId: revision.id,
+            segmentIndex,
+            lineNumber: lineIndex + 1,
+          });
+          continue;
+        }
+        if (!("messageKey" in entry.node)) continue;
+        const sourceNodeId = entry.node.sourceNodeId;
+        const rawMessageKey = entry.node.messageKey;
+        if (!isValidMessageKey(rawMessageKey)) {
+          invalidMessageKeys.push({
+            conversationId: parsed.conversationId ?? "",
+            revisionId: revision.id,
+            sourceNodeId,
+            reason: typeof rawMessageKey === "string" ? "invalid_format" : "invalid_type",
+          });
+          continue;
+        }
+        const sourceNodeIds = nodesByKey.get(rawMessageKey) ?? [];
+        sourceNodeIds.push(sourceNodeId);
+        nodesByKey.set(rawMessageKey, sourceNodeIds);
+      }
+    }
+    for (const [messageKey, sourceNodeIds] of nodesByKey) {
+      if (sourceNodeIds.length > 1) {
+        duplicateMessageKeys.push({
+          conversationId: parsed.conversationId ?? "",
+          revisionId: revision.id,
+          messageKey,
+          sourceNodeIds,
+        });
       }
     }
   }
-  return { checkedRevisions: revisions.results.length, missingManifests, missingSegments };
+  return {
+    checkedRevisions: revisions.results.length,
+    missingManifests,
+    missingSegments,
+    corruptManifests,
+    corruptSegments,
+    invalidMessageKeys,
+    duplicateMessageKeys,
+  };
 }

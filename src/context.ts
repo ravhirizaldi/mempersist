@@ -93,6 +93,7 @@ export interface ContextMessageProvenance {
   conversation_id: string;
   revision_id: string;
   source_node_id: string;
+  message_key?: string;
   source_conversation_id?: string;
   source_revision_id?: string;
   pointer?: string;
@@ -102,6 +103,7 @@ export interface ContextMessageProvenance {
 }
 export interface ContextMessage {
   source_node_id: string;
+  message_key?: string;
   role: string | null;
   created_at: string | null;
   updated_at: string | null;
@@ -496,6 +498,7 @@ function cloneProvenance(provenance: ContextMessageProvenance): ContextMessagePr
     conversation_id: provenance.conversation_id,
     revision_id: provenance.revision_id,
     source_node_id: provenance.source_node_id,
+    ...(provenance.message_key !== undefined ? { message_key: provenance.message_key } : {}),
     ...(provenance.source_conversation_id !== undefined
       ? { source_conversation_id: provenance.source_conversation_id }
       : {}),
@@ -1193,6 +1196,7 @@ async function prepareRequiredState(
     const messages: ContextMessage[] = selectedNodes.map((node) => {
       const msg: ContextMessage = {
         source_node_id: node.sourceNodeId,
+        ...(node.messageKey === undefined ? {} : { message_key: node.messageKey }),
         role: node.role ?? null,
         created_at: node.createdAt,
         updated_at: node.updatedAt,
@@ -1207,6 +1211,7 @@ async function prepareRequiredState(
           conversation_id: item.conversationId,
           revision_id: item.revisionId,
           source_node_id: node.sourceNodeId,
+          ...(node.messageKey === undefined ? {} : { message_key: node.messageKey }),
         };
       }
       return msg;
@@ -1543,6 +1548,7 @@ async function prepareRequiredState(
     const messages: ContextMessage[] = selectedNodes.map((node) => {
       const message: ContextMessage = {
         source_node_id: node.sourceNodeId,
+        ...(node.messageKey === undefined ? {} : { message_key: node.messageKey }),
         role: node.role ?? null,
         created_at: node.createdAt,
         updated_at: node.updatedAt,
@@ -1557,6 +1563,7 @@ async function prepareRequiredState(
           conversation_id: edge.targetId,
           revision_id: pin.revision_id,
           source_node_id: node.sourceNodeId,
+          ...(node.messageKey === undefined ? {} : { message_key: node.messageKey }),
           source_conversation_id: edge.sourceConversationId,
           source_revision_id: edge.sourceRevisionId,
           pointer: edge.pointer,
@@ -2073,6 +2080,7 @@ function admitRetrievedCandidates(
     for (const rawMsg of candidate.rawMessages) {
       const msg: ContextMessage = {
         source_node_id: rawMsg.sourceNodeId,
+        ...(rawMsg.messageKey === undefined ? {} : { message_key: rawMsg.messageKey }),
         role: rawMsg.role ?? null,
         created_at: rawMsg.createdAt,
         updated_at: rawMsg.updatedAt,
@@ -2087,6 +2095,7 @@ function admitRetrievedCandidates(
           conversation_id: candidate.conversation_id,
           revision_id: candidate.revision_id,
           source_node_id: rawMsg.sourceNodeId,
+          ...(rawMsg.messageKey === undefined ? {} : { message_key: rawMsg.messageKey }),
           chunk_ids: [candidate.chunkId],
           score: candidate.score,
           sources: candidate.sources,
@@ -2180,6 +2189,7 @@ function admitRetrievedCandidates(
       } else {
         const msg: ContextMessage = {
           source_node_id: rawMsg.sourceNodeId,
+          ...(rawMsg.messageKey === undefined ? {} : { message_key: rawMsg.messageKey }),
           role: rawMsg.role ?? null,
           created_at: rawMsg.createdAt,
           updated_at: rawMsg.updatedAt,
@@ -2194,6 +2204,7 @@ function admitRetrievedCandidates(
             conversation_id: candidate.conversation_id,
             revision_id: candidate.revision_id,
             source_node_id: rawMsg.sourceNodeId,
+            ...(rawMsg.messageKey === undefined ? {} : { message_key: rawMsg.messageKey }),
             chunk_ids: [candidate.chunkId],
             score: candidate.score,
             sources: candidate.sources,

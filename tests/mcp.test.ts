@@ -9,6 +9,10 @@ import {
   buildContextRequiredBudgetExceededOutputSchema,
   capabilitiesOutputSchema,
   createMemoryMcpServer,
+  memoryGetMessagesInputSchema,
+  memoryGetMessagesOutputSchema,
+  memoryUpsertMessagesInputSchema,
+  memoryUpsertMessagesOutputSchema,
 } from "../src/mcp";
 
 describe("MCP server", () => {
@@ -74,9 +78,11 @@ describe("MCP server", () => {
     });
     expect(client.getInstructions()).toContain("For exploration, use memory_search");
     expect(client.getInstructions()).toContain("memory_build_context directly");
+    expect(client.getInstructions()).toContain("memory_commit_batch");
     const expectedTitles: Record<string, string> = {
       memory_append: "Append memory",
       memory_build_context: "Build memory context",
+      memory_commit_batch: "Commit memory batch",
       memory_copy_conversations: "Copy conversations",
       memory_delete_conversations: "Delete conversations",
       memory_edit_messages: "Edit memory messages",
@@ -85,16 +91,18 @@ describe("MCP server", () => {
       memory_get_context: "Get memory context",
       memory_get_conversation: "Get conversation",
       memory_get_conversations: "Get conversations",
+      memory_get_messages: "Get messages",
       memory_import_status: "Get import status",
       memory_list_conversations: "List conversations",
       memory_list_namespaces: "List namespaces",
       memory_list_revisions: "List revisions",
-      memory_resolve_conversations: "Resolve conversations",
       memory_replace: "Replace memory",
+      memory_resolve_conversations: "Resolve conversations",
       memory_restore_revision: "Restore memory revision",
       memory_search: "Search memories",
       memory_stats: "Get memory statistics",
       memory_store: "Store memory",
+      memory_upsert_messages: "Upsert keyed memory messages",
       memory_update_tags: "Update memory tags",
     };
     expect(Object.fromEntries(result.tools.map((tool) => [tool.name, tool.title]))).toEqual(
@@ -103,6 +111,7 @@ describe("MCP server", () => {
     expect(result.tools.map((tool) => tool.name).sort()).toEqual([
       "memory_append",
       "memory_build_context",
+      "memory_commit_batch",
       "memory_copy_conversations",
       "memory_delete_conversations",
       "memory_edit_messages",
@@ -111,6 +120,7 @@ describe("MCP server", () => {
       "memory_get_context",
       "memory_get_conversation",
       "memory_get_conversations",
+      "memory_get_messages",
       "memory_import_status",
       "memory_list_conversations",
       "memory_list_namespaces",
@@ -122,6 +132,7 @@ describe("MCP server", () => {
       "memory_stats",
       "memory_store",
       "memory_update_tags",
+      "memory_upsert_messages",
     ]);
     const readOnlyAnnotations = {
       readOnlyHint: true,
@@ -135,6 +146,7 @@ describe("MCP server", () => {
       "memory_search",
       "memory_get_context",
       "memory_get_conversation",
+      "memory_get_messages",
       "memory_get_conversations",
       "memory_list_conversations",
       "memory_list_namespaces",
@@ -179,6 +191,12 @@ describe("MCP server", () => {
       openWorldHint: false,
       idempotentHint: true,
     });
+    expect(result.tools.find((tool) => tool.name === "memory_commit_batch")?.annotations).toEqual({
+      readOnlyHint: false,
+      destructiveHint: true,
+      openWorldHint: false,
+      idempotentHint: true,
+    });
     expect(
       result.tools.find((tool) => tool.name === "memory_copy_conversations")?.annotations,
     ).toEqual({
@@ -209,9 +227,45 @@ describe("MCP server", () => {
       openWorldHint: false,
       idempotentHint: false,
     });
+    expect(
+      result.tools.find((tool) => tool.name === "memory_upsert_messages")?.annotations,
+    ).toEqual({
+      readOnlyHint: false,
+      destructiveHint: true,
+      openWorldHint: false,
+      idempotentHint: false,
+    });
     for (const tool of result.tools) {
       expect(tool.outputSchema, tool.name).toMatchObject({ type: "object" });
     }
+    const commitBatchTool = result.tools.find((tool) => tool.name === "memory_commit_batch");
+    expect(commitBatchTool).toBeDefined();
+    if (commitBatchTool === undefined) {
+      throw new Error("memory_commit_batch tool is missing");
+    }
+    expect(typeof commitBatchTool.outputSchema).toBe("object");
+    const commitBatchOutputSchema = commitBatchTool.outputSchema as {
+      properties?: Record<string, { type?: unknown }>;
+    };
+    const properties = commitBatchOutputSchema.properties;
+    expect(properties).toBeDefined();
+    if (properties === undefined) {
+      throw new Error("memory_commit_batch output schema is missing properties");
+    }
+    expect(properties).toHaveProperty("batch_id");
+    expect(properties).toHaveProperty("results");
+    const batchIdProperty = properties.batch_id;
+    const resultsProperty = properties.results;
+    expect(batchIdProperty).toBeDefined();
+    expect(resultsProperty).toBeDefined();
+    if (batchIdProperty === undefined) {
+      throw new Error("memory_commit_batch output schema is missing batch_id");
+    }
+    if (resultsProperty === undefined) {
+      throw new Error("memory_commit_batch output schema is missing results");
+    }
+    expect(batchIdProperty.type).toBe("string");
+    expect(resultsProperty.type).toBe("array");
   });
   it("exposes cursor batch budgets and enforces exactly one first-call input", async () => {
     const client = await connectedClient();
@@ -264,6 +318,160 @@ describe("MCP server", () => {
           .isError,
       ).toBe(true);
     }
+  });
+
+  it("registers memory_get_messages with strict selectors, output records, and read-only annotations", async () => {
+    const client = await connectedClient();
+    const tool = (await client.listTools()).tools.find(
+      (candidate) => candidate.name === "memory_get_messages",
+    );
+    expect(tool).toBeDefined();
+    expect(tool!.annotations).toEqual({
+      readOnlyHint: true,
+      destructiveHint: false,
+      openWorldHint: false,
+      idempotentHint: true,
+    });
+    const inputSchema = tool!.inputSchema as {
+      properties?: Record<string, { type?: string; minItems?: number; maxItems?: number }>;
+    };
+    expect(inputSchema.properties?.requests).toMatchObject({
+      type: "array",
+      minItems: 1,
+      maxItems: 100,
+    });
+    expect(inputSchema.properties?.cursor).toMatchObject({ type: "string" });
+    const outputSchema = tool!.outputSchema as { properties?: Record<string, unknown> };
+    expect(outputSchema.properties).toHaveProperty("results");
+    expect(outputSchema.properties).toHaveProperty("next_cursor");
+    expect(outputSchema.properties).toHaveProperty("used_serialized_bytes");
+    expect(outputSchema.properties).toHaveProperty("max_serialized_bytes");
+    const conversation_id = crypto.randomUUID();
+    const source = { conversation_id, source_node_id: "node-1" };
+    expect(memoryGetMessagesInputSchema.safeParse({ requests: [source] }).success).toBe(true);
+    expect(
+      memoryGetMessagesInputSchema.safeParse({
+        requests: [{ conversation_id, message_key: "msg/one" }],
+      }).success,
+    ).toBe(true);
+    expect(
+      memoryGetMessagesInputSchema.safeParse({
+        requests: [{ conversation_id, message_key: "Bad Key" }],
+      }).success,
+    ).toBe(false);
+    for (const requests of [[], Array.from({ length: 101 }, () => source)]) {
+      expect(memoryGetMessagesInputSchema.safeParse({ requests }).success).toBe(false);
+    }
+    for (const selector of [
+      { conversation_id, source_node_id: "node-1", message_key: "msg/one" },
+      { conversation_id },
+    ]) {
+      expect(memoryGetMessagesInputSchema.safeParse({ requests: [selector] }).success).toBe(false);
+    }
+    expect(
+      memoryGetMessagesInputSchema.safeParse({ requests: [source], cursor: "opaque" }).success,
+    ).toBe(false);
+    expect(memoryGetMessagesInputSchema.safeParse({ cursor: "opaque" }).success).toBe(true);
+
+    expect(
+      memoryGetMessagesOutputSchema.safeParse({
+        results: [
+          {
+            request_index: 0,
+            status: "ok",
+            conversation_id,
+            revision_id: "a".repeat(64),
+            message: {
+              sourceNodeId: "node-1",
+              messageKey: null,
+              role: "user",
+              text: "hello",
+              createdAt: null,
+              updatedAt: null,
+            },
+          },
+          {
+            request_index: 1,
+            status: "error",
+            conversation_id,
+            error: { code: "NOT_FOUND", message: "Not found" },
+          },
+          {
+            request_index: 2,
+            status: "oversized",
+            conversation_id,
+            revision_id: "b".repeat(64),
+            oversized_message: { source_node_id: "node-2", message_key: null, bytes: 5000 },
+          },
+        ],
+        next_cursor: null,
+        used_serialized_bytes: 1000,
+        max_serialized_bytes: 32768,
+      }).success,
+    ).toBe(true);
+  });
+  it("registers keyed upsert with bounded schema, annotations, and receipt fields", async () => {
+    const client = await connectedClient();
+    const tool = (await client.listTools()).tools.find(
+      (candidate) => candidate.name === "memory_upsert_messages",
+    );
+    expect(tool).toBeDefined();
+    expect(tool!.annotations).toEqual({
+      readOnlyHint: false,
+      destructiveHint: true,
+      openWorldHint: false,
+      idempotentHint: false,
+    });
+    const input = tool!.inputSchema as {
+      properties?: Record<string, { type?: string; minItems?: number; maxItems?: number }>;
+    };
+    expect(input.properties?.messages).toMatchObject({ type: "array", minItems: 1, maxItems: 100 });
+    expect(
+      memoryUpsertMessagesInputSchema.safeParse({
+        conversation_id: crypto.randomUUID(),
+        base_revision_id: "a".repeat(64),
+        messages: [{ message_key: "state.one", role: "user", text: "" }],
+      }).success,
+    ).toBe(true);
+    expect(
+      memoryUpsertMessagesInputSchema.safeParse({
+        conversation_id: crypto.randomUUID(),
+        base_revision_id: "a".repeat(64),
+        messages: [{ message_key: "Bad Key", role: "user", text: "x" }],
+      }).success,
+    ).toBe(false);
+    const output = tool!.outputSchema as { properties?: Record<string, unknown> };
+    for (const field of [
+      "conversation_id",
+      "previous_revision_id",
+      "revision_id",
+      "status",
+      "messages",
+      "used_serialized_bytes",
+      "max_serialized_bytes",
+    ])
+      expect(output.properties).toHaveProperty(field);
+    expect(
+      memoryUpsertMessagesOutputSchema.safeParse({
+        conversation_id: crypto.randomUUID(),
+        previous_revision_id: "a".repeat(64),
+        revision_id: "b".repeat(64),
+        status: "upserted",
+        durable: true,
+        messages: [
+          {
+            request_index: 0,
+            message_key: "state.one",
+            source_node_id: "node",
+            status: "inserted",
+          },
+        ],
+        used_serialized_bytes: 100,
+        max_serialized_bytes: 32768,
+        readback_requests: [],
+        omitted: [],
+      }).success,
+    ).toBe(true);
   });
 
   it("advertises the bounded receipt contract on mutation tools", async () => {
@@ -337,11 +545,12 @@ describe("MCP server", () => {
     expect(typeof guardCeiling, "batch read ceiling").toBe("number");
 
     for (const name of [
-      "memory_store",
       "memory_append",
-      "memory_replace",
       "memory_edit_messages",
+      "memory_replace",
       "memory_restore_revision",
+      "memory_store",
+      "memory_upsert_messages",
     ]) {
       const schema = schemaFor(name);
       receiptBudget(name, schema);
@@ -463,6 +672,51 @@ describe("MCP server", () => {
         })
       ).isError,
     ).toBe(true);
+    const batchOperation = {
+      operation: "append",
+      conversation_id: crypto.randomUUID(),
+      base_revision_id: "a".repeat(64),
+      messages: [{ role: "user", content: "test" }],
+    };
+    const invalidBatchArguments: Array<Record<string, unknown>> = [
+      {},
+      { idempotency_key: "   ", operations: [batchOperation] },
+      { idempotency_key: "batch", operations: [] },
+      { idempotency_key: "batch", operations: [batchOperation, batchOperation] },
+      {
+        idempotency_key: "batch",
+        operations: [{ ...batchOperation, conversation_id: "not-a-memory-id" }],
+      },
+      {
+        idempotency_key: "batch",
+        operations: [{ ...batchOperation, base_revision_id: "invalid" }],
+      },
+      {
+        idempotency_key: "batch",
+        operations: [
+          {
+            operation: "replace",
+            conversation_id: crypto.randomUUID(),
+            base_revision_id: "a".repeat(64),
+            messages: [{ role: "user", content: "test" }],
+            tags: ["not-allowed"],
+          },
+        ],
+      },
+      {
+        idempotency_key: "batch",
+        operations: Array.from({ length: 21 }, (_, index) => ({
+          ...batchOperation,
+          conversation_id: `${index}`.padStart(64, "a"),
+        })),
+      },
+    ];
+    for (const arguments_ of invalidBatchArguments) {
+      expect(
+        (await client.callTool({ name: "memory_commit_batch", arguments: arguments_ })).isError,
+        JSON.stringify(arguments_),
+      ).toBe(true);
+    }
   });
 
   it("requires exact destructive confirmations", async () => {
@@ -1246,7 +1500,7 @@ describe("MCP server", () => {
     expect(result.isError).toBeFalsy();
     const capabilities = capabilitiesOutputSchema.parse(result.structuredContent);
     expect(capabilities.protocol_version).toBe("1");
-    expect(capabilities.capabilities_version).toBe("2026-10-02");
+    expect(capabilities.capabilities_version).toBe("2026-10-05");
     expect(capabilities.limits.max_tool_output_bytes).toBe(65536);
     expect(capabilities.limits.max_inline_json_write_bytes).toBe(1048576);
     expect(capabilities.tools.memory_search).toEqual({
@@ -1256,8 +1510,19 @@ describe("MCP server", () => {
       max_response_bytes: 49152,
       supports_cursor: true,
     });
+    expect(capabilities.tools.memory_get_messages).toEqual({
+      max_items: 100,
+      default_response_bytes: 32768,
+      max_response_bytes: 49152,
+      supports_cursor: true,
+    });
     expect(capabilities.tools.memory_store).toEqual({
       max_items: 1000,
+      max_request_bytes: 1048576,
+      supports_verify: true,
+    });
+    expect(capabilities.tools.memory_commit_batch).toEqual({
+      max_items: 20,
       max_request_bytes: 1048576,
       supports_verify: true,
     });
@@ -1266,12 +1531,17 @@ describe("MCP server", () => {
       max_request_bytes: 1048576,
       supports_verify: true,
     });
+    expect(capabilities.tools.memory_upsert_messages).toEqual({
+      max_items: 100,
+      max_request_bytes: 1048576,
+      supports_verify: true,
+    });
     expect(capabilities.features).toEqual({
       revision_pinning: true,
       verified_writes: true,
       cursor_reads: true,
-      message_keys: false,
-      atomic_multi_conversation_commit: false,
+      message_keys: true,
+      atomic_multi_conversation_commit: true,
     });
   });
 
@@ -1281,6 +1551,7 @@ describe("MCP server", () => {
     expect(registered).toEqual([
       "memory_append",
       "memory_build_context",
+      "memory_commit_batch",
       "memory_copy_conversations",
       "memory_delete_conversations",
       "memory_edit_messages",
@@ -1289,6 +1560,7 @@ describe("MCP server", () => {
       "memory_get_context",
       "memory_get_conversation",
       "memory_get_conversations",
+      "memory_get_messages",
       "memory_import_status",
       "memory_list_conversations",
       "memory_list_namespaces",
@@ -1300,6 +1572,7 @@ describe("MCP server", () => {
       "memory_stats",
       "memory_store",
       "memory_update_tags",
+      "memory_upsert_messages",
     ]);
 
     const result = await client.callTool({ name: "memory_get_capabilities", arguments: {} });
@@ -1307,12 +1580,14 @@ describe("MCP server", () => {
     expect(Object.keys(capabilities.tools).sort()).toEqual([
       "memory_append",
       "memory_build_context",
+      "memory_commit_batch",
       "memory_copy_conversations",
       "memory_delete_conversations",
       "memory_edit_messages",
       "memory_get_context",
       "memory_get_conversation",
       "memory_get_conversations",
+      "memory_get_messages",
       "memory_list_conversations",
       "memory_list_revisions",
       "memory_replace",
@@ -1321,6 +1596,7 @@ describe("MCP server", () => {
       "memory_search",
       "memory_store",
       "memory_update_tags",
+      "memory_upsert_messages",
     ]);
 
     const uncapped = [

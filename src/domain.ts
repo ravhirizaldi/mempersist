@@ -27,6 +27,18 @@ export function normalizeTags(input: string[]): string[] {
   return tags;
 }
 
+/** Exact caller-supplied message-key contract; keys are never normalized. */
+export const MESSAGE_KEY_PATTERN = /^[a-z0-9](?:[a-z0-9._/-]{0,126}[a-z0-9])?$/u;
+
+export function isValidMessageKey(value: unknown): value is string {
+  return (
+    typeof value === "string" &&
+    value.length >= 1 &&
+    value.length <= 128 &&
+    MESSAGE_KEY_PATTERN.test(value)
+  );
+}
+
 export interface CanonicalNode {
   id: string;
   sourceNodeId: string;
@@ -40,6 +52,7 @@ export interface CanonicalNode {
   modelSlug: string | null;
   metadata: JsonValue;
   raw: JsonValue;
+  messageKey?: string;
 }
 
 export type MessageEditOperation = "replace" | "append" | "prepend";

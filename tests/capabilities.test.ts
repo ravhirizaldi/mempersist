@@ -17,6 +17,7 @@ import {
   MAX_STORE_MESSAGES,
   MAX_TOOL_OUTPUT_BYTES,
   MUTATION_RECEIPT_MAX_SERIALIZED_BYTES,
+  MAX_UPSERT_MESSAGES,
   memoryCapabilities,
   RECOMMENDED_TOOL_OUTPUT_BYTES,
   requestTooLargeDetails,
@@ -210,11 +211,23 @@ describe("memoryCapabilities", () => {
       max_request_bytes: MAX_INLINE_JSON_WRITE_BYTES,
       supports_verify: true,
     });
+    expect(MAX_UPSERT_MESSAGES).toBe(100);
+    expect(caps.tools.memory_upsert_messages).toEqual({
+      max_items: MAX_UPSERT_MESSAGES,
+      max_request_bytes: MAX_INLINE_JSON_WRITE_BYTES,
+      supports_verify: true,
+    });
   });
 
   it("reports cursor reads and byte budgets for batch and context tools", () => {
     expect(caps.tools.memory_get_conversations).toEqual({
       max_items: MAX_BATCH_ITEMS,
+      default_response_bytes: BATCH_RESPONSE_BYTES.default,
+      max_response_bytes: BATCH_RESPONSE_BYTES.max,
+      supports_cursor: true,
+    });
+    expect(caps.tools.memory_get_messages).toEqual({
+      max_items: 100,
       default_response_bytes: BATCH_RESPONSE_BYTES.default,
       max_response_bytes: BATCH_RESPONSE_BYTES.max,
       supports_cursor: true,
@@ -228,8 +241,13 @@ describe("memoryCapabilities", () => {
       revision_pinning: true,
       verified_writes: true,
       cursor_reads: true,
-      message_keys: false,
-      atomic_multi_conversation_commit: false,
+      message_keys: true,
+      atomic_multi_conversation_commit: true,
+    });
+    expect(caps.tools.memory_commit_batch).toEqual({
+      max_items: MAX_BATCH_ITEMS,
+      max_request_bytes: MAX_INLINE_JSON_WRITE_BYTES,
+      supports_verify: true,
     });
   });
 });

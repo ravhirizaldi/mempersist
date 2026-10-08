@@ -187,6 +187,96 @@ write, so canonical storage never gains a partial edit. Separator semantics are 
 rejects `separator`, while `append`/`prepend` default to a blank line and omit it when either side is
 empty. Text is never trimmed, normalized, or re-parsed.
 
+## Exact revision-pinned message lookup
+
+`memory_get_messages` is the exact message lookup path. It resolves selectors only against canonical
+R2 content: it does not query FTS, Vectorize, chunks, recent-canonical search, or any other derived
+index. A selector contains a `conversation_id`, optional `revision_id`, and exactly one of
+`source_node_id` or `message_key`. `source_node_id` is the stable canonical node identity (maximum
+200 characters). `message_key` is an optional stable key on a canonical node; it uses the exact
+upsert shape (1–128 lowercase ASCII characters from `[a-z0-9._/-]`, starting and ending with an
+alphanumeric character). `memory_get_messages` resolves either selector only against the pinned
+complete graph.
+Keys are unique across every node in that graph, including inactive branches. A duplicate key is a
+canonical-storage error, never an arbitrary match. The key is immutable: keyed updates change text
+only and preserve the source-node ID, role, timestamps (except `updatedAt` on a text change),
+graph links, and metadata. See [ADR 0042](adr/0042-stable-keyed-message-upserts.md).
+
+The server resolves every omitted revision to the conversation's current head before the first
+canonical body load. Explicit revisions must belong to that conversation. It then loads each
+unique pinned revision at most once per call and resolves all selectors against that revision.
+The ordered request list is preserved, including duplicate selectors and duplicate result entries.
+Missing, foreign, deleted, or stale conversation/revision/node/key cases deliberately collapse to
+the same bounded `NOT_FOUND` behavior. If a canonical revision contains duplicate `messageKey`
+values, lookup returns a bounded canonical-storage error instead of choosing one node.
+
+Canonical nodes are not restricted to the active branch: a known source node on an inactive
+branch is resolvable when its pinned revision is authorized. Active-branch projections use
+`activeSourceNodeIds`; canonical reads and exact lookup retain the complete node graph, including
+inactive branches. This is why callers must carry the source-node identity (or exact key) from a
+canonical read rather than trying to derive it from an index result, title, text, or offset.
+
+The MCP result envelope is snake_case:
+
+```json
+{
+  "results": [
+    {
+      "request_index": 0,
+      "status": "ok",
+      "conversation_id": "<conversation>",
+      "revision_id": "<pinned revision>",
+      "message": {
+        "sourceNodeId": "<source node>",
+        "messageKey": null,
+        "role": "assistant",
+        "text": "Exact canonical text",
+        "createdAt": "<created-at>",
+        "updatedAt": "<updated-at>"
+      }
+    }
+  ],
+  "next_cursor": null,
+  "used_serialized_bytes": 512,
+  "max_serialized_bytes": 32768
+}
+```
+
+The first call has 1–100 ordered `requests`; a continuation has only an opaque `cursor`.
+`max_serialized_bytes` uses the shared UTF-8 limits: 32,768 by default, 4,096 minimum, and
+49,152 maximum. Admission is whole-message: text is never truncated. A result with
+`status: "oversized"` carries a bounded `oversized_message` object with identity and serialized
+bytes; it contains no text. `status: "error"` is bounded and isolated, so one bad selector does
+not hide other results. The cursor advances past an oversized or failed item and cannot be used to
+loop over it.
+
+Continuations preserve selector order and pinned conversation/revision IDs. Their HMAC is signed
+with `MEMORY_API_TOKEN` and bound to the authenticated user and effective namespaces. Cursor
+validation happens before canonical R2 access; malformed, expired, forged, foreign, or
+scope-mismatched cursors have indistinguishable bounded validation errors. No module-global
+request state is used, and neither cursors nor public diagnostics contain R2 object keys, D1 row
+IDs, or other internal storage identifiers.
+
+Exact text recovery is therefore stable across a stale head and index outage. An omitted revision
+reads the head captured before the body load; a later write does not change that result. An
+explicit historical revision remains the requested source until deletion or loss of authorization.
+For an oversized response or a failed canonical read, an authorized canonical HTTP read/export
+must reload the pinned conversation/revision. Operators must restore missing canonical objects from
+an independent canonical backup, never reconstruct prose from FTS/vector chunks, and never expose
+internal R2 keys as a recovery shortcut.
+
+## Stable keyed message upserts
+
+`memory_upsert_messages` updates or appends keyed text nodes without resubmitting a transcript. One request targets one owned, live conversation and contains 1–100 unique `message_key` values, a required `base_revision_id`, and the required role for each message. Keys are exact, case-sensitive, 1–128 ASCII characters matching `[a-z0-9._/-]`, and must start and end with `[a-z0-9]`; text and role limits use the deployed capability contract. Missing, deleted, foreign, and unowned conversations are deliberately indistinguishable from one another.
+
+The server validates the entire request, including ownership, base membership, batch size, key syntax, duplicate request keys, text limits, and roles, before writing anything. It loads the pinned complete canonical graph and rejects a role mismatch for an existing key. Existing keys preserve source-node identity, role, `createdAt`, parent/child links, active/inactive branch membership, raw graph data, and metadata; only text is replaced, and `updatedAt` changes only when the text changes. A missing key appends a server-ID/server-timestamp node after the active current node, in request order, with the supplied role, text, and key. Keys remain unique across the complete graph, not merely its active projection.
+
+Any changed item produces exactly one immutable revision. Canonical R2 manifest and segment writes complete before the D1 head compare-and-swap against `base_revision_id`; only a successful CAS can make the revision current or enqueue indexing. A stale base never overwrites a concurrent head, and a failed validation or CAS creates no current revision. An all-unchanged request returns `status: "no_change"` against the current revision and writes neither canonical data nor an index job. Post-commit queue and verification failures do not roll back the durable canonical revision; retry indexing or read the pinned revision instead of resubmitting the mutation. Optional verification reloads the committed canonical revision and checks every requested key, exact text, role, and revision integrity.
+
+This is distinct from the other mutation surfaces: `memory_append` adds unkeyed messages, `memory_edit_messages` targets immutable `source_node_id` values and can append/prepend text, and `memory_replace` supplies a complete transcript. Upsert never changes key identity, graph structure, role, or metadata and never silently rebases a stale request.
+
+Copying a pinned conversation preserves each `messageKey` in the complete graph while assigning destination node IDs and a new conversation/revision identity; source data is unchanged, and destination validation still rejects duplicate or malformed keys. Restore reactivates the exact key set in the selected historical revision and does not rewrite keys. Full exports include keys; imports and recovery must revalidate the shape and complete-graph uniqueness before accepting canonical data. Integrity checks report malformed or duplicate keys and compare restored/copy manifests against their recorded hashes; operators must repair canonical R2 from an independent export rather than reconstructing keyed messages from FTS, Vectorize, or chunks.
+
 ## Exact-title conversation resolution
 
 `memory_resolve_conversations` executes deterministic catalog-only lookups against `conversations`
@@ -199,7 +289,58 @@ Query-plan evidence (D1 `EXPLAIN QUERY PLAN`): title resolution queries use the 
 filtering by namespace and title. In single-user and bounded-tenant workloads, this index scan is
 bounded to the caller's active conversations. No additional migration or index was added.
 
+## Atomic multi-conversation commits
+
+`memory_commit_batch` is the write path for coordinating 1–20 append or replace operations
+across distinct conversations. The caller supplies an explicit `base_revision_id` for every
+operation, and all target conversations must belong to the same authenticated account. The
+operations may span namespaces owned by that account; a namespace boundary never widens
+ownership or permits a cross-account write.
+
+An `append` materializes new message nodes after the pinned base and may add tags (tag
+updates are a union). A `replace` materializes the complete intended transcript and does not
+accept tags. Both operations produce immutable revision manifests and segments using the
+same canonical formats and write primitives as single-conversation mutations. The aggregate
+serialized input is measured in UTF-8 bytes, including every operation, message, tag, and
+envelope, before any R2, D1, queue, or embedding work. The batch is bounded to 1–20 unique
+conversations and rejects an over-budget or invalid operation without changing any head.
+
+Preparation preserves the canonical ordering invariant: immutable R2 objects are prepared
+first, while durable preparation records make each expected object discoverable if a Worker
+terminates between R2 and D1. One D1 `batch()` commit then inserts the prepared catalog rows
+and compare-and-swaps every expected conversation head against its supplied base revision.
+The transaction succeeds only when every base matches; a stale, deleted, foreign, unknown, or
+otherwise invalid operation advances no head. R2 is immutable and cannot participate in a
+rollback, so a failed D1 commit can leave trackable, uncommitted prepared objects.
+
+The idempotency key is scoped to the authenticated account and records a hash of the complete
+material and bases. Replaying the same key with the same material returns the stored durable
+receipt (or the same deterministic prepared/committed result) without duplicate revisions or
+index jobs. Reusing the key with changed material or bases is a conflict. Receipt persistence
+is post-commit and best-effort; failure to save a receipt never turns a durable commit into a
+failed mutation.
+
+Index jobs are enqueued only after the all-or-none D1 commit. Optional verification reloads
+each committed revision from R2 and checks its integrity and intended messages. Queue and
+verification failures are reported in the bounded receipt as post-commit states; they do not
+roll back canonical data or heads. A restart resumes deterministic preparation by retrying the
+same account/key/material. A reviewed maintenance path may call
+`cleanupPreparedCommitBatches(olderThan)` to delete only aged preparations that never
+committed; it must not sweep arbitrary R2 keys or delete an object belonging to a committed
+revision.
+
+This facility does not provide cross-account commits, an external distributed transaction
+across R2/D1/queues, or rollback of immutable R2 data. Derived indexes remain rebuildable
+state and are repaired after the canonical commit.
+
 ## Mutation receipts
+
+The batch receipt is `{ batch_id, status: "committed", durable: true, results, readback_requests?,
+omitted?, used_serialized_bytes, max_serialized_bytes }`. Each result retains only
+`request_index`, public conversation/revision IDs, `durable`, `indexing`, and optional
+`verification`; optional fields are shed through `fitMutationReceipt` before serialization.
+Verification depth is independent of receipt fitting: every committed revision is checked when
+requested even if inline readback is omitted.
 
 Post-commit receipt serialization is a response contract only (ADR 0036). The shared bounded
 builder in `src/writes.ts` sizes a receipt to at most 49,152 serialized UTF-8 bytes and may shed
@@ -207,8 +348,8 @@ optional readback or error detail into `omitted` and `readback_requests`; it doe
 canonical R2 objects, reduce verification depth, change revision identity, or alter index
 generation state. `memory_edit_messages` routes its per-target results, verification readback, and
 revision-pinned `readback_requests` selectors through the same builder, so a durable edit always
-returns a bounded receipt even when indexing or verification fails after commit. Everything below is
-unchanged by receipt size.
+returns a bounded receipt even when indexing or verification fails after commit. Everything below
+is unchanged by receipt size.
 
 ## Deletion consistency
 

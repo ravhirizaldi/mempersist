@@ -779,7 +779,7 @@ async function conversation(
   const items = result.messages
     .map(
       (message) =>
-        `<article class="message"><header><span class="message-role ${escapeHtml(message.role ?? "unknown")} truncate">${escapeHtml(message.role ?? "unknown")}</span><span class="message-time truncate">${escapeHtml(message.createdAt ?? "")}</span></header><p>${escapeHtml(message.text)}</p><details class="message-details"><summary>${t.metadata}</summary><pre>${escapeHtml(JSON.stringify({ sourceNodeId: message.sourceNodeId, modelSlug: message.modelSlug, metadata: message.metadata }, null, 2))}</pre></details></article>`,
+        `<article class="message"><header><span class="message-role ${escapeHtml(message.role ?? "unknown")} truncate">${escapeHtml(message.role ?? "unknown")}</span><span class="message-time truncate">${escapeHtml(message.createdAt ?? "")}</span></header><p>${escapeHtml(message.text)}</p><details class="message-details"><summary>${t.metadata}</summary><pre>${escapeHtml(JSON.stringify({ sourceNodeId: message.sourceNodeId, ...(message.messageKey === undefined ? {} : { messageKey: message.messageKey }), modelSlug: message.modelSlug, metadata: message.metadata }, null, 2))}</pre></details></article>`,
     )
     .join("");
   const previous = offset > 0 ? Math.max(0, offset - 20) : null;
@@ -1114,9 +1114,11 @@ input:focus-visible{outline:0;border-color:var(--accent);box-shadow:0 0 0 3px rg
 #map-status{position:absolute;top:16px;left:16px;z-index:3;margin:0;padding:7px 13px;border:1px solid rgba(255,255,255,.14);border-radius:999px;background:rgba(18,24,19,.55);color:#cfdcc7;font:10px/1.5 var(--mono);letter-spacing:.05em;transition:opacity .5s cubic-bezier(.32,.72,0,1)}
 .mindmap-canvas{display:block;width:100%;height:100%;outline-offset:2px;touch-action:none}
 .mindmap-canvas canvas{cursor:grab}
-.map-tooltip{position:absolute;z-index:4;display:grid;gap:2px;max-width:260px;padding:11px 15px;border:1px solid rgba(40,42,37,.08);border-radius:18px;background:rgba(255,254,250,.9);box-shadow:0 18px 40px -30px rgba(22,35,25,.75);backdrop-filter:blur(14px);-webkit-backdrop-filter:blur(14px);pointer-events:none;font:11px/1.5 var(--mono);color:var(--muted);transition:opacity .5s cubic-bezier(.32,.72,0,1),transform .5s cubic-bezier(.32,.72,0,1)}
+.map-tooltip{position:absolute;z-index:4;display:grid;gap:2px;max-width:260px;padding:11px 15px;border:1px solid rgba(40,42,37,.08);border-radius:18px;background:rgba(255,254,250,.9);box-shadow:0 18px 40px -30px rgba(22,35,25,.75);backdrop-filter:blur(14px);-webkit-backdrop-filter:blur(14px);pointer-events:auto;font:11px/1.5 var(--mono);color:var(--muted);transition:opacity .5s cubic-bezier(.32,.72,0,1),transform .5s cubic-bezier(.32,.72,0,1)}
 .map-tooltip>*{min-width:0;max-width:100%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .map-tooltip strong{font:500 13px/1.4 Outfit,sans-serif;color:var(--ink);min-width:0;max-width:100%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.map-tooltip strong a{color:inherit;text-decoration:none}
+.map-tooltip strong a:hover{text-decoration:underline;text-underline-offset:3px}
 .map-tooltip span,.map-tooltip p{color:var(--muted);min-width:0;max-width:100%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .map-island,.map-legend,.map-list-panel{animation:map-rise .5s cubic-bezier(.32,.72,0,1) both}
 .map-island{position:absolute;left:16px;right:16px;bottom:16px;z-index:5;display:flex;align-items:center;gap:8px;flex-wrap:wrap;padding:8px;border:1px solid rgba(40,42,37,.07);border-radius:1.5rem;background:rgba(255,254,250,.72);box-shadow:0 20px 45px -32px rgba(22,35,25,.6);backdrop-filter:blur(18px) saturate(1.12);-webkit-backdrop-filter:blur(18px) saturate(1.12)}

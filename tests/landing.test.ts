@@ -124,6 +124,29 @@ describe("Minimalist public pages", () => {
       expect(security, locale).toContain(sizeLimits[locale]);
       const landing = await landingRoutes["/"]!(locale).text();
       expect(landing, locale).toContain("<code>memory_get_capabilities</code>");
+      expect(landing, locale).toContain("<code>memory_get_messages</code>");
+      expect(landing, locale).toContain(
+        "memory_upsert_messages</code> writes 1–100 unique keyed text messages",
+      );
+      expect(landing, locale).toContain("source_node_id");
+      const toolsTable = /<h3>(?:Tools|Alat)<\/h3>([\s\S]*?)<\/table>/u.exec(landing)?.[1] ?? "";
+      const toolNames = [...toolsTable.matchAll(/<code>(memory_[^<]+)<\/code>/gu)].map(
+        (match) => match[1],
+      );
+      expect(toolNames).toHaveLength(24);
+      expect(toolNames).toContain("memory_commit_batch");
+      expect(toolNames).toContain("memory_import_status");
+      expect(landing, locale).toContain(
+        locale === "en"
+          ? "atomically append/replace 1–20 conversations with explicit base revisions"
+          : "menambahkan/mengganti 1–20 percakapan secara atomis dengan revisi dasar eksplisit",
+      );
+      expect(landing, locale).toContain(
+        locale === "en"
+          ? "import progress, duplicate, or failure"
+          : "progres impor, duplikat, atau kegagalan",
+      );
+      expect(toolNames).toContain("memory_get_messages");
       expect(landing, locale).toContain(
         "<tr><td><code>memory_edit_messages</code></td><td>edit known message text (replace/append/prepend), revision-pinned and atomic</td></tr>",
       );

@@ -143,7 +143,16 @@ const replacements: ReadonlyArray<readonly [string, string]> = [
     "extend a conversation, optimistic revision check",
     "perpanjang percakapan, pemeriksaan revisi optimistis",
   ],
+  [
+    "atomically append/replace 1–20 conversations with explicit base revisions",
+    "menambahkan/mengganti 1–20 percakapan secara atomis dengan revisi dasar eksplisit",
+  ],
+  ["import progress, duplicate, or failure", "progres impor, duplikat, atau kegagalan"],
   ["change tags", "ubah tag"],
+  [
+    "atomic upsert of 1–100 keyed messages; insert/update/no-op with required base revision",
+    "upsert atomik 1–100 pesan berkunci; penyisipan/pembaruan/tanpa-perubahan dengan revisi dasar wajib",
+  ],
   ["delete specific memories (confirmed)", "hapus memori tertentu (dikonfirmasi)"],
   ["empty one namespace (exact confirmation)", "kosongkan satu namespace (konfirmasi persis)"],
   ["Privacy and isolation", "Privasi dan isolasi"],
