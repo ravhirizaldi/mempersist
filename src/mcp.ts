@@ -22,12 +22,17 @@ import {
   MAX_EDIT_MESSAGES,
   MAX_EDIT_SEPARATOR_CHARS,
   MAX_EDIT_SOURCE_NODE_ID_CHARS,
+  MAX_EXACT_MESSAGE_CURSOR_CHARS,
+  MAX_EXACT_MESSAGE_REQUESTS,
+  MAX_EXACT_SOURCE_NODE_ID_CHARS,
+  MAX_MESSAGE_KEY_CHARS,
   MAX_IDEMPOTENCY_KEY_CHARS,
   MAX_MESSAGE_CONTENT_CHARS,
   MAX_MESSAGE_ROLE_CHARS,
   MAX_NAMESPACE_CHARS,
   MAX_PAGE_ITEMS,
   MAX_REPLACE_MESSAGES,
+  MAX_UPSERT_MESSAGES,
   MAX_RESOLVE_ITEMS,
   MAX_SEARCH_ITEMS,
   MAX_SEARCH_QUERY_CHARS,
@@ -42,25 +47,19 @@ import {
   type MemoryCapabilities,
 } from "./limits";
 import {
+  completeMemoryBatch,
   completeMemoryCopy,
   completeMemoryEdit,
   completeMemoryRestore,
+  completeMemoryUpsert,
   completeMemoryWrite,
   fitMutationReceipt,
   type MutationReceiptItem,
   type MutationReceiptReadbackSelector,
 } from "./writes";
 import {
-  boundCompactPage,
-  compactConversationPage,
-  getChunkContext,
-  getConversationPage,
-  getConversations,
-} from "./retrieval";
-import { searchMemory } from "./search";
-import { assertAccountWritable, grantNamespace, scopeNamespaces, type Tenant } from "./tenant";
-import {
   appendConversation,
+  commitConversationBatch,
   copyConversations,
   editConversationMessages,
   listConversationRevisions,
@@ -68,9 +67,21 @@ import {
   replaceConversation,
   resolveConversations,
   restoreConversationRevision,
+  saveCommitBatchReceipt,
   updateConversationTags,
+  upsertConversationMessages,
   writeCanonicalConversation,
 } from "./storage";
+import {
+  boundCompactPage,
+  compactConversationPage,
+  getChunkContext,
+  getConversationPage,
+  getConversations,
+  getMessages,
+} from "./retrieval";
+import { searchMemory } from "./search";
+import { assertAccountWritable, grantNamespace, scopeNamespaces, type Tenant } from "./tenant";
 import { buildContext, type BuildContextInput, type BuildContextFollowItem } from "./context";
 
 const messageSchema = z.object({
@@ -110,6 +121,49 @@ const conversationRequestSchema = z.object({
   branch: z.enum(["active", "all"]).default("active"),
   revision_id: revisionIdSchema.optional(),
 });
+
+const commitBatchAppendOperationSchema = z
+  .object({
+    operation: z.literal("append"),
+    conversation_id: conversationIdSchema,
+    base_revision_id: revisionIdSchema,
+    messages: z.array(messageSchema).min(1).max(MAX_APPEND_MESSAGES),
+    tags: tagsSchema.optional(),
+  })
+  .strict();
+const commitBatchReplaceOperationSchema = z
+  .object({
+    operation: z.literal("replace"),
+    conversation_id: conversationIdSchema,
+    base_revision_id: revisionIdSchema,
+    messages: z.array(messageSchema).min(1).max(MAX_REPLACE_MESSAGES),
+  })
+  .strict();
+export const memoryCommitBatchInputSchema = z
+  .object({
+    idempotency_key: z
+      .string()
+      .min(1)
+      .max(MAX_IDEMPOTENCY_KEY_CHARS)
+      .refine((value) => /\S/u.test(value), "idempotency_key must not be empty"),
+    operations: z
+      .array(
+        z.discriminatedUnion("operation", [
+          commitBatchAppendOperationSchema,
+          commitBatchReplaceOperationSchema,
+        ]),
+      )
+      .min(1)
+      .max(MAX_BATCH_ITEMS)
+      .refine(
+        (operations) =>
+          new Set(operations.map((operation) => operation.conversation_id)).size ===
+          operations.length,
+        "Conversation IDs must be unique",
+      ),
+    verify: z.boolean().default(false),
+  })
+  .strict();
 const readOnlyAnnotations = {
   readOnlyHint: true,
   destructiveHint: false,
@@ -120,6 +174,7 @@ const readOnlyAnnotations = {
 const nullableStringSchema = z.string().nullable();
 const compactMessageOutputSchema = z.object({
   sourceNodeId: z.string(),
+  messageKey: z.string().max(MAX_MESSAGE_KEY_CHARS).optional(),
   role: nullableStringSchema,
   createdAt: nullableStringSchema,
   updatedAt: nullableStringSchema,
@@ -258,6 +313,56 @@ const contextOutputSchema = z.object({
     z.object({ sourceNodeId: z.string(), charStart: z.number(), charEnd: z.number() }),
   ),
 });
+const messageLookupMessageOutputSchema = z.object({
+  sourceNodeId: z.string().max(MAX_EXACT_SOURCE_NODE_ID_CHARS),
+  messageKey: z.string().max(MAX_MESSAGE_KEY_CHARS).nullable(),
+  role: nullableStringSchema,
+  text: z.string(),
+  createdAt: nullableStringSchema,
+  updatedAt: nullableStringSchema,
+});
+const messageLookupOversizedOutputSchema = z.object({
+  source_node_id: z.string().max(MAX_EXACT_SOURCE_NODE_ID_CHARS),
+  message_key: z.string().max(MAX_MESSAGE_KEY_CHARS).nullable(),
+  bytes: z.number().int().nonnegative(),
+});
+const messageLookupResultOutputSchema = z.discriminatedUnion("status", [
+  z.object({
+    request_index: z.number().int().nonnegative(),
+    status: z.literal("ok"),
+    conversation_id: z.string(),
+    revision_id: z.string(),
+    message: messageLookupMessageOutputSchema,
+  }),
+  z.object({
+    request_index: z.number().int().nonnegative(),
+    status: z.literal("error"),
+    conversation_id: z.string(),
+    revision_id: z.string().optional(),
+    error: z.object({
+      code: z.string().max(64),
+      message: z.string().max(256),
+    }),
+  }),
+  z.object({
+    request_index: z.number().int().nonnegative(),
+    status: z.literal("oversized"),
+    conversation_id: z.string(),
+    revision_id: z.string(),
+    oversized_message: messageLookupOversizedOutputSchema,
+  }),
+]);
+export const memoryGetMessagesOutputSchema = z.object({
+  results: z.array(messageLookupResultOutputSchema).max(MAX_EXACT_MESSAGE_REQUESTS),
+  next_cursor: z.string().max(MAX_EXACT_MESSAGE_CURSOR_CHARS).nullable(),
+  used_serialized_bytes: z.number().int().nonnegative(),
+  max_serialized_bytes: z
+    .number()
+    .int()
+    .min(BATCH_MIN_SERIALIZED_BYTES)
+    .max(BATCH_MAX_SERIALIZED_BYTES),
+});
+
 const batchOutputSchema = z.object({
   batchId: z.string(),
   results: z.array(
@@ -290,6 +395,73 @@ const batchInputSchema = z
       .max(BATCH_MAX_SERIALIZED_BYTES)
       .default(BATCH_DEFAULT_SERIALIZED_BYTES),
   })
+  .superRefine((input, context) => {
+    if ((input.requests === undefined) === (input.cursor === undefined)) {
+      context.addIssue({
+        code: "custom",
+        message: "Provide exactly one of requests or cursor",
+      });
+    }
+  });
+const messageKeySchema = z
+  .string()
+  .min(1)
+  .max(MAX_MESSAGE_KEY_CHARS)
+  .regex(/^[a-z0-9](?:[a-z0-9._/-]{0,126}[a-z0-9])?$/u);
+export const memoryUpsertMessagesInputSchema = z
+  .object({
+    conversation_id: conversationIdSchema,
+    base_revision_id: revisionIdSchema,
+    messages: z
+      .array(
+        z
+          .object({
+            message_key: messageKeySchema,
+            role: z.string().min(1).max(MAX_MESSAGE_ROLE_CHARS),
+            text: z.string().max(MAX_MESSAGE_CONTENT_CHARS),
+          })
+          .strict(),
+      )
+      .min(1)
+      .max(MAX_UPSERT_MESSAGES)
+      .refine(
+        (messages) =>
+          new Set(messages.map((message) => message.message_key)).size === messages.length,
+        "message_key must be unique within one request",
+      ),
+    verify: z.boolean().default(false),
+  })
+  .strict();
+
+const messageLookupSelectorSchema = z
+  .object({
+    conversation_id: conversationIdSchema,
+    revision_id: revisionIdSchema.optional(),
+    source_node_id: z.string().min(1).max(MAX_EXACT_SOURCE_NODE_ID_CHARS).optional(),
+    message_key: messageKeySchema.optional(),
+  })
+  .strict()
+  .refine(
+    (selector) => (selector.source_node_id !== undefined) !== (selector.message_key !== undefined),
+    "Selector must contain exactly one of source_node_id or message_key",
+  );
+
+export const memoryGetMessagesInputSchema = z
+  .object({
+    requests: z
+      .array(messageLookupSelectorSchema)
+      .min(1)
+      .max(MAX_EXACT_MESSAGE_REQUESTS)
+      .optional(),
+    cursor: z.string().min(1).max(MAX_EXACT_MESSAGE_CURSOR_CHARS).optional(),
+    max_serialized_bytes: z
+      .number()
+      .int()
+      .min(BATCH_MIN_SERIALIZED_BYTES)
+      .max(BATCH_MAX_SERIALIZED_BYTES)
+      .default(BATCH_DEFAULT_SERIALIZED_BYTES),
+  })
+  .strict()
   .superRefine((input, context) => {
     if ((input.requests === undefined) === (input.cursor === undefined)) {
       context.addIssue({
@@ -470,6 +642,7 @@ export const contextMessageProvenanceSchema = z.object({
   conversation_id: z.string(),
   revision_id: z.string(),
   source_node_id: z.string(),
+  message_key: z.string().max(MAX_MESSAGE_KEY_CHARS).optional(),
   source_conversation_id: z.string().optional(),
   source_revision_id: z.string().optional(),
   pointer: z.string().optional(),
@@ -478,6 +651,7 @@ export const contextMessageProvenanceSchema = z.object({
   sources: z.array(z.enum(["lexical", "semantic", "recent_canonical"])).optional(),
 });
 export const contextMessageSchema = z.object({
+  message_key: z.string().max(MAX_MESSAGE_KEY_CHARS).optional(),
   source_node_id: z.string(),
   role: nullableStringSchema,
   created_at: nullableStringSchema,
@@ -592,6 +766,17 @@ const verificationOutputSchema = z.object({
     .object({ code: z.string(), message: z.string(), offset: z.number() })
     .optional(),
 });
+const derivedOutputSchema = z.union([
+  z.object({ status: z.literal("materialized") }),
+  z.object({
+    status: z.literal("failed"),
+    error: z.object({
+      code: z.literal("DERIVED_MATERIALIZATION"),
+      message: z.string(),
+      retryable: z.literal(true),
+    }),
+  }),
+]);
 const memoryWriteOutputSchema = z.object({
   conversation_id: z.string(),
   revision_id: z.string(),
@@ -604,6 +789,55 @@ const memoryWriteOutputSchema = z.object({
     }),
   ]),
   verification: verificationOutputSchema.optional(),
+  ...receiptBudgetFields,
+});
+export const memoryUpsertMessagesOutputSchema = z.object({
+  conversation_id: z.string(),
+  previous_revision_id: z.string(),
+  revision_id: z.string(),
+  status: z.enum(["upserted", "no_change"]),
+  durable: z.literal(true),
+  messages: z.array(
+    z.object({
+      request_index: z.number().int().min(0),
+      message_key: z.string().max(MAX_MESSAGE_KEY_CHARS),
+      source_node_id: z.string(),
+      status: z.enum(["inserted", "updated", "unchanged"]),
+    }),
+  ),
+  indexing: z
+    .union([
+      z.object({ status: z.literal("queued"), job_id: z.string() }),
+      z.object({
+        status: z.literal("failed"),
+        error: z.object({ code: z.string(), message: z.string(), retryable: z.boolean() }),
+      }),
+    ])
+    .optional(),
+  verification: verificationOutputSchema.optional(),
+  ...receiptBudgetFields,
+});
+export const memoryCommitBatchOutputSchema = z.object({
+  batch_id: z.string(),
+  status: z.literal("committed"),
+  durable: z.literal(true),
+  results: z.array(
+    z.object({
+      request_index: z.number().int().min(0),
+      conversation_id: z.string(),
+      previous_revision_id: z.string(),
+      revision_id: z.string(),
+      durable: z.literal(true),
+      indexing: z.union([
+        z.object({ status: z.literal("queued"), job_id: z.string() }),
+        z.object({
+          status: z.literal("failed"),
+          error: z.object({ code: z.string(), message: z.string(), retryable: z.boolean() }),
+        }),
+      ]),
+      derived: derivedOutputSchema.optional(),
+    }),
+  ),
   ...receiptBudgetFields,
 });
 const memoryRestoreOutputSchema = z.object({
@@ -812,7 +1046,7 @@ export function createMemoryMcpServer(env: AppEnv, tenant: Tenant): McpServer {
     },
     {
       instructions:
-        "MemPersist stores and retrieves durable AI conversation memory for the authenticated user. For exploration, use memory_search followed by memory_get_context or memory_get_conversation. For complex context assembly, use memory_build_context directly. Use memory_store only for intentional durable saves; use memory_append for genuine continuation, memory_replace to supersede a complete transcript, and memory_edit_messages for targeted edits. Never assume memories belong to another account or namespace. Search before creating duplicate memories. Writes are persistent and may require user confirmation.",
+        "MemPersist stores and retrieves durable AI conversation memory for the authenticated user. For exploration, use memory_search followed by memory_get_context or memory_get_conversation. For complex context assembly, use memory_build_context directly. Use memory_store only for intentional durable saves; use memory_append for genuine continuation, memory_replace to supersede a complete transcript, memory_commit_batch for atomic updates across multiple conversations, memory_upsert_messages for stable keyed message updates, and memory_edit_messages for targeted edits. Never assume memories belong to another account or namespace. Search before creating duplicate memories. Writes are persistent and may require user confirmation.",
     },
   );
 
@@ -937,6 +1171,67 @@ export function createMemoryMcpServer(env: AppEnv, tenant: Tenant): McpServer {
           tenant.userId,
         ),
       ),
+  );
+  server.registerTool(
+    "memory_get_messages",
+    {
+      title: "Get messages",
+      description:
+        "Read exact canonical messages by source node ID or message key, pinned to a specific revision or the current revision at request start.",
+      annotations: readOnlyAnnotations,
+      outputSchema: memoryGetMessagesOutputSchema,
+      inputSchema: memoryGetMessagesInputSchema,
+    },
+    async (input) => {
+      const result = await getMessages(
+        env,
+        {
+          ...(input.requests !== undefined
+            ? {
+                requests: input.requests.map((request) => ({
+                  conversation_id: request.conversation_id,
+                  ...(request.revision_id !== undefined
+                    ? { revision_id: request.revision_id }
+                    : {}),
+                  ...(request.source_node_id !== undefined
+                    ? { source_node_id: request.source_node_id }
+                    : {}),
+                  ...(request.message_key !== undefined
+                    ? { message_key: request.message_key }
+                    : {}),
+                })),
+              }
+            : {}),
+          ...(input.cursor !== undefined ? { cursor: input.cursor } : {}),
+          max_serialized_bytes: input.max_serialized_bytes,
+        },
+        tenant.namespaces,
+        tenant.userId,
+        env.MEMORY_API_TOKEN,
+      );
+      return toolResult({
+        results: result.results.map((item) => ({
+          request_index: item.request_index,
+          status: item.status,
+          conversation_id: item.conversation_id,
+          ...(item.revision_id !== undefined ? { revision_id: item.revision_id } : {}),
+          ...(item.status === "ok"
+            ? { message: item.message }
+            : item.status === "error"
+              ? { error: item.error }
+              : {
+                  oversized_message: {
+                    source_node_id: item.oversized_message!.sourceNodeId,
+                    message_key: item.oversized_message!.messageKey,
+                    bytes: item.oversized_message!.bytes,
+                  },
+                }),
+        })),
+        next_cursor: result.next_cursor,
+        used_serialized_bytes: result.used_serialized_bytes,
+        max_serialized_bytes: result.max_serialized_bytes,
+      });
+    },
   );
 
   server.registerTool(
@@ -1137,6 +1432,102 @@ export function createMemoryMcpServer(env: AppEnv, tenant: Tenant): McpServer {
       });
       const stored = await writeCanonicalConversation(env, conversation, null, null, tenant.userId);
       return toolResult(await completeMemoryWrite(env, stored, input.messages, input.verify));
+    },
+  );
+
+  server.registerTool(
+    "memory_commit_batch",
+    {
+      title: "Commit memory batch",
+      description:
+        "Atomically append or replace up to 20 owned conversations with optimistic revision checks. All canonical revisions and heads commit together or none do; indexing follows the commit. Repeating an idempotency_key replays the bounded receipt without duplicate revisions or jobs. Optional verify checks every committed revision.",
+      annotations: {
+        readOnlyHint: false,
+        destructiveHint: true,
+        openWorldHint: false,
+        idempotentHint: true,
+      },
+      outputSchema: memoryCommitBatchOutputSchema,
+      inputSchema: memoryCommitBatchInputSchema,
+    },
+    async (input) => {
+      const serialized = JSON.stringify(input);
+      try {
+        assertInlineWriteBudget(serialized, input.operations.length);
+      } catch (error) {
+        if (error instanceof AppError && error.code === "REQUEST_TOO_LARGE") {
+          return requestTooLargeResult(error);
+        }
+        throw error;
+      }
+
+      const batch = await commitConversationBatch(env, {
+        userId: tenant.userId,
+        namespaces: tenant.namespaces,
+        idempotencyKey: input.idempotency_key,
+        operations: input.operations.map((operation) => ({
+          operation: operation.operation,
+          conversationId: operation.conversation_id,
+          baseRevisionId: operation.base_revision_id,
+          messages: operation.messages,
+          ...(operation.operation === "append" && operation.tags !== undefined
+            ? { tags: operation.tags }
+            : {}),
+        })),
+      });
+      if (batch.replay && batch.receipt) return toolResult(batch.receipt);
+
+      const receipt = await completeMemoryBatch(env, batch, input.verify);
+      if (!receipt.results.some((result) => result.derived?.status === "failed")) {
+        try {
+          await saveCommitBatchReceipt(env, batch.batchId, { ...receipt });
+        } catch {
+          // Receipt persistence is post-commit and best-effort.
+        }
+      }
+      return toolResult(receipt);
+    },
+  );
+
+  server.registerTool(
+    "memory_upsert_messages",
+    {
+      title: "Upsert keyed memory messages",
+      description:
+        "Insert or update up to 100 owned conversation messages by stable message key with optimistic revision checking. Optional verify reloads the committed revision.",
+      annotations: {
+        readOnlyHint: false,
+        destructiveHint: true,
+        openWorldHint: false,
+        idempotentHint: false,
+      },
+      outputSchema: memoryUpsertMessagesOutputSchema,
+      inputSchema: memoryUpsertMessagesInputSchema,
+    },
+    async (input) => {
+      const serialized = JSON.stringify(input);
+      try {
+        assertInlineWriteBudget(serialized, input.messages.length);
+      } catch (error) {
+        if (error instanceof AppError && error.code === "REQUEST_TOO_LARGE") {
+          return requestTooLargeResult(error);
+        }
+        throw error;
+      }
+      const messages = input.messages.map((message) => ({
+        messageKey: message.message_key,
+        role: message.role,
+        text: message.text,
+      }));
+      const stored = await upsertConversationMessages(
+        env,
+        input.conversation_id,
+        input.base_revision_id,
+        messages,
+        tenant.namespaces,
+        tenant.userId,
+      );
+      return toolResult(await completeMemoryUpsert(env, stored, messages, input.verify));
     },
   );
 

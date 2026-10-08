@@ -1,5 +1,10 @@
 import { describe, expect, it } from "vitest";
-import { expandPointerNeighborhood } from "../src/retrieval";
+import {
+  compactConversationPage,
+  conversationPage,
+  expandPointerNeighborhood,
+  verifyIntegrity,
+} from "../src/retrieval";
 import {
   mergeSemanticCandidates,
   queryTerms,
@@ -1220,5 +1225,177 @@ describe("pointer-aware deterministic expansion", () => {
     };
     const result = expandPointerNeighborhood(cyclicalConv, ["c1"], 5, 5);
     expect(result.map((n) => n.sourceNodeId)).toEqual(["c2", "c1"]);
+  });
+});
+describe("message-key read projections and integrity", () => {
+  const conversation = {
+    id: "projection-conversation",
+    sourceType: "mcp",
+    sourceId: null,
+    title: "Projection",
+    namespace: "personal",
+    tags: [],
+    createdAt: "2026-10-01T00:00:00.000Z",
+    updatedAt: "2026-10-01T00:00:00.000Z",
+    currentSourceNodeId: "keyed",
+    activeSourceNodeIds: ["unkeyed", "keyed"],
+    nodes: [
+      {
+        id: "id-unkeyed",
+        sourceNodeId: "unkeyed",
+        parentSourceNodeId: null,
+        childSourceNodeIds: ["keyed"],
+        role: "user",
+        text: "unkeyed",
+        content: { content_type: "text", parts: ["unkeyed"] },
+        createdAt: "2026-10-01T00:00:00.000Z",
+        updatedAt: null,
+        modelSlug: null,
+        metadata: {},
+        raw: {},
+      },
+      {
+        id: "id-keyed",
+        sourceNodeId: "keyed",
+        parentSourceNodeId: "unkeyed",
+        childSourceNodeIds: [],
+        role: "assistant",
+        text: "keyed",
+        content: { content_type: "text", parts: ["keyed"] },
+        createdAt: "2026-10-01T00:00:01.000Z",
+        updatedAt: null,
+        modelSlug: null,
+        metadata: {},
+        raw: {},
+        messageKey: "state.location",
+      },
+    ],
+    metadata: {},
+    anomalies: [],
+    derivedFrom: null,
+  };
+
+  it("projects keyed identity while omitting it for unkeyed messages", () => {
+    const page = conversationPage(conversation, "revision-1", [], 0, 100);
+    expect(page.messages[0]).not.toHaveProperty("messageKey");
+    expect(page.messages[1]?.messageKey).toBe("state.location");
+
+    const compact = compactConversationPage(page, 0);
+    expect(compact.messages[0]).not.toHaveProperty("messageKey");
+    expect(compact.messages[1]?.messageKey).toBe("state.location");
+  });
+
+  it("reports duplicate canonical keys without exposing segment object keys", async () => {
+    const manifestKey = "manifest-internal";
+    const segmentKey = "segment-internal";
+    const segment = [
+      JSON.stringify({
+        format: "mempersist.conversation-segment.v1",
+        conversation: { id: "conv" },
+      }),
+      JSON.stringify({ type: "node", node: { sourceNodeId: "active", messageKey: "state.same" } }),
+      JSON.stringify({
+        type: "node",
+        node: { sourceNodeId: "inactive", messageKey: "state.same" },
+      }),
+      "",
+    ].join("\n");
+    const objects = new Map([
+      [
+        manifestKey,
+        JSON.stringify({
+          conversationId: "conv",
+          segments: [{ key: segmentKey }],
+        }),
+      ],
+      [segmentKey, segment],
+    ]);
+    const env = {
+      MEMORY_DB: {
+        prepare: () => ({
+          all: () => ({
+            results: [{ id: "revision-1", manifest_object_key: manifestKey }],
+          }),
+        }),
+      },
+      MEMORY_BUCKET: {
+        get: (key: string) => {
+          const body = objects.get(key);
+          return body === undefined ? null : { text: () => body };
+        },
+        head: (key: string) => (objects.has(key) ? {} : null),
+      },
+    } as never;
+
+    const result = await verifyIntegrity(env);
+    expect(result.duplicateMessageKeys).toEqual([
+      {
+        conversationId: "conv",
+        revisionId: "revision-1",
+        messageKey: "state.same",
+        sourceNodeIds: ["active", "inactive"],
+      },
+    ]);
+    expect(result.corruptManifests).toEqual([]);
+    expect(result.invalidMessageKeys).toEqual([]);
+    expect(JSON.stringify(result)).not.toContain(segmentKey);
+  });
+  it("reports malformed keys and corrupt manifests without aborting", async () => {
+    const manifestKey = "manifest-corrupt";
+    const segmentKey = "segment-invalid-keys";
+    const segment = [
+      JSON.stringify({
+        format: "mempersist.conversation-segment.v1",
+        conversation: { id: "conv" },
+      }),
+      JSON.stringify({ type: "node", node: { sourceNodeId: "empty", messageKey: "" } }),
+      JSON.stringify({ type: "node", node: { sourceNodeId: "number", messageKey: 42 } }),
+      "{not-json",
+      "",
+    ].join("\n");
+    const objects = new Map([
+      [manifestKey, JSON.stringify({ conversationId: "conv", segments: [{ key: segmentKey }] })],
+      [segmentKey, segment],
+      ["manifest-corrupt-2", "{not-json"],
+    ]);
+    const env = {
+      MEMORY_DB: {
+        prepare: () => ({
+          all: () => ({
+            results: [
+              { id: "revision-invalid", manifest_object_key: manifestKey },
+              { id: "revision-corrupt", manifest_object_key: "manifest-corrupt-2" },
+            ],
+          }),
+        }),
+      },
+      MEMORY_BUCKET: {
+        get: (key: string) => {
+          const body = objects.get(key);
+          return body === undefined ? null : { text: () => body };
+        },
+        head: (key: string) => (objects.has(key) ? {} : null),
+      },
+    } as never;
+
+    const result = await verifyIntegrity(env);
+    expect(result.corruptManifests).toEqual(["revision-corrupt"]);
+    expect(result.invalidMessageKeys).toEqual([
+      {
+        conversationId: "conv",
+        revisionId: "revision-invalid",
+        sourceNodeId: "empty",
+        reason: "invalid_format",
+      },
+      {
+        conversationId: "conv",
+        revisionId: "revision-invalid",
+        sourceNodeId: "number",
+        reason: "invalid_type",
+      },
+    ]);
+    expect(result.corruptSegments).toEqual([
+      { revisionId: "revision-invalid", segmentIndex: 0, lineNumber: 4 },
+    ]);
   });
 });

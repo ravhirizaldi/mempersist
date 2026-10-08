@@ -1,4 +1,5 @@
 import type { AppEnv, CanonicalNode, MessageEditOperation } from "./domain";
+import { isValidMessageKey } from "./domain";
 import { enqueueIndex } from "./jobs";
 import { COMPACT_RESPONSE_BYTES, MUTATION_RECEIPT_MAX_SERIALIZED_BYTES } from "./limits";
 import {
@@ -11,9 +12,14 @@ import {
 import {
   loadCanonicalRevision,
   loadConversationTags,
+  materializeCommittedBatchDerivedRows,
+  saveCommitBatchReceipt,
+  type CommitBatchResult,
   type ConversationMessageEditResult,
+  type ConversationMessageUpsertResult,
   type RestoredRevision,
   type StoredRevision,
+  type UpsertMessage,
 } from "./storage";
 
 type WrittenMessage = { role: string; content: string; timestamp?: string | undefined };
@@ -48,14 +54,24 @@ export interface MutationReceiptIndexing {
   error?: { code: string; message: string; retryable: boolean };
 }
 
+export type MutationReceiptDerived =
+  | { status: "materialized" }
+  | {
+      status: "failed";
+      error: { code: "DERIVED_MATERIALIZATION"; message: string; retryable: true };
+    };
+
 export interface MutationReceiptItem {
   request_index?: number;
+  message_key?: string;
+  source_node_id?: string;
   status?: string;
   conversation_id?: string;
   previous_revision_id?: string;
   revision_id?: string;
   durable?: boolean;
   indexing?: MutationReceiptIndexing;
+  derived?: MutationReceiptDerived;
   verification?: MutationReceiptVerification;
   source_conversation_id?: string;
   source_revision_id?: string;
@@ -602,6 +618,28 @@ interface EditReceiptItem extends MutationReceiptItem {
   operation?: MessageEditOperation;
 }
 
+export interface MemoryUpsertReceiptMessage {
+  request_index: number;
+  message_key: string;
+  source_node_id: string;
+  status: "inserted" | "updated" | "unchanged";
+}
+
+export interface MemoryUpsertReceiptDraft {
+  conversation_id: string;
+  previous_revision_id: string;
+  revision_id: string;
+  status: "upserted" | "no_change";
+  durable: true;
+  messages: MemoryUpsertReceiptMessage[];
+  indexing?: MutationReceiptIndexing;
+  verification?: MutationReceiptVerification;
+  readback_requests?: MutationReceiptReadbackSelector[];
+  omitted?: string[];
+}
+
+export type MemoryUpsertReceipt = MemoryUpsertReceiptDraft & MutationReceiptBudget;
+
 function targetedReadbackPage(
   meta: {
     conversationId: string;
@@ -622,6 +660,7 @@ function targetedReadbackPage(
     },
     messages: nodes.map((node) => ({
       sourceNodeId: node.sourceNodeId,
+      ...(node.messageKey === undefined ? {} : { messageKey: node.messageKey }),
       role: node.role,
       createdAt: node.createdAt,
       updatedAt: node.updatedAt,
@@ -635,6 +674,177 @@ function targetedReadbackPage(
 }
 
 // Reloads the committed revision from R2, validates its canonical integrity, and
+export async function verifyUpsertedRevision(
+  env: AppEnv,
+  result: ConversationMessageUpsertResult,
+  intended: UpsertMessage[],
+): Promise<MutationReceiptVerification> {
+  try {
+    const committed = await loadCanonicalRevision(
+      env,
+      result.revisionId,
+      result.revision ?? undefined,
+    );
+    const seenMessageKeys = new Set<string>();
+    for (const node of committed.conversation.nodes) {
+      const messageKey = node.messageKey;
+      if (messageKey === undefined) continue;
+      if (!isValidMessageKey(messageKey)) {
+        return {
+          status: "failed",
+          revision_id: result.revisionId,
+          checked_messages: intended.length,
+          readback_available: false,
+          error: {
+            code: "CANONICAL_STORAGE",
+            message: "Canonical graph contains invalid message keys",
+          },
+        };
+      }
+      if (seenMessageKeys.has(messageKey)) {
+        return {
+          status: "failed",
+          revision_id: result.revisionId,
+          checked_messages: intended.length,
+          readback_available: false,
+          error: {
+            code: "CANONICAL_STORAGE",
+            message: "Canonical graph contains duplicate message keys",
+          },
+        };
+      }
+      seenMessageKeys.add(messageKey);
+    }
+    const byKey = new Map(
+      committed.conversation.nodes.flatMap((node) =>
+        node.messageKey === undefined ? [] : [[node.messageKey, node] as const],
+      ),
+    );
+    const nodes = intended.map((message) => byKey.get(message.messageKey));
+    const matches = intended.every((message, index) => {
+      const node = nodes[index];
+      return (
+        node?.messageKey === message.messageKey &&
+        node.role === message.role &&
+        node.text === message.text
+      );
+    });
+    const readback = targetedReadbackPage(
+      {
+        conversationId: result.conversationId,
+        revisionId: result.revisionId,
+        title: committed.manifest.title,
+        namespace: committed.manifest.namespace,
+        tags: committed.manifest.tags ?? [],
+      },
+      nodes.filter((node): node is CanonicalNode => node !== undefined),
+    );
+    return {
+      status: matches ? "passed" : "failed",
+      revision_id: result.revisionId,
+      checked_messages: intended.length,
+      readback_available: true,
+      ...(matches
+        ? {}
+        : {
+            error: {
+              code: "CANONICAL_STORAGE",
+              message: "Persisted keyed messages differ from the intended upsert",
+            },
+          }),
+      ...(jsonBytes(readback) <= COMPACT_RESPONSE_BYTES
+        ? { readback }
+        : {
+            readback_error: {
+              code: "RESPONSE_TOO_LARGE",
+              message: "Targeted upsert readback exceeds the readback budget",
+              offset: 0,
+            },
+          }),
+    };
+  } catch {
+    return {
+      status: "failed",
+      revision_id: result.revisionId,
+      readback_available: false,
+      error: {
+        code: "CANONICAL_STORAGE",
+        message: "Upserted revision could not be read and verified",
+      },
+    };
+  }
+}
+
+export async function completeMemoryUpsert(
+  env: AppEnv,
+  result: ConversationMessageUpsertResult,
+  messages: UpsertMessage[],
+  verify: boolean,
+): Promise<MemoryUpsertReceipt> {
+  let indexing: MutationReceiptIndexing | undefined;
+  if (result.status === "upserted" && result.revision) {
+    try {
+      indexing = { status: "queued", job_id: await enqueueIndex(env, result.revision.revisionId) };
+    } catch {
+      indexing = {
+        status: "failed",
+        error: {
+          code: "DERIVED_INDEXING",
+          message: boundedErrorMessage("Canonical upsert saved; indexing could not be queued"),
+          retryable: true,
+        },
+      };
+    }
+  }
+  const verification = verify ? await verifyUpsertedRevision(env, result, messages) : undefined;
+  const readbackRequests: MutationReceiptReadbackSelector[] =
+    verify && verification?.readback_available
+      ? [
+          {
+            conversation_id: result.conversationId,
+            revision_id: result.revisionId,
+            offset: 0,
+            limit: 100,
+            branch: "all",
+          },
+        ]
+      : [];
+  const core: MutationReceiptItem = {
+    ...(indexing ? { indexing } : {}),
+    ...(verification ? { verification } : {}),
+  };
+  const messageItems: MutationReceiptItem[] = result.messages.map((message) => ({
+    request_index: message.requestIndex,
+    message_key: message.messageKey,
+    source_node_id: message.sourceNodeId,
+    status: message.status,
+  }));
+  return fitMutationReceipt({
+    items: [core, ...messageItems],
+    readbackRequests,
+    wrap: ({ items, readback_requests, omitted }): MemoryUpsertReceiptDraft => {
+      const [first, ...rest] = items;
+      return {
+        conversation_id: result.conversationId,
+        previous_revision_id: result.previousRevisionId,
+        revision_id: result.revisionId,
+        status: result.status,
+        durable: true,
+        messages: rest.map((item) => ({
+          request_index: item.request_index!,
+          message_key: String(item.message_key),
+          source_node_id: String(item.source_node_id),
+          status: item.status as MemoryUpsertReceiptMessage["status"],
+        })),
+        ...(first?.indexing ? { indexing: first.indexing } : {}),
+        ...(first?.verification ? { verification: first.verification } : {}),
+        ...(readback_requests.length ? { readback_requests } : {}),
+        ...(omitted.length ? { omitted } : {}),
+      };
+    },
+  }).value;
+}
+
 // checks every requested target's final text plus its preserved role/createdAt
 // against the base revision. Readback is limited to the requested targets.
 export async function verifyEditedRevision(
@@ -786,4 +996,131 @@ export async function completeMemoryEdit(
       };
     },
   }).value;
+}
+
+export interface MemoryBatchReceiptResult {
+  request_index: number;
+  conversation_id: string;
+  previous_revision_id: string;
+  revision_id: string;
+  durable: true;
+  indexing: MutationReceiptIndexing;
+  derived?: MutationReceiptDerived;
+  verification?: MutationReceiptVerification;
+}
+
+export interface MemoryBatchReceipt extends MutationReceiptBudget {
+  batch_id: string;
+  status: "committed";
+  durable: true;
+  results: MemoryBatchReceiptResult[];
+  readback_requests?: MutationReceiptReadbackSelector[];
+  omitted?: string[];
+}
+
+export async function completeMemoryBatch(
+  env: AppEnv,
+  batch: CommitBatchResult,
+  verify: boolean,
+): Promise<MemoryBatchReceipt> {
+  if (batch.replay && batch.receipt?.status === "committed")
+    return batch.receipt as unknown as MemoryBatchReceipt;
+  const items: MutationReceiptItem[] = [];
+  const readbackRequests: MutationReceiptReadbackSelector[] = [];
+  let derived: MutationReceiptDerived;
+  try {
+    await materializeCommittedBatchDerivedRows(env, batch.operations);
+    derived = { status: "materialized" };
+  } catch {
+    derived = {
+      status: "failed",
+      error: {
+        code: "DERIVED_MATERIALIZATION",
+        message: boundedErrorMessage(
+          "Canonical batch revision saved; derived rows could not be materialized",
+        ),
+        retryable: true,
+      },
+    };
+  }
+  for (const operation of batch.operations) {
+    let indexing: MutationReceiptIndexing;
+    try {
+      const jobId = await enqueueIndex(
+        env,
+        operation.revision.revisionId,
+        env.ACTIVE_INDEX_GENERATION,
+        batch.replay,
+      );
+      indexing = { status: "queued", job_id: jobId };
+    } catch {
+      indexing = {
+        status: "failed",
+        error: {
+          code: "DERIVED_INDEXING",
+          message: boundedErrorMessage(
+            "Canonical batch revision saved; indexing could not be queued",
+          ),
+          retryable: true,
+        },
+      };
+    }
+    const verification = verify
+      ? await verifyCommittedWrite(env, operation.revision, operation.messages)
+      : undefined;
+    if (verify && verification?.readback_available) {
+      readbackRequests.push({
+        conversation_id: operation.conversationId,
+        revision_id: operation.revision.revisionId,
+        offset: operation.revision.writeOffset ?? 0,
+        limit: 20,
+        branch: "active",
+      });
+    }
+    items.push({
+      request_index: operation.requestIndex,
+      conversation_id: operation.conversationId,
+      previous_revision_id: operation.previousRevisionId,
+      revision_id: operation.revision.revisionId,
+      durable: true,
+      indexing,
+      derived,
+      ...(verification ? { verification } : {}),
+    });
+  }
+  const fitted = fitMutationReceipt({
+    items,
+    readbackRequests,
+    wrap: ({ items: merged, readback_requests, omitted }): MemoryBatchReceipt => ({
+      batch_id: batch.batchId,
+      status: "committed",
+      durable: true,
+      results: merged.map((item) => ({
+        request_index: item.request_index!,
+        conversation_id: item.conversation_id!,
+        previous_revision_id: item.previous_revision_id!,
+        revision_id: item.revision_id!,
+        durable: true,
+        indexing: item.indexing!,
+        ...(item.derived ? { derived: item.derived } : {}),
+        ...(item.verification ? { verification: item.verification } : {}),
+      })),
+      ...(readback_requests.length ? { readback_requests } : {}),
+      ...(omitted.length ? { omitted } : {}),
+      used_serialized_bytes: 0,
+      max_serialized_bytes: MUTATION_RECEIPT_MAX_SERIALIZED_BYTES,
+    }),
+  }).value;
+  if (derived.status === "materialized") {
+    try {
+      await saveCommitBatchReceipt(
+        env,
+        batch.batchId,
+        fitted as unknown as Record<string, unknown>,
+      );
+    } catch {
+      // Canonical commit is already durable; receipt persistence is best effort.
+    }
+  }
+  return fitted;
 }

@@ -44,6 +44,16 @@ Do not store routine commits, "I did X" churn, or facts you can read from the re
    to restore an owned conversation to any historical revision using `base_revision_id` optimistic concurrency
    and an immutable head transition without creating duplicate canonical revisions. Use `memory_copy_conversations`
    for forks/templates/promotion between owned namespaces; search both namespaces if a copy exists.
+   Use `memory_upsert_messages` for stable logical records keyed by exact `message_key`; require
+   the current `base_revision_id`, and do not retry a committed call with the same stale base.
+   For a coordinated save, use `memory_commit_batch` with 1–20 distinct owned conversations, an explicit
+   `base_revision_id` for every append or complete replacement, and one idempotency key. Same-account
+   cross-namespace operations are atomic: every head advances or none does. A stale or invalid operation
+   aborts the entire batch. Repeating the same key and material replays the durable receipt without
+   duplicate revisions or jobs; changed material under that key conflicts. If preparation or a Worker
+   restart interrupts the call, retry the same key to resume deterministic preparation. If indexing,
+   verification, receipt persistence, or response fitting fails after commit, do not resubmit the
+   mutation: durability is separate and the receipt or later canonical read is authoritative.
 5. **Delete only on explicit user confirmation.** Remove specific memories with
    `memory_delete_conversations`; clear an entire project with `memory_empty_namespace`
    (exact confirmation required). Never delete memory unprompted.
@@ -106,6 +116,60 @@ deterministic round-robin order. Per-item `continuation` values remain a compati
 not the primary workflow. An oversized `page.oversizedMessage` reports conversation/revision
 identity, source node, offset, and byte size without text; recover it with an authorized
 canonical HTTP read or account export rather than retrying the same cursor.
+
+### Exact message lookup
+
+Use `memory_get_messages` when you already know a canonical source node, or when
+canonical data may contain a forward-compatible `messageKey`. The first call is:
+
+```json
+{
+  "requests": [
+    {
+      "conversation_id": "<conversation-id>",
+      "revision_id": "<optional-revision-id>",
+      "source_node_id": "<source-node-id>"
+    },
+    {
+      "conversation_id": "<conversation-id>",
+      "message_key": "state.relationship"
+    }
+  ],
+  "max_serialized_bytes": 32768
+}
+```
+
+Send 1–100 ordered selectors. Each selector requires `conversation_id`, may
+include `revision_id`, and must include exactly one of `source_node_id` (at most
+200 characters) or `message_key`. Keys use issue #7's exact forward-compatible
+contract: 1–128 characters of lowercase ASCII letters, digits, `.`, `_`, `/`, or
+`-`, beginning and ending with a letter or digit. The selector extension only
+reads keyed nodes written by `memory_upsert_messages` as well as any forward-compatible
+canonical keyed data. `memory_upsert_messages` accepts 1–100 unique keyed text messages for one
+owned conversation and requires an explicit `base_revision_id` plus a role for each item. Keys are
+exact 1–128-character lowercase ASCII strings matching `[a-z0-9._/-]`, starting and ending with a
+letter or digit; there is no normalization.
+
+Omitted revisions pin the current head for every request before any R2 body
+loads. Canonical loads are deduplicated by unique pinned revision, while
+duplicate selectors still produce duplicate ordered results. Resolution reads
+canonical data only, never FTS or Vectorize. Missing, foreign, deleted, or
+unknown conversations, revisions, nodes, and keys are indistinguishable
+`NOT_FOUND` outcomes. Duplicate canonical message keys return a bounded
+canonical-storage error; never choose one.
+
+The first call accepts exactly one `requests`; continuation accepts exactly one
+opaque `cursor`. `max_serialized_bytes` defaults to 32,768 and accepts
+4,096–49,152. The envelope uses `results`, `next_cursor`, `used_serialized_bytes`,
+and `max_serialized_bytes`; result entries use `request_index`, `status`
+(`ok`, `error`, or `oversized`), `conversation_id`, and `revision_id`.
+Successful entries return a whole `message` shaped as
+`sourceNodeId`, `messageKey` (or `null`), `role`, `text`, `createdAt`, and
+`updatedAt`; errors are bounded. Whole messages are admitted or skipped as a
+unit. Oversized entries return bounded `oversized_message` identity and byte
+metadata without text. The cursor is opaque, HMAC-signed, tenant-bound to the
+authenticated user and namespaces, and preserves selector order and revision
+pins. Continue until `next_cursor` is `null`.
 Single conversation/context reads support `format: "compact"` without
 changing original text. For intentional saves, request `verify: true`: the server reloads the
 exact committed R2 revision and returns persisted compact readback. Verification always reports
@@ -117,6 +181,18 @@ before relying on it. Treat
 durability, verification, and indexing as separate outcomes; do not duplicate a committed
 write because a later verification/indexing step failed. See [the RP workflow](docs/rp-workflow.md)
 for explicit `simpan state` and existing owner boundaries.
+
+### Keyed message upserts
+
+Use `memory_upsert_messages` for stable logical records selected by `message_key`. Every request
+requires an owned `conversation_id`, the exact current `base_revision_id`, and 1–100 unique keyed
+text messages. Existing keys replace text while preserving source identity, role, creation time,
+graph, and metadata; role changes are rejected. Missing keys append after the active current node in
+request order with server identity and timestamps. Validate every item before writing: mixed
+insert/update/unchanged items create one revision, while an all-unchanged request returns
+`no_change` without a revision or index job. `verify: true` makes the bounded durable receipt
+reload the committed canonical revision and report per-key status; indexing starts only after the
+head transition succeeds.
 
 When preparing context for a prompt or complex task, call `memory_build_context` instead of
 manually chaining resolution, batch reads, search, context retrieval, deduplication, and budget fitting.
@@ -136,32 +212,32 @@ suggested minimums without leaking text. The tool is strictly read-only and extr
 - `memory_list_namespaces` shows which namespaces your account owns.
 - `memory_stats` shows per-namespace conversation/message counts and indexing health.
   If `indexing.pending` is nonzero, wait before relying on fresh search results.
-
-## Tool reference
-
-| Tool                           | Use                                                                           |
-| ------------------------------ | ----------------------------------------------------------------------------- |
-| `memory_search`                | find memories; filters plus opaque stable cursor pagination                   |
-| `memory_get_context`           | original messages around a search hit                                         |
-| `memory_get_conversation`      | page a full conversation                                                      |
-| `memory_get_conversations`     | batch 1–20 via requests, then opaque cursor loop                              | fair, revision-pinned compact pages |
-| `memory_list_conversations`    | metadata + tags per conversation                                              |
-| `memory_list_revisions`        | immutable revision history of one owned conversation                          |
-| `memory_resolve_conversations` | resolve up to 20 exact titles without semantic search                         |
-| `memory_build_context`         | deterministic revision-pinned context pack for a task                         |
-| `memory_list_namespaces`       | namespaces you own                                                            |
-| `memory_stats`                 | counts + indexing health                                                      |
-| `memory_get_capabilities`      | deployed limits, per-tool budgets, and feature flags                          |
-| `memory_store`                 | durable new memory (claims `project/<slug>` on first write) + bounded receipt |
-| `memory_append`                | extend an existing conversation, optimistic revision check, bounded receipt   |
-| `memory_replace`               | replace its transcript, optimistic revision check, bounded receipt            |
-| `memory_edit_messages`         | edit exact text of 1–100 source nodes, bounded receipt                        |
-| `memory_restore_revision`      | restore historical revision, optimistic revision check, bounded receipt       |
-| `memory_copy_conversations`    | lossless copy into another owned namespace, per-item bounded receipts         |
-| `memory_update_tags`           | change tags on an existing conversation                                       |
-| `memory_delete_conversations`  | delete specific memories (user-confirmed)                                     |
-| `memory_empty_namespace`       | empty one of your namespaces (exact confirmation)                             |
-| `memory_import_status`         | ChatGPT import progress (owner only)                                          |
+  | Tool                           | Use                                                                                                                          |
+  | ------------------------------ | ---------------------------------------------------------------------------------------------------------------------------- |
+  | `memory_search`                | find memories; filters plus opaque stable cursor pagination                                                                  |
+  | `memory_get_context`           | original messages around a search hit                                                                                        |
+  | `memory_get_conversation`      | page a full conversation                                                                                                     |
+  | `memory_get_messages`          | exact source-node or optional keyed message lookup; ordered 1–100, revision-pinned, opaque cursor, whole-message byte budget |
+  | `memory_get_conversations`     | batch 1–20 via requests, then opaque cursor loop                                                                             | fair, revision-pinned compact pages |
+  | `memory_list_conversations`    | metadata + tags per conversation                                                                                             |
+  | `memory_list_revisions`        | immutable revision history of one owned conversation                                                                         |
+  | `memory_resolve_conversations` | resolve up to 20 exact titles without semantic search                                                                        |
+  | `memory_build_context`         | deterministic revision-pinned context pack for a task                                                                        |
+  | `memory_list_namespaces`       | namespaces you own                                                                                                           |
+  | `memory_stats`                 | counts + indexing health                                                                                                     |
+  | `memory_get_capabilities`      | deployed limits, per-tool budgets, and the `message_keys` / `atomic_multi_conversation_commit` feature flags                 |
+  | `memory_store`                 | durable new memory (claims `project/<slug>` on first write) + bounded receipt                                                |
+  | `memory_upsert_messages`       | atomically insert/update 1–100 keyed text messages; required base revision and bounded receipt                               |
+  | `memory_append`                | extend an existing conversation, optimistic revision check, bounded receipt                                                  |
+  | `memory_replace`               | replace its transcript, optimistic revision check, bounded receipt                                                           |
+  | `memory_edit_messages`         | edit exact text of 1–100 source nodes, bounded receipt                                                                       |
+  | `memory_restore_revision`      | restore historical revision, optimistic revision check, bounded receipt                                                      |
+  | `memory_copy_conversations`    | lossless copy into another owned namespace, per-item bounded receipts                                                        |
+  | `memory_commit_batch`          | atomic append/replace of 1–20 conversations with explicit base pins and replay-safe receipt                                  |
+  | `memory_update_tags`           | change tags on an existing conversation                                                                                      |
+  | `memory_delete_conversations`  | delete specific memories (user-confirmed)                                                                                    |
+  | `memory_empty_namespace`       | empty one of your namespaces (exact confirmation)                                                                            |
+  | `memory_import_status`         | ChatGPT import progress (owner only)                                                                                         |
 
 ## Pair with git
 

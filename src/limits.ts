@@ -8,7 +8,7 @@ import { AppError } from "./errors";
  */
 
 export const CAPABILITIES_PROTOCOL_VERSION = "1";
-export const CAPABILITIES_VERSION = "2026-10-02";
+export const CAPABILITIES_VERSION = "2026-10-05";
 
 // Transport budgets.
 export const MAX_TOOL_OUTPUT_BYTES = 64 * 1024;
@@ -37,8 +37,9 @@ export const MAX_IDEMPOTENCY_KEY_CHARS = 128;
 export const MAX_TAGS_PER_CONVERSATION = 20;
 export const MAX_TAG_CHARS = 64;
 export const MAX_STORE_MESSAGES = 1000;
-export const MAX_REPLACE_MESSAGES = 1000;
 export const MAX_APPEND_MESSAGES = 100;
+export const MAX_REPLACE_MESSAGES = 1000;
+export const MAX_UPSERT_MESSAGES = 100;
 export const MAX_EDIT_MESSAGES = 100;
 export const MAX_EDIT_SEPARATOR_CHARS = 64;
 export const MAX_EDIT_SOURCE_NODE_ID_CHARS = 200;
@@ -62,6 +63,10 @@ export const MAX_BATCH_CURSOR_CHARS = 16 * 1024;
 export const MAX_RESOLVE_ITEMS = 20;
 export const MAX_COPY_ITEMS = 20;
 export const MAX_DELETE_ITEMS = 100;
+export const MAX_EXACT_MESSAGE_REQUESTS = 100;
+export const MAX_EXACT_MESSAGE_CURSOR_CHARS = 48 * 1024;
+export const MAX_EXACT_SOURCE_NODE_ID_CHARS = 200;
+export const MAX_MESSAGE_KEY_CHARS = 128;
 
 // Context compilation item limits.
 export const MAX_CONTEXT_REQUIRED_ITEMS = 20;
@@ -220,6 +225,12 @@ export function memoryCapabilities(): MemoryCapabilities {
         max_response_bytes: BATCH_RESPONSE_BYTES.max,
         supports_cursor: true,
       },
+      memory_get_messages: {
+        max_items: MAX_EXACT_MESSAGE_REQUESTS,
+        default_response_bytes: BATCH_DEFAULT_SERIALIZED_BYTES,
+        max_response_bytes: BATCH_MAX_SERIALIZED_BYTES,
+        supports_cursor: true,
+      },
       memory_list_conversations: { max_items: MAX_PAGE_ITEMS, default_items: DEFAULT_PAGE_ITEMS },
       memory_list_revisions: {
         max_items: MAX_PAGE_ITEMS,
@@ -248,6 +259,16 @@ export function memoryCapabilities(): MemoryCapabilities {
         max_request_bytes: MAX_INLINE_JSON_WRITE_BYTES,
         supports_verify: true,
       },
+      memory_commit_batch: {
+        max_items: MAX_BATCH_ITEMS,
+        max_request_bytes: MAX_INLINE_JSON_WRITE_BYTES,
+        supports_verify: true,
+      },
+      memory_upsert_messages: {
+        max_items: MAX_UPSERT_MESSAGES,
+        max_request_bytes: MAX_INLINE_JSON_WRITE_BYTES,
+        supports_verify: true,
+      },
       memory_edit_messages: {
         max_items: MAX_EDIT_MESSAGES,
         max_request_bytes: MAX_INLINE_JSON_WRITE_BYTES,
@@ -262,8 +283,8 @@ export function memoryCapabilities(): MemoryCapabilities {
       revision_pinning: true,
       verified_writes: true,
       cursor_reads: true,
-      message_keys: false,
-      atomic_multi_conversation_commit: false,
+      message_keys: true,
+      atomic_multi_conversation_commit: true,
     },
   };
 }

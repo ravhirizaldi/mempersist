@@ -12,6 +12,7 @@ function usage(): never {
   yarn admin retry <job-id>
   yarn admin reindex
   yarn admin verify
+  yarn admin cleanup-batches [older-than]
   yarn admin search <query>`);
   process.exit(2);
 }
@@ -90,6 +91,16 @@ switch (command) {
     break;
   case "reindex":
     result = await api("/api/admin/reindex", { method: "POST" });
+    break;
+  case "cleanup-batches":
+    result =
+      argument === undefined
+        ? await api("/api/admin/commit-batches/cleanup", { method: "POST" })
+        : await api("/api/admin/commit-batches/cleanup", {
+            method: "POST",
+            headers: { "content-type": "application/json" },
+            body: JSON.stringify({ older_than: argument }),
+          });
     break;
   case "verify":
     result = await api("/api/admin/integrity");

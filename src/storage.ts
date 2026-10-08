@@ -1,5 +1,6 @@
 import { domainId, sha256, stableJson } from "./crypto";
 import {
+  isValidMessageKey,
   normalizeTags,
   type AppEnv,
   type CanonicalConversation,
@@ -8,7 +9,13 @@ import {
   type MessageEditOperation,
 } from "./domain";
 import { AppError, errorDetails } from "./errors";
-import { MAX_EDIT_MESSAGES, MAX_EDIT_SEPARATOR_CHARS, MAX_MESSAGE_CONTENT_CHARS } from "./limits";
+import {
+  MAX_EDIT_MESSAGES,
+  MAX_EDIT_SEPARATOR_CHARS,
+  MAX_MESSAGE_CONTENT_CHARS,
+  MAX_MESSAGE_ROLE_CHARS,
+  MAX_UPSERT_MESSAGES,
+} from "./limits";
 import { assertAccountWritable, OWNER_DB_USER_ID } from "./tenant";
 
 const encoder = new TextEncoder();
@@ -101,6 +108,7 @@ export async function writeCanonicalConversation(
   userId: string = OWNER_DB_USER_ID,
 ): Promise<StoredRevision> {
   await assertAccountWritable(env, userId, conversation.namespace);
+  validateCanonicalMessageKeys(conversation);
   const header = { ...conversation, nodes: undefined };
   const lines = [
     stableJson({ format: "mempersist.conversation-segment.v1", conversation: header }),
@@ -292,17 +300,47 @@ export async function writeCanonicalConversation(
 
 function parseSegment(text: string): CanonicalConversation {
   const lines = text.split("\n").filter(Boolean);
-  const header = JSON.parse(lines.shift() ?? "null") as unknown;
-  if (!header || typeof header !== "object" || !("conversation" in header)) {
+  let header: unknown;
+  try {
+    header = JSON.parse(lines.shift() ?? "null") as unknown;
+  } catch {
+    throw new AppError("CANONICAL_STORAGE", "Invalid canonical segment header JSON", 500);
+  }
+  if (
+    typeof header !== "object" ||
+    header === null ||
+    Array.isArray(header) ||
+    !("conversation" in header) ||
+    typeof header.conversation !== "object" ||
+    header.conversation === null ||
+    Array.isArray(header.conversation)
+  ) {
     throw new AppError("CANONICAL_STORAGE", "Invalid canonical segment header", 500);
   }
-  const headerConversation = (
-    header as { conversation: Partial<Omit<CanonicalConversation, "nodes">> }
-  ).conversation;
-  const nodes: CanonicalNode[] = lines.map((line) => {
-    const entry = JSON.parse(line) as { node?: CanonicalNode };
-    if (!entry.node) throw new AppError("CANONICAL_STORAGE", "Invalid canonical node line", 500);
-    return entry.node;
+  const headerConversation = header.conversation as Partial<Omit<CanonicalConversation, "nodes">>;
+  const nodes: CanonicalNode[] = lines.map((line, index) => {
+    let entry: unknown;
+    try {
+      entry = JSON.parse(line) as unknown;
+    } catch {
+      throw new AppError(
+        "CANONICAL_STORAGE",
+        `Invalid canonical node JSON at line ${index + 2}`,
+        500,
+      );
+    }
+    if (
+      typeof entry !== "object" ||
+      entry === null ||
+      Array.isArray(entry) ||
+      !("node" in entry) ||
+      typeof entry.node !== "object" ||
+      entry.node === null ||
+      Array.isArray(entry.node)
+    ) {
+      throw new AppError("CANONICAL_STORAGE", "Invalid canonical node line", 500);
+    }
+    return entry.node as CanonicalNode;
   });
   return {
     ...(headerConversation as Omit<CanonicalConversation, "nodes">),
@@ -313,6 +351,20 @@ function parseSegment(text: string): CanonicalConversation {
     ...(headerConversation.mutation ? { mutation: headerConversation.mutation } : {}),
     derivedFrom: headerConversation.derivedFrom ?? null,
   };
+}
+function validateCanonicalMessageKeys(conversation: CanonicalConversation): void {
+  const keys = new Set<string>();
+  for (const node of conversation.nodes) {
+    if (node.messageKey === undefined) continue;
+    if (!isValidMessageKey(node.messageKey) || keys.has(node.messageKey)) {
+      throw new AppError(
+        "CANONICAL_STORAGE",
+        "Canonical graph contains invalid or duplicate message keys",
+        500,
+      );
+    }
+    keys.add(node.messageKey);
+  }
 }
 
 export async function loadConversationTags(
@@ -1204,6 +1256,240 @@ export async function editConversationMessages(
   };
 }
 
+export interface UpsertMessage {
+  messageKey: string;
+  role: string;
+  text: string;
+}
+
+export interface UpsertMessageOutcome {
+  requestIndex: number;
+  messageKey: string;
+  sourceNodeId: string;
+  status: "inserted" | "updated" | "unchanged";
+}
+
+export interface ConversationMessageUpsertResult {
+  conversationId: string;
+  previousRevisionId: string;
+  revisionId: string;
+  status: "upserted" | "no_change";
+  messages: UpsertMessageOutcome[];
+  revision: StoredRevision | null;
+}
+
+export async function upsertConversationMessages(
+  env: AppEnv,
+  conversationId: string,
+  baseRevisionId: string,
+  messages: UpsertMessage[],
+  expectedNamespaces?: string[],
+  expectedUserId?: string,
+): Promise<ConversationMessageUpsertResult> {
+  if (typeof baseRevisionId !== "string" || baseRevisionId.length === 0) {
+    throw new AppError("VALIDATION", "base_revision_id is required", 400);
+  }
+  if (!Array.isArray(messages) || messages.length < 1 || messages.length > MAX_UPSERT_MESSAGES) {
+    throw new AppError(
+      "VALIDATION",
+      `messages must contain between 1 and ${MAX_UPSERT_MESSAGES} items`,
+      400,
+    );
+  }
+
+  const requestKeys = new Set<string>();
+  for (const message of messages) {
+    if (
+      !message ||
+      typeof message !== "object" ||
+      Object.keys(message).some(
+        (field) => field !== "messageKey" && field !== "role" && field !== "text",
+      ) ||
+      !isValidMessageKey(message.messageKey) ||
+      requestKeys.has(message.messageKey)
+    ) {
+      throw new AppError("VALIDATION", "messages must contain unique valid message keys", 400);
+    }
+    requestKeys.add(message.messageKey);
+    if (
+      typeof message.role !== "string" ||
+      message.role.length === 0 ||
+      message.role.length > MAX_MESSAGE_ROLE_CHARS
+    ) {
+      throw new AppError(
+        "VALIDATION",
+        `role must be a non-empty string of at most ${MAX_MESSAGE_ROLE_CHARS} characters`,
+        400,
+      );
+    }
+    if (typeof message.text !== "string" || message.text.length > MAX_MESSAGE_CONTENT_CHARS) {
+      throw new AppError(
+        "VALIDATION",
+        `text must be a string of at most ${MAX_MESSAGE_CONTENT_CHARS} characters`,
+        400,
+      );
+    }
+  }
+
+  const loaded = await loadCurrentConversation(
+    env,
+    conversationId,
+    expectedNamespaces,
+    expectedUserId,
+  );
+  if (loaded.row.current_revision_id !== baseRevisionId) {
+    throw new AppError("IMPORT_CONFLICT", "base_revision_id is stale", 409);
+  }
+  await assertAccountWritable(env, loaded.row.user_id, loaded.row.namespace);
+
+  const pinned = await loadPinnedRevision(env, conversationId, baseRevisionId);
+  const base: CanonicalConversation = {
+    ...pinned,
+    tags: loaded.row.tags,
+  };
+  const byKey = new Map<string, CanonicalNode>();
+  for (const node of base.nodes) {
+    if (node.messageKey === undefined) continue;
+    if (!isValidMessageKey(node.messageKey) || byKey.has(node.messageKey)) {
+      throw new AppError(
+        "CANONICAL_STORAGE",
+        "Canonical graph contains duplicate message keys",
+        500,
+      );
+    }
+    byKey.set(node.messageKey, node);
+  }
+
+  const outcomes: UpsertMessageOutcome[] = [];
+  const replacements = new Map<string, string>();
+  const inserted: Array<{ requestIndex: number; message: UpsertMessage; node: CanonicalNode }> = [];
+  for (const [requestIndex, message] of messages.entries()) {
+    const existing = byKey.get(message.messageKey);
+    if (existing) {
+      if (existing.role !== message.role) {
+        throw new AppError(
+          "VALIDATION",
+          `Role mismatch for message key ${message.messageKey}`,
+          400,
+        );
+      }
+      if (!isEditableText(existing)) {
+        throw new AppError(
+          "UNSUPPORTED_MESSAGE_CONTENT",
+          `Message ${message.messageKey} has structured content that cannot be upserted as text`,
+          400,
+        );
+      }
+      const status = existing.text === message.text ? "unchanged" : "updated";
+      outcomes.push({
+        requestIndex,
+        messageKey: message.messageKey,
+        sourceNodeId: existing.sourceNodeId,
+        status,
+      });
+      if (status === "updated") replacements.set(existing.sourceNodeId, message.text);
+      continue;
+    }
+
+    const sourceNodeId = `upsert-${crypto.randomUUID()}`;
+    const node: CanonicalNode = {
+      id: await domainId("message-node", conversationId, sourceNodeId),
+      sourceNodeId,
+      parentSourceNodeId: null,
+      childSourceNodeIds: [],
+      role: message.role,
+      text: message.text,
+      content: { content_type: "text", parts: [message.text] },
+      createdAt: new Date().toISOString(),
+      updatedAt: null,
+      modelSlug: null,
+      metadata: { upsert_ordinal: requestIndex },
+      raw: {},
+      messageKey: message.messageKey,
+    };
+    byKey.set(message.messageKey, node);
+    inserted.push({ requestIndex, message, node });
+    outcomes.push({
+      requestIndex,
+      messageKey: message.messageKey,
+      sourceNodeId,
+      status: "inserted",
+    });
+  }
+
+  if (inserted.length === 0 && replacements.size === 0) {
+    return {
+      conversationId,
+      previousRevisionId: baseRevisionId,
+      revisionId: baseRevisionId,
+      status: "no_change",
+      messages: outcomes,
+      revision: null,
+    };
+  }
+
+  const now = new Date().toISOString();
+  const nodes = base.nodes.map((node) => ({
+    ...node,
+    childSourceNodeIds: [...node.childSourceNodeIds],
+  }));
+  for (const [sourceNodeId, text] of replacements) {
+    const index = nodes.findIndex((node) => node.sourceNodeId === sourceNodeId);
+    if (index < 0) {
+      throw new AppError("CANONICAL_STORAGE", "Canonical target node is missing", 500);
+    }
+    const node = nodes[index]!;
+    nodes[index] = {
+      ...node,
+      text,
+      content: { content_type: "text", parts: [text] },
+      updatedAt: now,
+    };
+  }
+
+  let parent = base.currentSourceNodeId;
+  if (parent && !nodes.some((node) => node.sourceNodeId === parent)) {
+    throw new AppError("CANONICAL_STORAGE", "Canonical current node is missing", 500);
+  }
+  const activeSourceNodeIds = [...base.activeSourceNodeIds];
+  for (const { node } of inserted) {
+    const withParent = { ...node, parentSourceNodeId: parent };
+    if (parent) {
+      const parentNode = nodes.find((candidate) => candidate.sourceNodeId === parent);
+      if (!parentNode) {
+        throw new AppError("CANONICAL_STORAGE", "Canonical parent node is missing", 500);
+      }
+      parentNode.childSourceNodeIds.push(node.sourceNodeId);
+    }
+    nodes.push(withParent);
+    activeSourceNodeIds.push(node.sourceNodeId);
+    parent = node.sourceNodeId;
+  }
+
+  const updated: CanonicalConversation = {
+    ...clearMutation(base),
+    nodes,
+    currentSourceNodeId: parent,
+    activeSourceNodeIds,
+    updatedAt: now,
+  };
+  const revision = await writeCanonicalConversation(
+    env,
+    updated,
+    null,
+    baseRevisionId,
+    loaded.row.user_id,
+  );
+  return {
+    conversationId,
+    previousRevisionId: baseRevisionId,
+    revisionId: revision.revisionId,
+    status: "upserted",
+    messages: outcomes,
+    revision,
+  };
+}
+
 export async function restoreConversationRevision(
   env: AppEnv,
   conversationId: string,
@@ -1237,6 +1523,7 @@ export async function restoreConversationRevision(
   ) {
     throw new AppError("NOT_FOUND", "Revision not found", 404);
   }
+  validateCanonicalMessageKeys(target.conversation);
 
   const segment = target.manifest.segments[0];
   if (!segment) {
@@ -1713,6 +2000,7 @@ export async function copyConversations(
       ) {
         throw new AppError("NOT_FOUND", "Revision not found", 404);
       }
+      validateCanonicalMessageKeys(sourceConv);
 
       const destId = await domainId(
         "copy-conversation",
@@ -1822,4 +2110,666 @@ export async function copyConversations(
   }
 
   return results;
+}
+export interface CommitBatchOperation {
+  operation: "append" | "replace";
+  conversationId: string;
+  baseRevisionId: string;
+  messages: Array<{ role: string; content: string; timestamp?: string | undefined }>;
+  tags?: string[];
+}
+
+export interface CommitBatchInput {
+  userId: string;
+  namespaces: string[];
+  idempotencyKey: string;
+  operations: CommitBatchOperation[];
+}
+
+export interface CommitBatchItem {
+  requestIndex: number;
+  conversationId: string;
+  previousRevisionId: string;
+  revision: StoredRevision;
+  messages: Array<{ role: string; content: string; timestamp?: string | undefined }>;
+  operation: "append" | "replace";
+}
+
+export interface CommitBatchResult {
+  batchId: string;
+  replay: boolean;
+  operations: CommitBatchItem[];
+  receipt?: Record<string, unknown>;
+}
+
+interface BatchMaterial {
+  operation: CommitBatchOperation;
+  requestIndex: number;
+  previousRevisionId: string;
+  conversation: CanonicalConversation;
+  stored: StoredRevision;
+  segmentBody: string;
+  manifestBody: string;
+  segmentHash: string;
+  manifestHash: string;
+  segmentId: string;
+}
+
+const BATCH_MAX_OPERATIONS = 20;
+export const MAX_ATOMIC_BATCH_STATEMENTS = 100;
+
+function batchConflict(message: string): never {
+  throw new AppError("IMPORT_CONFLICT", message, 409);
+}
+
+async function batchMaterialize(
+  batchId: string,
+  createdAt: string,
+  requestIndex: number,
+  operation: CommitBatchOperation,
+  loaded: {
+    row: ConversationRow;
+    manifest: CanonicalRevisionManifest;
+    conversation: CanonicalConversation;
+  },
+): Promise<BatchMaterial> {
+  const messages = operation.messages;
+  for (const message of messages) {
+    if (
+      typeof message.role !== "string" ||
+      typeof message.content !== "string" ||
+      message.content.length > MAX_MESSAGE_CONTENT_CHARS
+    ) {
+      throw new AppError("VALIDATION", "Invalid batch message", 400);
+    }
+  }
+  const nodes: CanonicalNode[] = [];
+  let parent: string | null = null;
+  if (operation.operation === "append") {
+    nodes.push(...loaded.conversation.nodes);
+    parent = loaded.conversation.currentSourceNodeId;
+  }
+  for (const [index, message] of messages.entries()) {
+    const sourceNodeId = `batch-${batchId}-${requestIndex}-${index}`;
+    const node: CanonicalNode = {
+      id: await domainId("message-node", operation.conversationId, sourceNodeId),
+      sourceNodeId,
+      parentSourceNodeId: parent,
+      childSourceNodeIds: [],
+      role: message.role,
+      text: message.content,
+      content: { content_type: "text", parts: [message.content] },
+      createdAt: message.timestamp ?? createdAt,
+      updatedAt: null,
+      modelSlug: null,
+      metadata: { batch_request_index: requestIndex, batch_message_index: index },
+      raw: {},
+    };
+    if (parent)
+      nodes
+        .find((candidate) => candidate.sourceNodeId === parent)
+        ?.childSourceNodeIds.push(sourceNodeId);
+    nodes.push(node);
+    parent = sourceNodeId;
+  }
+  const conversation: CanonicalConversation = {
+    ...clearMutation(loaded.conversation),
+    nodes,
+    tags:
+      operation.operation === "append"
+        ? normalizeTags([...(loaded.conversation.tags ?? []), ...(operation.tags ?? [])])
+        : loaded.row.tags,
+    updatedAt: createdAt,
+    currentSourceNodeId: parent,
+    activeSourceNodeIds:
+      operation.operation === "append"
+        ? [
+            ...loaded.conversation.activeSourceNodeIds,
+            ...(messages.length
+              ? nodes.slice(-messages.length).map((node) => node.sourceNodeId)
+              : []),
+          ]
+        : nodes.map((node) => node.sourceNodeId),
+  };
+  const header = { ...conversation, nodes: undefined };
+  const lines = [
+    stableJson({ format: "mempersist.conversation-segment.v1", conversation: header }),
+  ];
+  for (const node of conversation.nodes) lines.push(stableJson({ type: "node", node }));
+  const segmentBody = `${lines.join("\n")}\n`;
+  const segmentHash = await sha256(segmentBody);
+  const segmentId = await domainId("segment", segmentHash);
+  const contentHash = await domainId(
+    "revision-content",
+    segmentHash,
+    conversation.currentSourceNodeId,
+    stableJson(conversation.metadata),
+  );
+  const revisionId = await domainId("revision", conversation.id, contentHash);
+  const segmentKey = `canonical/conversations/${conversation.id}/segments/${segmentHash}.jsonl`;
+  const manifestKey = `canonical/conversations/${conversation.id}/revisions/${revisionId}.json`;
+  const manifest: CanonicalRevisionManifest = {
+    format: "mempersist.conversation-revision.v1",
+    conversationId: conversation.id,
+    revisionId,
+    sourceType: conversation.sourceType,
+    sourceId: conversation.sourceId,
+    title: conversation.title,
+    namespace: conversation.namespace,
+    tags: conversation.tags ?? [],
+    createdAt: conversation.createdAt,
+    updatedAt: conversation.updatedAt,
+    currentSourceNodeId: conversation.currentSourceNodeId,
+    activeSourceNodeIds: conversation.activeSourceNodeIds,
+    nodeCount: conversation.nodes.length,
+    contentHash,
+    segments: [
+      {
+        id: segmentId,
+        key: segmentKey,
+        sha256: segmentHash,
+        sizeBytes: encoder.encode(segmentBody).byteLength,
+      },
+    ],
+    metadata: conversation.metadata,
+    anomalies: conversation.anomalies,
+    derivedFrom: conversation.derivedFrom ?? null,
+  };
+  const manifestBody = stableJson(manifest);
+  const stored: StoredRevision = {
+    conversationId: conversation.id,
+    revisionId,
+    manifestKey,
+    segmentKey,
+    contentHash,
+    created: true,
+    ...(operation.operation === "append"
+      ? { writeOffset: loaded.conversation.activeSourceNodeIds.length }
+      : {}),
+  };
+  return {
+    operation,
+    requestIndex,
+    previousRevisionId: loaded.row.current_revision_id!,
+    conversation,
+    stored,
+    segmentBody,
+    manifestBody,
+    segmentHash,
+    manifestHash: await sha256(manifestBody),
+    segmentId,
+  };
+}
+
+function batchItem(material: BatchMaterial, created: boolean): CommitBatchItem {
+  return {
+    requestIndex: material.requestIndex,
+    conversationId: material.operation.conversationId,
+    previousRevisionId: material.previousRevisionId,
+    revision: { ...material.stored, created },
+    messages: material.operation.messages,
+    operation: material.operation.operation,
+  };
+}
+export async function materializeCommittedBatchDerivedRows(
+  env: CanonicalReadEnv,
+  operations: CommitBatchItem[],
+): Promise<void> {
+  const statements: D1PreparedStatement[] = [];
+  for (const operation of operations) {
+    const { manifest, conversation } = await loadCanonicalRevision(
+      env,
+      operation.revision.revisionId,
+    );
+    const segment = manifest.segments[0];
+    if (!segment) throw new AppError("CANONICAL_STORAGE", "Revision has no canonical segment", 500);
+    const activeSequence = new Map(
+      conversation.activeSourceNodeIds.map((id, index) => [id, index]),
+    );
+    for (const [index, node] of conversation.nodes.entries()) {
+      statements.push(
+        env.MEMORY_DB.prepare(
+          `INSERT INTO message_nodes
+           (id, revision_id, source_node_id, parent_node_id, role, sequence, is_active, created_at, updated_at, model_slug, segment_id, line_number)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+           ON CONFLICT(revision_id, source_node_id) DO NOTHING`,
+        ).bind(
+          node.id,
+          operation.revision.revisionId,
+          node.sourceNodeId,
+          node.parentSourceNodeId,
+          node.role,
+          activeSequence.get(node.sourceNodeId) ?? null,
+          activeSequence.has(node.sourceNodeId) ? 1 : 0,
+          node.createdAt,
+          node.updatedAt,
+          node.modelSlug,
+          segment.id,
+          index + 2,
+        ),
+      );
+    }
+    for (const tag of conversation.tags ?? []) {
+      statements.push(
+        env.MEMORY_DB.prepare(
+          `INSERT INTO conversation_tags (conversation_id, tag) VALUES (?, ?)
+           ON CONFLICT(conversation_id, tag) DO NOTHING`,
+        ).bind(conversation.id, tag),
+      );
+    }
+    for (const group of chunked(statements, 50)) {
+      await env.MEMORY_DB.batch(group);
+      statements.length = 0;
+    }
+  }
+  if (statements.length) await env.MEMORY_DB.batch(statements);
+}
+
+async function readBatchReceipt(
+  env: AppEnv,
+  batchId: string,
+): Promise<Record<string, unknown> | undefined> {
+  const row = await env.MEMORY_DB.prepare(
+    "SELECT receipt_json FROM commit_batches WHERE batch_id = ?",
+  )
+    .bind(batchId)
+    .first<{ receipt_json: string | null }>();
+  if (!row?.receipt_json) return undefined;
+  try {
+    const receipt = JSON.parse(row.receipt_json) as Record<string, unknown>;
+    return receipt.status === "committed" ? receipt : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+export async function commitConversationBatch(
+  env: AppEnv,
+  input: CommitBatchInput,
+): Promise<CommitBatchResult> {
+  if (input.operations.length < 1 || input.operations.length > BATCH_MAX_OPERATIONS) {
+    throw new AppError(
+      "VALIDATION",
+      `Batch must contain 1-${BATCH_MAX_OPERATIONS} operations`,
+      400,
+    );
+  }
+  const seen = new Set<string>();
+  for (const operation of input.operations) {
+    if (seen.has(operation.conversationId))
+      throw new AppError("VALIDATION", "Batch conversations must be unique", 400);
+    seen.add(operation.conversationId);
+    if (operation.operation === "replace" && operation.tags !== undefined) {
+      throw new AppError("VALIDATION", "replace operations cannot include tags", 400);
+    }
+  }
+  const namespaces = [...new Set(input.namespaces)].sort();
+  const materialHash = await sha256(stableJson({ namespaces, operations: input.operations }));
+  const idempotencyHash = await sha256(input.idempotencyKey);
+  const batchId = await domainId("commit-batch", input.userId, input.idempotencyKey);
+  const existing = await env.MEMORY_DB.prepare(
+    "SELECT status, material_hash FROM commit_batches WHERE batch_id = ? AND user_id = ?",
+  )
+    .bind(batchId, input.userId)
+    .first<{ status: string; material_hash: string }>();
+  if (existing && existing.material_hash !== materialHash) {
+    batchConflict("idempotency key was already used with different batch material");
+  }
+  const now = new Date().toISOString();
+  if (!existing) {
+    await env.MEMORY_DB.prepare(
+      `INSERT INTO commit_batches
+       (batch_id, user_id, idempotency_key, idempotency_hash, material_hash, status, created_at, updated_at, receipt_json)
+       VALUES (?, ?, ?, ?, ?, 'prepared', ?, ?, NULL)
+       ON CONFLICT(batch_id) DO NOTHING`,
+    )
+      .bind(batchId, input.userId, input.idempotencyKey, idempotencyHash, materialHash, now, now)
+      .run();
+  }
+  const batchRow = await env.MEMORY_DB.prepare(
+    "SELECT status, material_hash, created_at FROM commit_batches WHERE batch_id = ? AND user_id = ?",
+  )
+    .bind(batchId, input.userId)
+    .first<{ status: string; material_hash: string; created_at: string }>();
+  if (!batchRow)
+    throw new AppError("RETRYABLE_INFRASTRUCTURE", "Batch ledger unavailable", 503, true);
+  if (batchRow.material_hash !== materialHash)
+    batchConflict("idempotency key was already used with different batch material");
+
+  const priorOperations = await env.MEMORY_DB.prepare(
+    `SELECT request_index, conversation_id, previous_revision_id, revision_id, content_hash,
+            manifest_object_key, segment_object_key, status
+     FROM commit_batch_operations WHERE batch_id = ? ORDER BY request_index`,
+  )
+    .bind(batchId)
+    .all<{
+      request_index: number;
+      conversation_id: string;
+      previous_revision_id: string;
+      revision_id: string;
+      content_hash: string;
+      manifest_object_key: string;
+      segment_object_key: string;
+      status: string;
+    }>();
+  if (batchRow.status === "committed") {
+    const receipt = await readBatchReceipt(env, batchId);
+    const operations: CommitBatchItem[] = [];
+    for (const row of priorOperations.results) {
+      const operation = input.operations[row.request_index];
+      if (!operation) batchConflict("batch operation material is incomplete");
+      const previous = await loadCanonicalRevision(env, row.previous_revision_id);
+      operations.push({
+        requestIndex: row.request_index,
+        conversationId: row.conversation_id,
+        previousRevisionId: row.previous_revision_id,
+        revision: {
+          conversationId: row.conversation_id,
+          revisionId: row.revision_id,
+          manifestKey: row.manifest_object_key,
+          segmentKey: row.segment_object_key,
+          contentHash: row.content_hash,
+          created: false,
+          ...(operation.operation === "append"
+            ? { writeOffset: previous.conversation.activeSourceNodeIds.length }
+            : {}),
+        },
+        messages: operation.messages,
+        operation: operation.operation,
+      });
+    }
+    if (operations.length !== input.operations.length)
+      batchConflict("batch operation ledger is incomplete");
+    return { batchId, replay: true, operations, ...(receipt ? { receipt } : {}) };
+  }
+
+  const materials: BatchMaterial[] = [];
+  for (const [requestIndex, operation] of input.operations.entries()) {
+    const loaded = await loadCurrentConversation(
+      env,
+      operation.conversationId,
+      namespaces,
+      input.userId,
+    );
+    await assertAccountWritable(env, input.userId, loaded.row.namespace);
+    if (loaded.row.current_revision_id !== operation.baseRevisionId) {
+      batchConflict("base_revision_id is stale");
+    }
+    materials.push(
+      await batchMaterialize(batchId, batchRow.created_at, requestIndex, operation, loaded),
+    );
+  }
+
+  const registration: D1PreparedStatement[] = [];
+  for (const material of materials) {
+    registration.push(
+      env.MEMORY_DB.prepare(
+        `INSERT INTO commit_batch_operations
+         (batch_id, request_index, conversation_id, operation, base_revision_id, previous_revision_id,
+          revision_id, content_hash, manifest_object_key, segment_object_key, status, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'prepared', ?)
+         ON CONFLICT(batch_id, request_index) DO UPDATE SET
+           conversation_id = excluded.conversation_id, operation = excluded.operation,
+           base_revision_id = excluded.base_revision_id, previous_revision_id = excluded.previous_revision_id,
+           revision_id = excluded.revision_id, content_hash = excluded.content_hash,
+           manifest_object_key = excluded.manifest_object_key, segment_object_key = excluded.segment_object_key`,
+      ).bind(
+        batchId,
+        material.requestIndex,
+        material.operation.conversationId,
+        material.operation.operation,
+        material.operation.baseRevisionId,
+        material.previousRevisionId,
+        material.stored.revisionId,
+        material.stored.contentHash,
+        material.stored.manifestKey,
+        material.stored.segmentKey,
+        batchRow.created_at,
+      ),
+    );
+    for (const object of [
+      { key: material.stored.segmentKey, kind: "segment", hash: material.segmentHash },
+      { key: material.stored.manifestKey, kind: "manifest", hash: material.manifestHash },
+    ]) {
+      registration.push(
+        env.MEMORY_DB.prepare(
+          `INSERT INTO commit_batch_objects
+           (batch_id, object_key, object_kind, sha256, status, created_at, written_at)
+           VALUES (?, ?, ?, ?, 'prepared', ?, NULL)
+           ON CONFLICT(batch_id, object_key) DO UPDATE SET sha256 = excluded.sha256`,
+        ).bind(batchId, object.key, object.kind, object.hash, batchRow.created_at),
+      );
+    }
+  }
+  for (const group of chunked(registration, 50)) await env.MEMORY_DB.batch(group);
+
+  for (const material of materials) {
+    try {
+      await putImmutable(env.MEMORY_BUCKET, material.stored.segmentKey, material.segmentBody, {
+        sha256: material.segmentHash,
+        format: "mempersist.conversation-segment.v1",
+      });
+      await env.MEMORY_DB.prepare(
+        "UPDATE commit_batch_objects SET status = 'written', written_at = ? WHERE batch_id = ? AND object_key = ?",
+      )
+        .bind(new Date().toISOString(), batchId, material.stored.segmentKey)
+        .run();
+      await putImmutable(env.MEMORY_BUCKET, material.stored.manifestKey, material.manifestBody, {
+        sha256: material.manifestHash,
+        format: "mempersist.conversation-revision.v1",
+      });
+      await env.MEMORY_DB.prepare(
+        "UPDATE commit_batch_objects SET status = 'written', written_at = ? WHERE batch_id = ? AND object_key = ?",
+      )
+        .bind(new Date().toISOString(), batchId, material.stored.manifestKey)
+        .run();
+    } catch (error) {
+      throw new AppError(
+        "CANONICAL_STORAGE",
+        `R2 canonical write failed: ${error instanceof Error ? error.message : String(error)}`,
+        503,
+        true,
+      );
+    }
+  }
+
+  const pendingReceipt = JSON.stringify({
+    status: "pending",
+    batch_id: batchId,
+    operations: materials.map((material) => ({
+      request_index: material.requestIndex,
+      conversation_id: material.operation.conversationId,
+      previous_revision_id: material.previousRevisionId,
+      revision_id: material.stored.revisionId,
+    })),
+  });
+  const commitStatements: D1PreparedStatement[] = [
+    // A stale/missing head deliberately duplicates its registered operation PK.
+    // D1 aborts the whole batch on the resulting constraint violation.
+    env.MEMORY_DB.prepare(
+      `INSERT INTO commit_batch_operations
+       (batch_id, request_index, conversation_id, operation, base_revision_id, previous_revision_id,
+        revision_id, content_hash, manifest_object_key, segment_object_key, status, created_at)
+       SELECT o.batch_id, o.request_index, o.conversation_id, o.operation, o.base_revision_id,
+              o.previous_revision_id, o.revision_id, o.content_hash, o.manifest_object_key,
+              o.segment_object_key, o.status, o.created_at
+       FROM commit_batch_operations o
+       WHERE o.batch_id = ?
+         AND (
+           (SELECT COUNT(*) FROM commit_batch_operations WHERE batch_id = ?) <> ?
+           OR EXISTS (
+             SELECT 1
+             FROM commit_batch_operations stale
+             LEFT JOIN conversations c ON c.id = stale.conversation_id
+             WHERE stale.batch_id = ?
+               AND (c.id IS NULL OR c.user_id != ? OR c.deleted_at IS NOT NULL
+                    OR c.current_revision_id IS NULL
+                    OR c.current_revision_id != stale.base_revision_id)
+           )
+         )
+       LIMIT 1`,
+    ).bind(batchId, batchId, materials.length, batchId, input.userId),
+    env.MEMORY_DB.prepare(
+      `UPDATE commit_batches SET status = 'committing', updated_at = ?
+       WHERE batch_id = ? AND status IN ('prepared', 'committing')`,
+    ).bind(now, batchId),
+  ];
+  for (const material of materials) {
+    const conversation = material.conversation;
+    commitStatements.push(
+      env.MEMORY_DB.prepare(
+        `INSERT INTO canonical_segments (id, object_key, sha256, size_bytes, created_at)
+         VALUES (?, ?, ?, ?, ?) ON CONFLICT(id) DO NOTHING`,
+      ).bind(
+        material.segmentId,
+        material.stored.segmentKey,
+        material.segmentHash,
+        encoder.encode(material.segmentBody).byteLength,
+        now,
+      ),
+      env.MEMORY_DB.prepare(
+        `INSERT INTO conversation_revisions
+         (id, conversation_id, import_id, content_hash, manifest_object_key, current_node_id, node_count, created_at)
+         VALUES (?, ?, NULL, ?, ?, ?, ?, ?) ON CONFLICT(id) DO NOTHING`,
+      ).bind(
+        material.stored.revisionId,
+        conversation.id,
+        material.stored.contentHash,
+        material.stored.manifestKey,
+        conversation.currentSourceNodeId,
+        conversation.nodes.length,
+        now,
+      ),
+      env.MEMORY_DB.prepare(
+        `INSERT INTO revision_segments (revision_id, segment_id, ordinal)
+         VALUES (?, ?, 0) ON CONFLICT(revision_id, ordinal) DO NOTHING`,
+      ).bind(material.stored.revisionId, material.segmentId),
+    );
+    commitStatements.push(
+      env.MEMORY_DB.prepare(
+        `UPDATE conversations SET current_revision_id = ?, current_node_id = ?, updated_at = ?, imported_at = ?
+         WHERE id = ? AND user_id = ? AND deleted_at IS NULL AND current_revision_id = ?`,
+      ).bind(
+        material.stored.revisionId,
+        conversation.currentSourceNodeId,
+        conversation.updatedAt,
+        now,
+        conversation.id,
+        input.userId,
+        material.previousRevisionId,
+      ),
+    );
+  }
+  // A second deliberate duplicate-PK guard proves every head advanced.
+  commitStatements.push(
+    env.MEMORY_DB.prepare(
+      `INSERT INTO commit_batch_operations
+       (batch_id, request_index, conversation_id, operation, base_revision_id, previous_revision_id,
+        revision_id, content_hash, manifest_object_key, segment_object_key, status, created_at)
+       SELECT o.batch_id, o.request_index, o.conversation_id, o.operation, o.base_revision_id,
+              o.previous_revision_id, o.revision_id, o.content_hash, o.manifest_object_key,
+              o.segment_object_key, o.status, o.created_at
+       FROM commit_batch_operations o
+       LEFT JOIN conversations c ON c.id = o.conversation_id
+       WHERE o.batch_id = ?
+         AND (c.id IS NULL OR c.user_id != ? OR c.current_revision_id IS NULL
+              OR c.current_revision_id != o.revision_id)
+       LIMIT 1`,
+    ).bind(batchId, input.userId),
+    env.MEMORY_DB.prepare(
+      `UPDATE commit_batch_operations SET status = 'committed'
+       WHERE batch_id = ?`,
+    ).bind(batchId),
+    env.MEMORY_DB.prepare(
+      `UPDATE commit_batches SET status = 'committed', receipt_json = ?, updated_at = ?
+       WHERE batch_id = ? AND status = 'committing'`,
+    ).bind(pendingReceipt, now, batchId),
+  );
+  if (commitStatements.length > MAX_ATOMIC_BATCH_STATEMENTS) {
+    throw new AppError(
+      "RETRYABLE_INFRASTRUCTURE",
+      "Atomic commit batch exceeds statement limit",
+      503,
+      true,
+    );
+  }
+  await env.MEMORY_DB.batch(commitStatements);
+  const final = await env.MEMORY_DB.prepare("SELECT status FROM commit_batches WHERE batch_id = ?")
+    .bind(batchId)
+    .first<{ status: string }>();
+  if (final?.status !== "committed")
+    batchConflict("Conversation changed before batch commit completed");
+  return {
+    batchId,
+    replay: false,
+    operations: materials.map((material) => batchItem(material, true)),
+  };
+}
+
+export async function saveCommitBatchReceipt(
+  env: AppEnv,
+  batchId: string,
+  receipt: Record<string, unknown>,
+): Promise<void> {
+  const persisted = structuredClone(receipt);
+  const results = persisted.results;
+  if (Array.isArray(results)) {
+    for (const result of results) {
+      if (!result || typeof result !== "object") continue;
+      const verification = (result as Record<string, unknown>).verification;
+      if (verification && typeof verification === "object") {
+        delete (verification as Record<string, unknown>).readback;
+        delete (verification as Record<string, unknown>).readback_error;
+      }
+    }
+  }
+  await env.MEMORY_DB.prepare(
+    "UPDATE commit_batches SET receipt_json = ?, updated_at = ? WHERE batch_id = ? AND status = 'committed'",
+  )
+    .bind(JSON.stringify(persisted), new Date().toISOString(), batchId)
+    .run();
+}
+
+export async function cleanupPreparedCommitBatches(
+  env: AppEnv,
+  olderThan = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString(),
+): Promise<number> {
+  const batches = await env.MEMORY_DB.prepare(
+    "SELECT batch_id FROM commit_batches WHERE status = 'prepared' AND updated_at < ? ORDER BY batch_id",
+  )
+    .bind(olderThan)
+    .all<{ batch_id: string }>();
+  let deleted = 0;
+  for (const batch of batches.results) {
+    const objects = await env.MEMORY_DB.prepare(
+      "SELECT object_key FROM commit_batch_objects WHERE batch_id = ?",
+    )
+      .bind(batch.batch_id)
+      .all<{ object_key: string }>();
+    for (const object of objects.results) {
+      const shared = await env.MEMORY_DB.prepare(
+        `SELECT 1 FROM commit_batch_objects o
+         JOIN commit_batches b ON b.batch_id = o.batch_id
+         WHERE o.object_key = ? AND o.batch_id != ? AND b.status != 'committed' LIMIT 1`,
+      )
+        .bind(object.object_key, batch.batch_id)
+        .first();
+      if (shared) continue;
+      const reachable = await env.MEMORY_DB.prepare(
+        `SELECT 1 FROM canonical_segments WHERE object_key = ?
+         UNION ALL SELECT 1 FROM conversation_revisions WHERE manifest_object_key = ? LIMIT 1`,
+      )
+        .bind(object.object_key, object.object_key)
+        .first();
+      if (reachable) continue;
+      await env.MEMORY_BUCKET.delete(object.object_key);
+      deleted += 1;
+    }
+    await env.MEMORY_DB.prepare(
+      "DELETE FROM commit_batches WHERE batch_id = ? AND status = 'prepared'",
+    )
+      .bind(batch.batch_id)
+      .run();
+  }
+  return deleted;
 }

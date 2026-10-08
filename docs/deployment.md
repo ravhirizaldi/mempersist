@@ -9,9 +9,13 @@ Deployment is a deliberate operator action.
 5. Confirm both Email Service sender domains are onboarded and `AUTH_EMAIL_FROM` plus
    `LEGACY_AUTH_EMAIL_FROM` are verified sender addresses configured in `wrangler.jsonc`.
 6. Run `yarn verify`.
-7. Review pending migrations, then `yarn db:migrate:remote`.
+7. Apply the numbered remote migrations with `yarn db:migrate:remote`; for the commit-batch
+   release, confirm migration `0015_atomic_batch_recovery.sql` succeeds before continuing.
 8. Run `yarn deploy`.
 9. Verify `/healthz`, authenticated `/readyz`, OAuth protected-resource and authorization-server metadata, MCP discovery with both OAuth and the developer token, both browser languages and the secure language switch, localized magic-link email for a new and existing email, `/login`, dashboard session/logout, an export, a small canonical write, indexing state, search, and context retrieval.
+
+Never deploy code that expects tables from a numbered migration that has not been applied
+remotely. The release order is `yarn verify`, then `yarn db:migrate:remote`, then `yarn deploy`.
 
 Before a search-cursor rollout, review the new numbered D1 migration for the additive
 `search_snapshots` table and apply it remotely before deploying code that creates or continues

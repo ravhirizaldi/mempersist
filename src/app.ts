@@ -59,7 +59,12 @@ import {
   siteScriptResponse,
   sitemapResponse,
 } from "./discovery";
-import { appendConversation, listConversations, writeCanonicalConversation } from "./storage";
+import {
+  appendConversation,
+  cleanupPreparedCommitBatches,
+  listConversations,
+  writeCanonicalConversation,
+} from "./storage";
 import {
   assertAccountWritable,
   grantNamespace,
@@ -92,6 +97,9 @@ const appendSchema = z.object({
   messages: z.array(messageSchema).min(1).max(MAX_APPEND_MESSAGES),
   verify: z.boolean().default(false),
 });
+const cleanupPreparedCommitBatchesSchema = z
+  .object({ older_than: z.iso.datetime().optional() })
+  .strict();
 
 app.use("*", async (c, next) => {
   c.set("requestId", crypto.randomUUID());
@@ -381,6 +389,21 @@ app.post("/api/admin/reindex", async (c) =>
   c.json({ queued: await enqueueAllCurrentRevisions(c.env) }, 202),
 );
 app.get("/api/admin/integrity", async (c) => c.json(await verifyIntegrity(c.env)));
+app.post("/api/admin/commit-batches/cleanup", async (c) => {
+  const body = await c.req.text();
+  let parsedBody: unknown = {};
+  if (body.trim()) {
+    try {
+      parsedBody = JSON.parse(body);
+    } catch {
+      throw new AppError("VALIDATION", "Request body must be valid JSON", 400);
+    }
+  }
+  const input = cleanupPreparedCommitBatchesSchema.parse(parsedBody);
+  const olderThan = input.older_than ?? new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString();
+  const deletedObjects = await cleanupPreparedCommitBatches(c.env, olderThan);
+  return c.json({ deleted_objects: deletedObjects, older_than: olderThan });
+});
 
 app.notFound((c) => c.json({ error: { code: "NOT_FOUND", message: "Route not found" } }, 404));
 app.onError((error, c) => {
