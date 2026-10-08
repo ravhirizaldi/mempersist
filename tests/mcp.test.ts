@@ -66,6 +66,89 @@ describe("MCP server", () => {
     return env;
   }
 
+  function syntheticImportEnv(
+    rows: Array<Record<string, unknown> & { id: string; user_id: string }>,
+  ): { env: AppEnv; calls: Array<{ query: string; bindings: unknown[] }> } {
+    const calls: Array<{ query: string; bindings: unknown[] }> = [];
+    const env = {
+      MEMORY_DB: {
+        prepare(query: string) {
+          return {
+            bind(...bindings: unknown[]) {
+              return {
+                first: () => {
+                  calls.push({ query, bindings });
+                  const [id, userId] = bindings;
+                  const row = rows.find(
+                    (candidate) =>
+                      candidate.id === id &&
+                      (!query.includes("AND user_id = ?") || candidate.user_id === userId),
+                  );
+                  if (!row) return null;
+                  return Object.fromEntries(
+                    Object.entries(row).filter(([key]) => key !== "user_id"),
+                  );
+                },
+              };
+            },
+          };
+        },
+      },
+    } as unknown as AppEnv;
+    return { env, calls };
+  }
+
+  it("scopes import status to tenant and hides foreign imports", async () => {
+    const ownedImportId = crypto.randomUUID();
+    const foreignImportId = crypto.randomUUID();
+    const unknownImportId = crypto.randomUUID();
+    const status = {
+      source_type: "chatgpt",
+      filename: "export.json",
+      sha256: null,
+      status: "complete",
+      duplicate_of: null,
+      checkpoint_ordinal: 1,
+      total_items: 1,
+      processed_items: 1,
+      error_code: null,
+      error_message: null,
+      created_at: "2026-01-01T00:00:00.000Z",
+      updated_at: "2026-01-01T00:00:00.000Z",
+    };
+    const { env, calls } = syntheticImportEnv([
+      { ...status, id: ownedImportId, user_id: "owner" },
+      { ...status, id: foreignImportId, user_id: "other-user" },
+    ]);
+    const client = await connectedClient(env);
+
+    const owned = await client.callTool({
+      name: "memory_import_status",
+      arguments: { import_id: ownedImportId },
+    });
+    const foreign = await client.callTool({
+      name: "memory_import_status",
+      arguments: { import_id: foreignImportId },
+    });
+    const unknown = await client.callTool({
+      name: "memory_import_status",
+      arguments: { import_id: unknownImportId },
+    });
+
+    expect(owned.structuredContent).toEqual({ id: ownedImportId, ...status });
+    expect(foreign.structuredContent).toEqual({ error: "Import not found" });
+    expect(unknown).toEqual(foreign);
+    expect(calls).toHaveLength(3);
+    for (const [call, importId] of [
+      [calls[0], ownedImportId],
+      [calls[1], foreignImportId],
+      [calls[2], unknownImportId],
+    ] as const) {
+      expect(call?.query).toContain("WHERE id = ? AND user_id = ?");
+      expect(call?.bindings).toEqual([importId, "owner"]);
+    }
+  });
+
   it("discovers the compact V1 tool surface", async () => {
     const client = await connectedClient();
     const result = await client.listTools();
@@ -729,30 +812,71 @@ describe("MCP server", () => {
       name: "memory_empty_namespace",
       arguments: { namespace: "   ", confirm_namespace: "   " },
     });
+    const conversationId = crypto.randomUUID();
+    const missingConversationConfirmation = await client.callTool({
+      name: "memory_delete_conversations",
+      arguments: { conversation_ids: [conversationId] },
+    });
+    const mismatchedConversationConfirmation = await client.callTool({
+      name: "memory_delete_conversations",
+      arguments: {
+        conversation_ids: [conversationId],
+        confirm_conversation_ids: [crypto.randomUUID()],
+      },
+    });
 
     expect(namespace.isError).toBe(true);
     expect(emptyNamespace.isError).toBe(true);
+    expect(missingConversationConfirmation.isError).toBe(true);
+    expect(mismatchedConversationConfirmation.isError).toBe(true);
   });
 
   it("validates deletion IDs and the maximum batch size", async () => {
     const client = await connectedClient();
+    const tooManyIds = Array.from({ length: 101 }, () => crypto.randomUUID());
     const tooMany = await client.callTool({
       name: "memory_delete_conversations",
-      arguments: { conversation_ids: Array.from({ length: 101 }, () => crypto.randomUUID()) },
+      arguments: {
+        conversation_ids: tooManyIds,
+        confirm_conversation_ids: tooManyIds,
+      },
     });
     const duplicate = crypto.randomUUID();
+    const duplicateIds = [duplicate, duplicate];
     const duplicates = await client.callTool({
       name: "memory_delete_conversations",
-      arguments: { conversation_ids: [duplicate, duplicate] },
+      arguments: {
+        conversation_ids: duplicateIds,
+        confirm_conversation_ids: duplicateIds,
+      },
     });
+    const malformedIds = ["not-a-memory-id"];
     const malformed = await client.callTool({
       name: "memory_delete_conversations",
-      arguments: { conversation_ids: ["not-a-memory-id"] },
+      arguments: {
+        conversation_ids: malformedIds,
+        confirm_conversation_ids: malformedIds,
+      },
     });
 
     expect(tooMany.isError).toBe(true);
     expect(duplicates.isError).toBe(true);
     expect(malformed.isError).toBe(true);
+  });
+
+  it("bounds conversation list cursors", async () => {
+    const client = await connectedClient();
+    const empty = await client.callTool({
+      name: "memory_list_conversations",
+      arguments: { cursor: "" },
+    });
+    const oversized = await client.callTool({
+      name: "memory_list_conversations",
+      arguments: { cursor: "x".repeat(16 * 1024 + 1) },
+    });
+
+    expect(empty.isError).toBe(true);
+    expect(oversized.isError).toBe(true);
   });
 
   it("validates revision history inputs", async () => {

@@ -465,6 +465,7 @@ describe("memory_list_revisions", () => {
       z.object({ deleted: z.array(z.string()) }).parse(
         await callValue(owner, "memory_delete_conversations", {
           conversation_ids: [conversationId],
+          confirm_conversation_ids: [conversationId],
         }),
       ).deleted,
     ).toEqual([conversationId]);

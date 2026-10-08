@@ -8,6 +8,7 @@ export type AppEnv = Env & {
   AUTH_EMAIL_FROM: string;
   LEGACY_AUTH_EMAIL_FROM: string;
   MEMORY_API_TOKEN: string;
+  OPENAI_APPS_CHALLENGE_TOKEN?: string;
   /** Development-only MCP audience origin; unset in production. */
   MCP_ORIGIN_OVERRIDE?: string;
 };

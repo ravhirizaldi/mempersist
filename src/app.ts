@@ -53,6 +53,7 @@ import { landingRoutes } from "./landing";
 import {
   llmsTxtResponse,
   manifestResponse,
+  openaiAppsChallengeResponse,
   robotsResponse,
   securityTxtResponse,
   siteCssResponse,
@@ -126,6 +127,9 @@ app.get("/readyz", async (c) => {
 app.get("/robots.txt", () => robotsResponse());
 app.get("/sitemap.xml", () => sitemapResponse());
 app.get("/.well-known/security.txt", () => securityTxtResponse());
+app.get("/.well-known/openai-apps-challenge", (c) =>
+  openaiAppsChallengeResponse(c.env.OPENAI_APPS_CHALLENGE_TOKEN),
+);
 app.get("/site.webmanifest", () => manifestResponse());
 app.get("/llms.txt", () => llmsTxtResponse());
 app.get("/site.css", (c) => siteCssResponse(c.req.query("v")));

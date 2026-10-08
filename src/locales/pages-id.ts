@@ -264,6 +264,113 @@ const replacements: ReadonlyArray<readonly [string, string]> = [
   ["Copy Codex authorization · Shell", "Salin otorisasi Codex · Shell"],
   ["Copy Claude Code · Shell", "Salin Claude Code · Shell"],
   [">Copy</button>", ">Salin</button>"],
+  ["PRIVACY", "PRIVASI"],
+  ["Privacy", "Privasi"],
+  [
+    "MemPersist is explicit by design: it stores conversation memory when you or your client asks it to, not by automatically intercepting chats.",
+    "MemPersist dirancang secara eksplisit: layanan ini menyimpan memori percakapan saat Anda atau klien Anda memintanya, bukan dengan mencegat chat secara otomatis.",
+  ],
+  ["Data categories", "Kategori data"],
+  ["Account data.", "Data akun."],
+  [
+    "The email address used for passwordless access, an internal account identifier, and the namespaces owned by that account.",
+    "Alamat email yang digunakan untuk akses tanpa kata sandi, pengenal akun internal, dan namespace milik akun tersebut.",
+  ],
+  ["Memory data.", "Data memori."],
+  [
+    "Conversation titles, messages, tags, revisions, source metadata, exports, and ChatGPT imports that you intentionally store or import.",
+    "Judul percakapan, pesan, tag, revisi, metadata sumber, ekspor, dan impor ChatGPT yang sengaja Anda simpan atau impor.",
+  ],
+  ["Authentication data.", "Data autentikasi."],
+  [
+    "Hashes of magic links, dashboard sessions, OAuth codes and tokens, plus the grant and PKCE state needed to authenticate a client. Magic links are single-use and valid for 15 minutes; dashboard sessions last 30 days; OAuth access and refresh tokens use provider defaults of one hour and 30 days.",
+    "Hash tautan ajaib, sesi dasbor, kode dan token OAuth, serta status grant dan PKCE yang diperlukan untuk mengautentikasi klien. Tautan ajaib hanya dapat digunakan sekali dan berlaku selama 15 menit; sesi dasbor berlaku selama 30 hari; token akses dan refresh OAuth menggunakan default penyedia selama satu jam dan 30 hari.",
+  ],
+  ["Operational data.", "Data operasional."],
+  [
+    "Structured event names, request and job identifiers, paths, and error categories. Cloudflare Workers Logs retain these logs for at most seven days under current documented limits; plan and sampling settings control availability. Logs do not contain conversation bodies, search queries, tokens, or authorization headers.",
+    "Nama peristiwa terstruktur, pengenal permintaan dan tugas, path, serta kategori kesalahan. Cloudflare Workers Logs menyimpan log ini paling lama tujuh hari berdasarkan batas yang terdokumentasi saat ini; pengaturan paket dan sampling mengendalikan ketersediaannya. Log tidak berisi isi percakapan, kueri pencarian, token, atau header otorisasi.",
+  ],
+  ["Derived data.", "Data turunan."],
+  [
+    "D1 catalog records, chunks, full-text rows, and vector embeddings used for retrieval. Derived indexes are retained only while needed for retrieval, remain account-scoped, and may be deleted or rebuilt at any time.",
+    "Catatan katalog D1, chunk, baris teks lengkap, dan embedding vektor yang digunakan untuk pengambilan. Indeks turunan hanya dipertahankan selama diperlukan untuk pengambilan, tetap dibatasi pada akun, dan dapat dihapus atau dibangun ulang kapan saja.",
+  ],
+  ["Purposes", "Tujuan"],
+  [
+    "MemPersist uses these categories to authenticate clients, reconnect an account, enforce account and namespace isolation, store and retrieve intentional memory, import and export archives, build search indexes, deliver bounded tool responses, protect the service, and investigate operational failures. It does not infer or invent missing memory, and it does not automatically capture full chats.",
+    "MemPersist menggunakan kategori ini untuk mengautentikasi klien, menghubungkan kembali akun, menegakkan isolasi akun dan namespace, menyimpan dan mengambil memori yang sengaja dibuat, mengimpor dan mengekspor arsip, membangun indeks pencarian, mengirim respons alat yang dibatasi, melindungi layanan, dan menyelidiki kegagalan operasional. Layanan ini tidak menyimpulkan atau mengarang memori yang hilang, serta tidak menangkap chat lengkap secara otomatis.",
+  ],
+  ["Processors and recipients", "Pemroses dan penerima"],
+  [
+    "MemPersist runs on Cloudflare Workers and uses Cloudflare R2 for private canonical objects, D1 for the catalog and operational data, KV for OAuth state and grants, Vectorize and Workers AI for derived semantic search, Queues for import and indexing jobs, and Cloudflare Email Service for magic links. Cloudflare's official Workers OAuth provider handles OAuth protocol operations and stores token and code hashes in private KV.",
+    "MemPersist berjalan di Cloudflare Workers dan menggunakan Cloudflare R2 untuk objek kanonis privat, D1 untuk katalog dan data operasional, KV untuk status dan grant OAuth, Vectorize dan Workers AI untuk pencarian semantik turunan, Queues untuk tugas impor dan pengindeksan, serta Cloudflare Email Service untuk tautan ajaib. Penyedia OAuth Workers resmi Cloudflare menangani operasi protokol OAuth dan menyimpan hash token serta kode di KV privat.",
+  ],
+  [
+    "Your connected MCP client receives only the tool results requested through your authenticated connection. Your email is used for access and is not shared with the client. MemPersist does not publish a public storage bucket or anonymous upload endpoint.",
+    "Klien MCP yang terhubung hanya menerima hasil alat yang diminta melalui koneksi terautentikasi Anda. Email Anda digunakan untuk akses dan tidak dibagikan kepada klien. MemPersist tidak menerbitkan bucket penyimpanan publik atau endpoint unggahan anonim.",
+  ],
+  ["Retention", "Retensi"],
+  [
+    "Canonical conversation revisions and raw imports remain in private storage while the account or namespace retains them. Raw ChatGPT import archives are intentionally retained when conversations are deleted. Derived chunks, full-text rows, and vectors are disposable and may be deleted and rebuilt. A conversation deletion is complete only after canonical R2 keys are deleted and D1 cleanup commits.",
+    "Revisi percakapan kanonis dan impor mentah tetap berada di penyimpanan privat selama akun atau namespace menyimpannya. Arsip impor ChatGPT mentah sengaja dipertahankan ketika percakapan dihapus. Chunk turunan, baris teks lengkap, dan vektor bersifat sekali pakai serta dapat dihapus dan dibangun ulang. Penghapusan percakapan selesai hanya setelah kunci R2 kanonis dihapus dan pembersihan D1 dikomit.",
+  ],
+  [
+    "Scheduling account deletion starts a seven-day grace period. During that period, reads, export, logout, and cancellation remain available, while writes return <code>DELETION_PENDING</code>. Account deletion revokes grants and erases the account data when the deletion job completes.",
+    "Penjadwalan penghapusan akun memulai masa tenggang tujuh hari. Selama periode itu, pembacaan, ekspor, logout, dan pembatalan tetap tersedia, sementara penulisan mengembalikan <code>DELETION_PENDING</code>. Penghapusan akun mencabut grant dan menghapus data akun ketika tugas penghapusan selesai.",
+  ],
+  [
+    'Use the authenticated MCP tools or dashboard to search, retrieve, export, update, or delete your own data. Disconnect a client or revoke its OAuth grants when you no longer trust it. Delete conversations only after explicit confirmation; emptying a namespace requires its exact confirmation pair. Schedule account deletion from the dashboard and cancel it during the grace period. Report security issues privately through <a href="https://github.com/ravhirizaldi/mempersist/security/advisories/new">GitHub Security Advisories</a>.',
+    'Gunakan alat MCP terautentikasi atau dasbor untuk mencari, mengambil, mengekspor, memperbarui, atau menghapus data milik Anda. Putuskan koneksi klien atau cabut grant OAuth-nya ketika Anda tidak lagi memercayainya. Hapus percakapan hanya setelah konfirmasi eksplisit; pengosongan namespace memerlukan pasangan konfirmasi yang persis. Jadwalkan penghapusan akun dari dasbor dan batalkan selama masa tenggang. Laporkan masalah keamanan secara privat melalui <a href="https://github.com/ravhirizaldi/mempersist/security/advisories/new">GitHub Security Advisories</a>.',
+  ],
+  ["Contact", "Kontak"],
+  [
+    'For privacy questions or account support, open an issue at <a href="https://github.com/ravhirizaldi/mempersist/issues">github.com/ravhirizaldi/mempersist/issues</a>. Do not include conversation content, tokens, credentials, or raw logs.',
+    'Untuk pertanyaan privasi atau dukungan akun, buka issue di <a href="https://github.com/ravhirizaldi/mempersist/issues">github.com/ravhirizaldi/mempersist/issues</a>. Jangan sertakan isi percakapan, token, kredensial, atau log mentah.',
+  ],
+  ["TERMS", "KETENTUAN"],
+  ["Terms", "Ketentuan"],
+  [
+    "These terms describe the current MemPersist service behavior for public pages, the dashboard, and the authenticated remote MCP endpoint.",
+    "Ketentuan ini menjelaskan perilaku layanan MemPersist saat ini untuk halaman publik, dasbor, dan endpoint MCP jarak jauh terautentikasi.",
+  ],
+  ["Service scope", "Cakupan layanan"],
+  [
+    "MemPersist provides a remote Streamable HTTP MCP server for searching, retrieving, compiling, importing, exporting, and intentionally writing conversation memory. The primary endpoint is <code>",
+    "MemPersist menyediakan server MCP Streamable HTTP jarak jauh untuk mencari, mengambil, menyusun, mengimpor, mengekspor, dan menulis memori percakapan secara sengaja. Endpoint utama adalah <code>",
+  ],
+  [
+    "</code>. OAuth 2.1 with PKCE and passwordless email links authenticate interactive clients; developer clients may use the owner API token. The single V1 scope is <code>memory</code>.",
+    "</code>. OAuth 2.1 dengan PKCE dan tautan email tanpa kata sandi mengautentikasi klien interaktif; klien pengembang dapat menggunakan token API pemilik. Cakupan V1 tunggal adalah <code>memory</code>.",
+  ],
+  ["Account responsibility", "Tanggung jawab akun"],
+  [
+    "Keep control of the email inbox used for your archive, connected clients, OAuth grants, and any developer token. Possession of the connected inbox can reconnect to its archive. Use only content and namespaces that you are authorized to store, import, retrieve, or delete. Every request is scoped to the authenticated account; a client cannot select another account's namespace or conversation.",
+    "Jaga kendali atas kotak masuk email yang digunakan untuk arsip Anda, klien yang terhubung, grant OAuth, dan token pengembang apa pun. Kepemilikan kotak masuk yang terhubung dapat menghubungkan kembali ke arsipnya. Gunakan hanya konten dan namespace yang Anda berwenang untuk simpan, impor, ambil, atau hapus. Setiap permintaan dibatasi pada akun terautentikasi; klien tidak dapat memilih namespace atau percakapan akun lain.",
+  ],
+  ["Acceptable use", "Penggunaan yang dapat diterima"],
+  [
+    "Use MemPersist for your own authorized memory workflows. Do not access another person's archive, use leaked credentials, bypass authentication or ownership checks, submit malicious or oversized imports, extract secrets, degrade the service, or destroy data without the required confirmation. Do not put <code>MEMORY_API_TOKEN</code> into a connector or app configuration; it is for developer API and CLI use.",
+    "Gunakan MemPersist untuk alur kerja memori resmi Anda sendiri. Jangan mengakses arsip orang lain, menggunakan kredensial yang bocor, melewati pemeriksaan autentikasi atau kepemilikan, mengirim impor berbahaya atau terlalu besar, mengekstrak rahasia, menurunkan kinerja layanan, atau menghancurkan data tanpa konfirmasi yang diwajibkan. Jangan memasukkan <code>MEMORY_API_TOKEN</code> ke konfigurasi konektor atau aplikasi; token tersebut hanya untuk API pengembang dan CLI.",
+  ],
+  ["Writes and deletions", "Penulisan dan penghapusan"],
+  [
+    "Memory enters through explicit MCP writes or an explicit ChatGPT export import; MemPersist does not automatically intercept full chats. Follow the intended <strong>search → select → get context</strong> pattern and verify source and revision identifiers before continuing. Canonical writes are durable before indexing is queued, and a new revision preserves immutable history. Use the complete transcript with <code>memory_replace</code> when replacing, an explicit base revision for revision-safe mutations, and the returned receipts to verify results.",
+    "Memori masuk melalui penulisan MCP eksplisit atau impor ekspor ChatGPT eksplisit; MemPersist tidak mencegat chat lengkap secara otomatis. Ikuti pola <strong>search → select → get context</strong> yang dimaksudkan dan verifikasi pengenal sumber serta revisi sebelum melanjutkan. Penulisan kanonis bersifat tahan lama sebelum pengindeksan dimasukkan ke antrean, dan revisi baru mempertahankan riwayat yang tidak dapat diubah. Gunakan transkrip lengkap dengan <code>memory_replace</code> saat mengganti, revisi dasar eksplisit untuk mutasi yang aman terhadap revisi, dan tanda terima yang dikembalikan untuk memverifikasi hasil.",
+  ],
+  [
+    "Destructive tools operate only on your owned conversations or namespaces. <code>memory_delete_conversations</code> deletes selected memories, while <code>memory_empty_namespace</code> requires an exact namespace confirmation and runs in bounded batches. Account deletion has a seven-day grace period; pending account deletion blocks writes while reads, export, logout, and cancellation remain available.",
+    "Alat destruktif hanya beroperasi pada percakapan atau namespace milik Anda. <code>memory_delete_conversations</code> menghapus memori yang dipilih, sedangkan <code>memory_empty_namespace</code> memerlukan konfirmasi namespace yang persis dan berjalan dalam batch terbatas. Penghapusan akun memiliki masa tenggang tujuh hari; penghapusan akun yang tertunda memblokir penulisan, sementara pembacaan, ekspor, logout, dan pembatalan tetap tersedia.",
+  ],
+  ["Availability and limitations", "Ketersediaan dan batasan"],
+  [
+    "MemPersist provides no promise of uninterrupted availability or continuously current derived indexes. Imports and indexing run through queued, retryable work; search may report <code>degraded</code> or <code>unavailable</code> channels. A canonical write can remain durable when indexing or verification fails. Cloudflare platform services and third-party MCP clients are outside the application's security document, and client behavior can affect your connection.",
+    "MemPersist tidak menjanjikan ketersediaan tanpa gangguan atau indeks turunan yang terus diperbarui. Impor dan pengindeksan berjalan melalui pekerjaan yang diantrekan dan dapat dicoba ulang; pencarian dapat melaporkan kanal <code>degraded</code> atau <code>unavailable</code>. Penulisan kanonis dapat tetap tahan lama ketika pengindeksan atau verifikasi gagal. Layanan platform Cloudflare dan klien MCP pihak ketiga berada di luar dokumen keamanan aplikasi, dan perilaku klien dapat memengaruhi koneksi Anda.",
+  ],
+  [
+    'For service questions or account support, open an issue at <a href="https://github.com/ravhirizaldi/mempersist/issues">github.com/ravhirizaldi/mempersist/issues</a>. Report vulnerabilities through <a href="https://github.com/ravhirizaldi/mempersist/security/advisories/new">GitHub Security Advisories</a>, without including real conversation content, tokens, credentials, or raw logs.',
+    'Untuk pertanyaan layanan atau dukungan akun, buka issue di <a href="https://github.com/ravhirizaldi/mempersist/issues">github.com/ravhirizaldi/mempersist/issues</a>. Laporkan kerentanan melalui <a href="https://github.com/ravhirizaldi/mempersist/security/advisories/new">GitHub Security Advisories</a>, tanpa menyertakan konten percakapan nyata, token, kredensial, atau log mentah.',
+  ],
 ];
 
 export function localizePageMarkup(locale: Locale, html: string): string {

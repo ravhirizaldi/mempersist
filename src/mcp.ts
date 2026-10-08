@@ -1126,8 +1126,7 @@ export function createMemoryMcpServer(env: AppEnv, tenant: Tenant): McpServer {
       annotations: readOnlyAnnotations,
       outputSchema: conversationPageOutputSchema,
       inputSchema: conversationRequestSchema.extend({
-        // Preserve the existing single-read ID contract.
-        conversation_id: z.string().min(1),
+        conversation_id: conversationIdSchema,
         format: readFormatSchema,
       }),
     },
@@ -1244,7 +1243,7 @@ export function createMemoryMcpServer(env: AppEnv, tenant: Tenant): McpServer {
       outputSchema: listConversationsOutputSchema,
       inputSchema: z.object({
         limit: z.number().int().min(1).max(MAX_PAGE_ITEMS).default(DEFAULT_PAGE_ITEMS),
-        cursor: z.string().optional(),
+        cursor: z.string().min(1).max(MAX_BATCH_CURSOR_CHARS).optional(),
         namespace: z.string().min(1).max(MAX_NAMESPACE_CHARS).optional(),
         tags: tagsSchema.optional(),
         tag_mode: z.enum(["any", "all"]).default("all"),
@@ -1545,8 +1544,8 @@ export function createMemoryMcpServer(env: AppEnv, tenant: Tenant): McpServer {
       },
       outputSchema: memoryWriteOutputSchema,
       inputSchema: z.object({
-        conversation_id: z.string().min(1),
-        base_revision_id: z.string().min(1),
+        conversation_id: conversationIdSchema,
+        base_revision_id: revisionIdSchema,
         tags: tagsSchema.optional(),
         messages: z.array(messageSchema).min(1).max(MAX_APPEND_MESSAGES),
         verify: z.boolean().default(false),
@@ -1866,7 +1865,7 @@ export function createMemoryMcpServer(env: AppEnv, tenant: Tenant): McpServer {
     {
       title: "Delete conversations",
       description:
-        "Delete up to 100 conversations and their canonical and derived data. Only conversations in your namespaces can be deleted; others are reported as missing.",
+        "Delete up to 100 conversations and their canonical and derived data after exact confirmation IDs. Only conversations in your namespaces can be deleted; others are reported as missing.",
       annotations: {
         readOnlyHint: false,
         destructiveHint: true,
@@ -1874,7 +1873,20 @@ export function createMemoryMcpServer(env: AppEnv, tenant: Tenant): McpServer {
         idempotentHint: true,
       },
       outputSchema: deleteConversationsOutputSchema,
-      inputSchema: z.object({ conversation_ids: conversationIdsSchema }),
+      inputSchema: z
+        .object({
+          conversation_ids: conversationIdsSchema,
+          confirm_conversation_ids: conversationIdsSchema,
+        })
+        .refine(
+          ({ conversation_ids, confirm_conversation_ids }) =>
+            conversation_ids.length === confirm_conversation_ids.length &&
+            conversation_ids.every((id, index) => id === confirm_conversation_ids[index]),
+          {
+            message: "confirm_conversation_ids must exactly match conversation_ids in order",
+            path: ["confirm_conversation_ids"],
+          },
+        ),
     },
     async ({ conversation_ids }) =>
       toolResult(
@@ -2050,9 +2062,9 @@ export function createMemoryMcpServer(env: AppEnv, tenant: Tenant): McpServer {
     async ({ import_id }) => {
       const status = await env.MEMORY_DB.prepare(
         `SELECT id, source_type, filename, sha256, status, duplicate_of, checkpoint_ordinal, total_items,
-         processed_items, error_code, error_message, created_at, updated_at FROM imports WHERE id = ?`,
+         processed_items, error_code, error_message, created_at, updated_at FROM imports WHERE id = ? AND user_id = ?`,
       )
-        .bind(import_id)
+        .bind(import_id, tenant.userId)
         .first();
       return toolResult(status ?? { error: "Import not found" });
     },

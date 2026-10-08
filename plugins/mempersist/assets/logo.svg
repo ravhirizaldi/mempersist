@@ -1,0 +1,7 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="64" height="64" viewBox="0 0 64 64" role="img" aria-labelledby="title desc">
+  <title id="title">MemPersist</title>
+  <desc id="desc">Abstract stacked memory mark</desc>
+  <rect width="64" height="64" rx="12" fill="#18211f"/>
+  <path d="M16 18h32v8H16zM16 28h32v8H16zM16 38h22v8H16z" fill="#9fe3c0"/>
+  <path d="M42 38h6v8h-6z" fill="#f4c95d"/>
+</svg>

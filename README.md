@@ -209,10 +209,10 @@ remain isolated.
 
 ### Admin
 
-| Tool                          | Title                | Notes                                                   |
-| ----------------------------- | -------------------- | ------------------------------------------------------- |
-| `memory_delete_conversations` | Delete conversations | Up to 100, canonical and derived data together          |
-| `memory_empty_namespace`      | Empty namespace      | Bounded, resumable batch empty after exact confirmation |
+| Tool                          | Title                | Notes                                                                   |
+| ----------------------------- | -------------------- | ----------------------------------------------------------------------- |
+| `memory_delete_conversations` | Delete conversations | Up to 100, canonical and derived data together after exact confirmation |
+| `memory_empty_namespace`      | Empty namespace      | Bounded, resumable batch empty after exact confirmation                 |
 
 Retry, reindex, and integrity commands stay HTTP/CLI only so a model cannot trigger expensive
 maintenance. Full tool contracts, receipts, and batch semantics live in [docs/mcp.md](docs/mcp.md).

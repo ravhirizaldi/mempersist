@@ -117,7 +117,10 @@ describe("same namespace name across accounts stays isolated", () => {
     const ownerClient = await connectedClient(owner);
     const deleted = await ownerClient.callTool({
       name: "memory_delete_conversations",
-      arguments: { conversation_ids: [conversationId] },
+      arguments: {
+        conversation_ids: [conversationId],
+        confirm_conversation_ids: [conversationId],
+      },
     });
     const deletedText = JSON.parse((deleted.content?.[0] as { text: string })?.text ?? "{}") as {
       requested: number;

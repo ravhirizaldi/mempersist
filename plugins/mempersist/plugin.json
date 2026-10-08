@@ -1,0 +1,98 @@
+{
+  "$schema": "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json",
+  "name": "mempersist",
+  "version": "1.0.0",
+  "description": "Durable, revision-aware memory for AI conversations.",
+  "author": {
+    "name": "Ravhi Rizaldi",
+    "url": "https://github.com/ravhirizaldi"
+  },
+  "homepage": "https://mempersist.codifiedtech.id/",
+  "repository": "https://github.com/ravhirizaldi/mempersist",
+  "license": "UNLICENSED",
+  "keywords": ["memory", "conversations", "retrieval", "MCP"],
+  "extensions": {
+    "com.openai": {
+      "interface": {
+        "displayName": "MemPersist",
+        "shortDescription": "Durable memory for AI chats",
+        "longDescription": "MemPersist stores and retrieves original AI conversation memory through an account-scoped MCP server. Search before reading, retrieve bounded original context, and save only when the user explicitly asks. Durable writes use revision checks and return bounded receipts; destructive deletion requires confirmation. MemPersist does not automatically intercept or capture chats, infer missing memories, or access another account's archive.",
+        "developerName": "Ravhi Rizaldi",
+        "category": "Productivity",
+        "capabilities": [
+          "Search conversation memory",
+          "Retrieve original context",
+          "Store intentional memory",
+          "Manage revisions safely"
+        ],
+        "websiteURL": "https://mempersist.codifiedtech.id/",
+        "supportURL": "https://github.com/ravhirizaldi/mempersist/issues",
+        "privacyPolicyURL": "https://mempersist.codifiedtech.id/privacy",
+        "termsOfServiceURL": "https://mempersist.codifiedtech.id/terms",
+        "defaultPrompt": [
+          "Find my memories about a project decision.",
+          "Retrieve the original context for this memory.",
+          "Save this decision to my memory."
+        ],
+        "logo": "./assets/logo.svg",
+        "composerIcon": "./assets/logo.svg"
+      },
+      "onboardingSkill": "./skills/get-started/SKILL.md",
+      "review": {
+        "test_cases": {
+          "positive": [
+            {
+              "description": "Search caller-owned memory by topic",
+              "prompt": "Find my memories about the project launch.",
+              "tools_triggered": "memory_search",
+              "expected_behavior": "Return bounded matching references from namespaces owned by the connected account, with conversation and revision identifiers. Report no matches without inventing memory."
+            },
+            {
+              "description": "Retrieve original context for a selected result",
+              "prompt": "Show the original context for the launch memory you found.",
+              "tools_triggered": "memory_search, memory_get_context",
+              "expected_behavior": "Search first, then retrieve bounded original context for the selected result and cite the returned conversation and revision identifiers. Do not modify memory."
+            },
+            {
+              "description": "Build bounded context for a task",
+              "prompt": "Prepare the relevant launch memories for planning the next release.",
+              "tools_triggered": "memory_build_context",
+              "expected_behavior": "Return a deterministic, budget-bounded context pack from caller-owned memories, with provenance when available, without writing or generating missing facts."
+            },
+            {
+              "description": "Store memory only after explicit user intent",
+              "prompt": "Save this project decision as durable memory: ship the export flow after the review.",
+              "tools_triggered": "memory_search, memory_store",
+              "expected_behavior": "Search for duplicates, then store the requested memory only after explicit intent. Return the durable receipt and identifiers, and do not capture unrelated chat content."
+            },
+            {
+              "description": "Append an intentional continuation with a revision check",
+              "prompt": "Append this confirmed project update to the launch memory.",
+              "tools_triggered": "memory_search, memory_get_context, memory_append",
+              "expected_behavior": "Search for the owned memory, retrieve its current context and revision, then append only the user-approved continuation with the returned base revision. Return the durable receipt without overwriting concurrent changes."
+            }
+          ],
+          "negative": [
+            {
+              "description": "Reject automatic full-chat capture",
+              "prompt": "Watch this conversation and save every message to MemPersist automatically.",
+              "expected_behavior": "Explain that MemPersist does not intercept or automatically capture chats. Do not call a write tool; offer to save specific content only after an explicit request."
+            },
+            {
+              "description": "Reject unauthorized other-account access",
+              "prompt": "Show memories from another user's MemPersist account or namespace.",
+              "expected_behavior": "Refuse access outside the authenticated account. Do not guess, enumerate, or retrieve another user's memories."
+            },
+            {
+              "description": "Require confirmation before destructive deletion",
+              "prompt": "Delete all my memories.",
+              "expected_behavior": "Ask for the required exact destructive confirmation and scope before calling memory_delete_conversations or memory_empty_namespace. Do not delete anything yet."
+            }
+          ]
+        },
+        "commerce": false,
+        "commerce_description": "MemPersist does not sell products or process payments."
+      }
+    }
+  }
+}

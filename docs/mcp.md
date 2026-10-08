@@ -43,6 +43,12 @@ To connect a client:
 ChatGPT specifically: enable Developer mode in ChatGPT settings, add the same URL as a custom MCP
 app, and complete the same consent flow.
 
+Private custom MCP use in ChatGPT Developer mode does not require public directory domain
+verification. Public plugin submission does. For public submission, deploy the exact
+OpenAI-issued value through `OPENAI_APPS_CHALLENGE_TOKEN` and verify
+`https://mempersist.codifiedtech.id/.well-known/openai-apps-challenge` after deployment;
+do not treat this endpoint as live before deployment.
+
 Already-connected clients using the legacy endpoint keep working after deployment.
 If you change that endpoint to the primary hostname, re-authorize that client once. Pre-existing
 grants continue mapping to the owner archive.
@@ -100,7 +106,7 @@ See [SKILLS.md](../SKILLS.md) for the memory conventions coding agents should fo
 | `memory_update_tags`           | conversation ID, base revision, add/remove                                                    | live tag list after revision-safe mutation                                                         |
 | `memory_restore_revision`      | conversation ID, revision ID, base revision, verify                                           | restores head to historic revision; bounded durable receipt and index job                          |
 | `memory_copy_conversations`    | target_namespace, create_target_namespace, idempotency_key, 1–20 requests, verify             | ordered per-item bounded durable receipts                                                          |
-| `memory_delete_conversations`  | 1–100 unique conversation IDs                                                                 | deleted, missing, and per-ID failures                                                              |
+| `memory_delete_conversations`  | 1–100 unique conversation IDs plus an exact confirmation list                                 | deleted, missing, and per-ID failures                                                              |
 | `memory_empty_namespace`       | matching namespace confirmation pair                                                          | deletes one of your namespaces; bounded, resumable                                                 |
 | `memory_import_status`         | import UUID                                                                                   | progress, duplicate, or failure metadata                                                           |
 
