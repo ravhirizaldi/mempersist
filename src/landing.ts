@@ -33,6 +33,16 @@ const SEO: Record<Locale, Record<string, { title: string; description: string }>
       description:
         "Review MemPersist’s threat model, security controls, data boundaries, and recovery practices for sensitive AI conversation memory.",
     },
+    "/privacy": {
+      title: "Privacy — MemPersist",
+      description:
+        "Learn what account, conversation, authentication, and operational data MemPersist processes, why it processes it, and how users control it.",
+    },
+    "/terms": {
+      title: "Terms — MemPersist",
+      description:
+        "Read the MemPersist service terms covering MCP access, account responsibility, intentional memory writes, deletion, availability, and acceptable use.",
+    },
     "/adrs": {
       title: "Architecture decision records — MemPersist",
       description:
@@ -64,6 +74,16 @@ const SEO: Record<Locale, Record<string, { title: string; description: string }>
       title: "Keamanan — MemPersist",
       description:
         "Tinjau model ancaman, kontrol keamanan, batas data, dan praktik pemulihan MemPersist untuk memori percakapan AI yang sensitif.",
+    },
+    "/privacy": {
+      title: "Privasi — MemPersist",
+      description:
+        "Pelajari data akun, percakapan, autentikasi, dan operasional yang diproses MemPersist, tujuannya, serta kontrol pengguna.",
+    },
+    "/terms": {
+      title: "Ketentuan — MemPersist",
+      description:
+        "Baca ketentuan layanan MemPersist tentang akses MCP, tanggung jawab akun, penulisan memori, penghapusan, ketersediaan, dan penggunaan yang dapat diterima.",
     },
     "/adrs": {
       title: "Keputusan arsitektur — MemPersist",
@@ -98,6 +118,10 @@ function formatBytes(bytes: number): string {
     unit += 1;
   }
   return `${value} ${BYTE_UNITS[unit]!}`;
+}
+
+function codeBlock(id: string, label: string, code: string): string {
+  return `<div class="code-block"><div class="code-heading"><span>${escapeHtml(label)}</span><button class="copy-button" type="button" data-copy="${id}" hidden>Copy</button></div><pre class="code" tabindex="0"><code id="${id}">${escapeHtml(code)}</code></pre></div>`;
 }
 
 function page(title: string, body: string, active: string, locale: Locale, intro = ""): string {
@@ -186,14 +210,10 @@ ${FAVICON}
 <main id="main-content" class="wrap${active === "/" ? " home" : ""}" tabindex="-1">
 <div class="page-meta"><span>${t.shared.memoryContext}</span><span>${active === "/" ? t.shared.ownArchive : `<a href="/">${t.shared.home}</a> / ${escapeHtml(navItems.find((item) => item.href === active)?.label ?? title)}`}</span></div>
 ${intro}<div class="reading-layout">${toc}<div class="document">${content}</div></div>
-<footer><span>MemPersist · ${t.shared.durable}</span><div class="footer-links"><a href="/security">${t.shared.privacy}</a><a href="/about">${t.shared.creator}</a><a href="#main-content">${t.shared.backTop} ↑</a></div></footer>
+<footer><span>MemPersist · ${t.shared.durable}</span><div class="footer-links"><a href="/privacy"${active === "/privacy" ? ' aria-current="page"' : ""}>${locale === "id" ? "Privasi" : "Privacy"}</a><a href="/terms"${active === "/terms" ? ' aria-current="page"' : ""}>${locale === "id" ? "Ketentuan" : "Terms"}</a><a href="/security">${t.shared.security}</a><a href="/about">${t.shared.creator}</a><a href="#main-content">${t.shared.backTop} ↑</a></div></footer>
 </main><script src="/site.js?v=${PUBLIC_ASSET_VERSION}" defer></script>
 </body></html>`;
   return localizePageMarkup(locale, html);
-}
-
-function codeBlock(id: string, label: string, code: string): string {
-  return `<div class="code-block"><div class="code-heading"><span>${escapeHtml(label)}</span><button class="copy-button" type="button" data-copy="${id}" hidden>Copy</button></div><pre class="code" tabindex="0"><code id="${id}">${escapeHtml(code)}</code></pre></div>`;
 }
 
 export function landingPage(locale: Locale = "en"): Response {
@@ -680,6 +700,91 @@ function securityPage(locale: Locale = "en"): Response {
   return respond(page("Security", body, "/security", locale), locale);
 }
 
+function privacyPage(locale: Locale = "en"): Response {
+  const body = `
+  <p class="eyebrow">PRIVACY</p>
+  <h1>Privacy</h1>
+  <p class="lead">MemPersist is explicit by design: it stores conversation memory when you or your client asks it to, not by automatically intercepting chats.</p>
+
+  <section>
+    <h2>Data categories</h2>
+    <ul>
+      <li><strong>Account data.</strong> The email address used for passwordless access, an internal account identifier, and the namespaces owned by that account.</li>
+      <li><strong>Memory data.</strong> Conversation titles, messages, tags, revisions, source metadata, exports, and ChatGPT imports that you intentionally store or import.</li>
+      <li><strong>Authentication data.</strong> Hashes of magic links, dashboard sessions, OAuth codes and tokens, plus the grant and PKCE state needed to authenticate a client. Magic links are single-use and valid for 15 minutes; dashboard sessions last 30 days; OAuth access and refresh tokens use provider defaults of one hour and 30 days.</li>
+      <li><strong>Operational data.</strong> Structured event names, request and job identifiers, paths, and error categories. Cloudflare Workers Logs retain these logs for at most seven days under current documented limits; plan and sampling settings control availability. Logs do not contain conversation bodies, search queries, tokens, or authorization headers.</li>
+      <li><strong>Derived data.</strong> D1 catalog records, chunks, full-text rows, and vector embeddings used for retrieval. Derived indexes are retained only while needed for retrieval, remain account-scoped, and may be deleted or rebuilt at any time.</li>
+    </ul>
+  </section>
+
+  <section>
+    <h2>Purposes</h2>
+    <p>MemPersist uses these categories to authenticate clients, reconnect an account, enforce account and namespace isolation, store and retrieve intentional memory, import and export archives, build search indexes, deliver bounded tool responses, protect the service, and investigate operational failures. It does not infer or invent missing memory, and it does not automatically capture full chats.</p>
+  </section>
+
+  <section>
+    <h2>Processors and recipients</h2>
+    <p>MemPersist runs on Cloudflare Workers and uses Cloudflare R2 for private canonical objects, D1 for the catalog and operational data, KV for OAuth state and grants, Vectorize and Workers AI for derived semantic search, Queues for import and indexing jobs, and Cloudflare Email Service for magic links. Cloudflare's official Workers OAuth provider handles OAuth protocol operations and stores token and code hashes in private KV.</p>
+    <p>Your connected MCP client receives only the tool results requested through your authenticated connection. Your email is used for access and is not shared with the client. MemPersist does not publish a public storage bucket or anonymous upload endpoint.</p>
+  </section>
+
+  <section>
+    <h2>Retention</h2>
+    <p>Canonical conversation revisions and raw imports remain in private storage while the account or namespace retains them. Raw ChatGPT import archives are intentionally retained when conversations are deleted. Derived chunks, full-text rows, and vectors are disposable and may be deleted and rebuilt. A conversation deletion is complete only after canonical R2 keys are deleted and D1 cleanup commits.</p>
+    <p>Scheduling account deletion starts a seven-day grace period. During that period, reads, export, logout, and cancellation remain available, while writes return <code>DELETION_PENDING</code>. Account deletion revokes grants and erases the account data when the deletion job completes.</p>
+  </section>
+
+  <section>
+    <h2>Controls</h2>
+    <p>Use the authenticated MCP tools or dashboard to search, retrieve, export, update, or delete your own data. Disconnect a client or revoke its OAuth grants when you no longer trust it. Delete conversations only after explicit confirmation; emptying a namespace requires its exact confirmation pair. Schedule account deletion from the dashboard and cancel it during the grace period. Report security issues privately through <a href="https://github.com/ravhirizaldi/mempersist/security/advisories/new">GitHub Security Advisories</a>.</p>
+  </section>
+
+  <section>
+    <h2>Contact</h2>
+    <p>For privacy questions or account support, open an issue at <a href="https://github.com/ravhirizaldi/mempersist/issues">github.com/ravhirizaldi/mempersist/issues</a>. Do not include conversation content, tokens, credentials, or raw logs.</p>
+  </section>`;
+  return respond(page("Privacy", body, "/privacy", locale), locale);
+}
+
+function termsPage(locale: Locale = "en"): Response {
+  const body = `
+  <p class="eyebrow">TERMS</p>
+  <h1>Terms</h1>
+  <p class="lead">These terms describe the current MemPersist service behavior for public pages, the dashboard, and the authenticated remote MCP endpoint.</p>
+
+  <section>
+    <h2>Service scope</h2>
+    <p>MemPersist provides a remote Streamable HTTP MCP server for searching, retrieving, compiling, importing, exporting, and intentionally writing conversation memory. The primary endpoint is <code>${escapeHtml(MCP_ENDPOINT)}</code>. OAuth 2.1 with PKCE and passwordless email links authenticate interactive clients; developer clients may use the owner API token. The single V1 scope is <code>memory</code>.</p>
+  </section>
+
+  <section>
+    <h2>Account responsibility</h2>
+    <p>Keep control of the email inbox used for your archive, connected clients, OAuth grants, and any developer token. Possession of the connected inbox can reconnect to its archive. Use only content and namespaces that you are authorized to store, import, retrieve, or delete. Every request is scoped to the authenticated account; a client cannot select another account's namespace or conversation.</p>
+  </section>
+
+  <section>
+    <h2>Acceptable use</h2>
+    <p>Use MemPersist for your own authorized memory workflows. Do not access another person's archive, use leaked credentials, bypass authentication or ownership checks, submit malicious or oversized imports, extract secrets, degrade the service, or destroy data without the required confirmation. Do not put <code>MEMORY_API_TOKEN</code> into a connector or app configuration; it is for developer API and CLI use.</p>
+  </section>
+
+  <section>
+    <h2>Writes and deletions</h2>
+    <p>Memory enters through explicit MCP writes or an explicit ChatGPT export import; MemPersist does not automatically intercept full chats. Follow the intended <strong>search → select → get context</strong> pattern and verify source and revision identifiers before continuing. Canonical writes are durable before indexing is queued, and a new revision preserves immutable history. Use the complete transcript with <code>memory_replace</code> when replacing, an explicit base revision for revision-safe mutations, and the returned receipts to verify results.</p>
+    <p>Destructive tools operate only on your owned conversations or namespaces. <code>memory_delete_conversations</code> deletes selected memories, while <code>memory_empty_namespace</code> requires an exact namespace confirmation and runs in bounded batches. Account deletion has a seven-day grace period; pending account deletion blocks writes while reads, export, logout, and cancellation remain available.</p>
+  </section>
+
+  <section>
+    <h2>Availability and limitations</h2>
+    <p>MemPersist provides no promise of uninterrupted availability or continuously current derived indexes. Imports and indexing run through queued, retryable work; search may report <code>degraded</code> or <code>unavailable</code> channels. A canonical write can remain durable when indexing or verification fails. Cloudflare platform services and third-party MCP clients are outside the application's security document, and client behavior can affect your connection.</p>
+  </section>
+
+  <section>
+    <h2>Contact</h2>
+    <p>For service questions or account support, open an issue at <a href="https://github.com/ravhirizaldi/mempersist/issues">github.com/ravhirizaldi/mempersist/issues</a>. Report vulnerabilities through <a href="https://github.com/ravhirizaldi/mempersist/security/advisories/new">GitHub Security Advisories</a>, without including real conversation content, tokens, credentials, or raw logs.</p>
+  </section>`;
+  return respond(page("Terms", body, "/terms", locale), locale);
+}
+
 function adrsPage(locale: Locale = "en"): Response {
   const adrs: Array<[string, string]> = [
     ["0001", "Clean-room memory platform"],
@@ -795,6 +900,8 @@ export const landingRoutes: Record<string, (locale?: Locale) => Response> = {
   "/whitepaper": whitepaperPage,
   "/architecture": architecturePage,
   "/security": securityPage,
+  "/privacy": privacyPage,
+  "/terms": termsPage,
   "/adrs": adrsPage,
   "/about": aboutPage,
 };

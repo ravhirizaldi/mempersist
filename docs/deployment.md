@@ -5,14 +5,15 @@ Deployment is a deliberate operator action.
 1. Provision resources from [cloudflare-resources.md](cloudflare-resources.md).
 2. Put the actual D1 ID in `wrangler.jsonc`; confirm every name with read-only Wrangler listing.
 3. Run `yarn types:bindings` and commit the generated type changes.
-4. Set `MEMORY_API_TOKEN` using `yarn wrangler secret put MEMORY_API_TOKEN`.
+4. Set `MEMORY_API_TOKEN` using `yarn wrangler secret put MEMORY_API_TOKEN`. Add the exact challenge value issued by OpenAI to the `vars` deployment configuration as plain variable `OPENAI_APPS_CHALLENGE_TOKEN`. This value is public plaintext, not a secret: do not invent, store as a secret, or log it, and preserve it without a trailing newline.
 5. Confirm both Email Service sender domains are onboarded and `AUTH_EMAIL_FROM` plus
    `LEGACY_AUTH_EMAIL_FROM` are verified sender addresses configured in `wrangler.jsonc`.
 6. Run `yarn verify`.
 7. Apply the numbered remote migrations with `yarn db:migrate:remote`; for the commit-batch
    release, confirm migration `0015_atomic_batch_recovery.sql` succeeds before continuing.
 8. Run `yarn deploy`.
-9. Verify `/healthz`, authenticated `/readyz`, OAuth protected-resource and authorization-server metadata, MCP discovery with both OAuth and the developer token, both browser languages and the secure language switch, localized magic-link email for a new and existing email, `/login`, dashboard session/logout, an export, a small canonical write, indexing state, search, and context retrieval.
+9. Verify `/healthz`, authenticated `/readyz`, OAuth protected-resource and authorization-server metadata, MCP discovery with both OAuth and the developer token, both browser languages and the secure language switch, localized magic-link email for a new and existing email, `/login`, dashboard session/logout, an export, a small canonical write, indexing state, search, and context retrieval. After deployment, fetch `https://mempersist.codifiedtech.id/.well-known/openai-apps-challenge` and compare its response bytes with `OPENAI_APPS_CHALLENGE_TOKEN`; require the exact plaintext value with no trailing newline.
+   Verify with `curl --fail --silent --show-error https://mempersist.codifiedtech.id/.well-known/openai-apps-challenge | cmp -s - <(printf %s "$OPENAI_APPS_CHALLENGE_TOKEN")`.
 
 Never deploy code that expects tables from a numbered migration that has not been applied
 remotely. The release order is `yarn verify`, then `yarn db:migrate:remote`, then `yarn deploy`.
@@ -32,9 +33,10 @@ a fresh search rather than a page from live offsets. Check that expired rows are
 snapshot reads and that no query, cursor payload, user ID, D1 ID, or R2 key appears in logs.
 
 Public discovery endpoints are served by the Worker and should remain reachable without
-authentication: `/robots.txt`, `/sitemap.xml`, `/.well-known/security.txt`, and
-`/site.webmanifest`. The sitemap lists only the public documentation routes; private dashboard,
-API, OAuth, MCP, and health routes are excluded from crawling.
+authentication: `/robots.txt`, `/sitemap.xml`, `/.well-known/security.txt`,
+`/.well-known/openai-apps-challenge`, and `/site.webmanifest`. The sitemap lists only the public
+documentation routes; private dashboard, API, OAuth, MCP, and health routes are excluded from
+crawling. Treat the OpenAI challenge endpoint as unverified until this deployment completes.
 
 Migration 0009 adds hashed dashboard challenges/sessions, ownership for imports, and the separately
 leased deletion queue. After a rollback, follow the deletion-job re-enqueue procedure in

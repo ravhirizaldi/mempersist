@@ -9,6 +9,8 @@ export const PUBLIC_PATHS = [
   "/whitepaper",
   "/architecture",
   "/security",
+  "/privacy",
+  "/terms",
   "/adrs",
   "/about",
 ] as const;
@@ -24,6 +26,10 @@ function textResponse(body: string, contentType: string, cacheControl = CACHE_CO
       "X-Content-Type-Options": "nosniff",
     },
   });
+}
+export function openaiAppsChallengeResponse(token?: string): Response {
+  if (!token) return new Response(null, { status: 404, headers: { "Cache-Control": "no-store" } });
+  return textResponse(token, "text/plain; charset=UTF-8", "no-store");
 }
 export function siteCssResponse(version?: string): Response {
   const cacheControl = version === PUBLIC_ASSET_VERSION ? ASSET_CACHE_CONTROL : CACHE_CONTROL;

@@ -24,7 +24,7 @@ describe("HTTP security boundary", () => {
     expect(response.headers.get("content-security-policy")).toContain("frame-ancestors 'none'");
   });
 
-  it("serves the whitepaper, architecture, security, and ADR pages", async () => {
+  it("serves the whitepaper, architecture, security, privacy, terms, and ADR pages", async () => {
     const appEnv = env as AppEnv;
     const expectations: Array<[string, string]> = [
       ["/whitepaper", "Designing durable AI conversation memory"],
@@ -32,6 +32,11 @@ describe("HTTP security boundary", () => {
       ["/architecture", "Cloudflare-native, clean-room"],
       ["/architecture", "Cloudflare services"],
       ["/security", "Threat model and controls"],
+      ["/privacy", "Data categories"],
+      ["/privacy", "Processors and recipients"],
+      ["/privacy", "at most seven days"],
+      ["/terms", "Service scope"],
+      ["/terms", "Acceptable use"],
       ["/adrs", "Architecture decision records"],
       ["/about", "Ravhi Rizaldi"],
     ];
@@ -42,6 +47,36 @@ describe("HTTP security boundary", () => {
       expect(html, path).toContain(marker);
       expect(html, path).toContain("Whitepaper"); // shared nav menu
     }
+    const idPrivacy = await app.request(
+      "/privacy",
+      { headers: { "accept-language": "id" } },
+      appEnv,
+    );
+    expect(idPrivacy.status).toBe(200);
+    expect(await idPrivacy.text()).toContain("Kategori data");
+    const idTerms = await app.request("/terms", { headers: { "accept-language": "id" } }, appEnv);
+    expect(idTerms.status).toBe(200);
+    expect(await idTerms.text()).toContain("Cakupan layanan");
+  });
+
+  it("serves OpenAI app challenge only when configured", async () => {
+    const appEnv = env as AppEnv;
+    const configured = await app.request("/.well-known/openai-apps-challenge", {}, appEnv);
+    expect(configured.status).toBe(200);
+    expect(configured.headers.get("content-type")).toBe("text/plain; charset=UTF-8");
+    expect(configured.headers.get("cache-control")).toBe("no-store");
+    expect(await configured.text()).toBe("synthetic-openai-apps-challenge-token");
+
+    const missing = await app.request("/.well-known/openai-apps-challenge", {}, {});
+    expect(missing.status).toBe(404);
+    const empty = await app.request(
+      "/.well-known/openai-apps-challenge",
+      {},
+      {
+        OPENAI_APPS_CHALLENGE_TOKEN: "",
+      },
+    );
+    expect(empty.status).toBe(404);
   });
 
   it("publishes SEO, crawler, and security metadata", async () => {
@@ -56,7 +91,10 @@ describe("HTTP security boundary", () => {
     const sitemap = await app.request("/sitemap.xml", {}, appEnv);
     expect(sitemap.status).toBe(200);
     expect(sitemap.headers.get("content-type")).toContain("application/xml");
-    expect(await sitemap.text()).toContain("<loc>https://mempersist.codifiedtech.id/</loc>");
+    const sitemapBody = await sitemap.text();
+    expect(sitemapBody).toContain("<loc>https://mempersist.codifiedtech.id/</loc>");
+    expect(sitemapBody).toContain("<loc>https://mempersist.codifiedtech.id/privacy</loc>");
+    expect(sitemapBody).toContain("<loc>https://mempersist.codifiedtech.id/terms</loc>");
 
     const security = await app.request("/.well-known/security.txt", {}, appEnv);
     expect(security.status).toBe(200);

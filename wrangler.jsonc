@@ -6,6 +6,7 @@
   "compatibility_flags": ["nodejs_compat", "global_fetch_strictly_public"],
   "vars": {
     "ENVIRONMENT": "production",
+    "OPENAI_APPS_CHALLENGE_TOKEN": "",
     "AUTH_EMAIL_FROM": "noreply@mempersist.codifiedtech.id",
     "LEGACY_AUTH_EMAIL_FROM": "noreply@mempersist.nextostaging.net",
     "ACTIVE_INDEX_GENERATION": "bge-m3-chat-turn-v2",
